@@ -9,7 +9,8 @@ from pathlib import Path
 
 
 def _run(repo: Path, *args) -> str:
-    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
+                       encoding="utf-8")
     if r.returncode != 0:
         raise RuntimeError((r.stderr or r.stdout).strip())
     return r.stdout.strip()
@@ -25,7 +26,7 @@ def commit_all(repo: Path, message: str) -> str | None:
         _run(repo, "add", "-A")
         r = subprocess.run(
             ["git", "-C", str(repo), "commit", "-m", message],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8",
         )
         out = (r.stdout or "") + (r.stderr or "")
         if r.returncode != 0 and "nothing to commit" not in out:

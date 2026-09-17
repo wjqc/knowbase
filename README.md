@@ -9,8 +9,20 @@
 
 ## 环境要求
 
-- macOS / Linux（**Windows 暂不支持**：进程锁用了 POSIX fcntl）
+- macOS / Linux / Windows（Windows 为实验性支持，见下方说明）
 - Python ≥ 3.10、git、[uv](https://docs.astral.sh/uv/)（没有 uv 就用 `python3 -m venv` + pip）
+
+### Windows 安装（PowerShell）
+
+```powershell
+# 前置：Python ≥3.10 与 Git（winget install Python.Python.3.12 Git.Git），uv 官方脚本安装
+uv venv
+uv pip install -e .    # uv 自动识别 .venv，无需激活
+.venv\Scripts\python -m knowbase init
+```
+
+MCP 注册时 command 用 `.venv\Scripts\python.exe` 的完整路径（JSON 里写 `\\`），
+推荐 ZCode 用 `type: "process"`（参数数组，免转义）。钩子同样指向 Scripts 下的 python.exe。
 
 ## 五分钟接入
 
@@ -84,6 +96,6 @@ Claude Code（`~/.claude/settings.json`）与 ZCode（`~/.zcode/cli/config.json`
 
 ## 已知边界（诚实版）
 
-- Windows 未支持（fcntl）；同义改写类查询命中弱（语义检索二期，本地向量方案已备）；
+- Windows 为实验性支持：跨进程锁在 Windows 走 msvcrt 字节范围锁（标准模式，但未在 Windows 真机回归），首次使用建议先跑 `.venv\Scripts\python tests\test_e2e.py` 验证；同义改写类查询命中弱（语义检索二期，本地向量方案已备）；
 - Trae 无 hook，自动化程度低于 Claude Code / ZCode；
 - 记忆库含内部系统经验，**只推内网 GitLab，永不推公网**。
