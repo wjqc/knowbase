@@ -205,13 +205,13 @@ def read_impl(id: str):
 
 
 def search_impl(query: str, type: str | None = None, scope: str | None = None,
-                tag: str | None = None, limit: int = 5):
+                tag: str | None = None, limit: int = 5, include_inactive: bool = False):
     rp, err = _repo()
     if err:
         return err
     conn = index.connect(rp)
-    results = index.search(conn, query, mtype=type, scope=scope, tag=tag, limit=limit)
-    index.record_usage(conn, "search", detail=query)
+    results = index.search(conn, query, mtype=type, scope=scope, tag=tag, limit=limit, include_inactive=include_inactive)
+    index.record_search(conn, query, scope, results)
     conn.close()
     if not results:
         return (f"未命中「{query}」。建议：检索词用 ≥3 字的具体名词/报错关键词，"

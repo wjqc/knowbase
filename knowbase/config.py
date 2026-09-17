@@ -23,7 +23,7 @@ DEFAULTS = {
     },
     "index": {"max_lines": 300},
     "stats": {"enabled": True},
-    "hooks": {"enabled": True, "inject_min_confidence": "any"},
+    "hooks": {"enabled": True, "inject_min_confidence": "verified"},
 }
 
 

@@ -37,6 +37,7 @@ BODY = "## 现象\n现象描述测试。\n## 原因\n原因描述测试。\n## �
 # 准备：初始化 + 存一条记忆
 cli.main(["init"])
 os.environ["KNOWBASE_AGENT_NAME"] = "claude-code"
+config.CONFIG_PATH.write_text(json.dumps({"hooks": {"inject_min_confidence": "any"}}), encoding="utf-8")
 save_impl("pitfall", "EasyConnect 7.6.7 在 macOS 上启动即死锁", BODY,
           tags=["network", "vpn"], source="agent:claude-code:sess_t1")
 save_impl("pitfall", "proj07 场景部署异常排查", BODY,
@@ -101,7 +102,7 @@ parsed = _json.loads(out)
 check("zcode 风格 additionalContext", "additionalContext" in parsed and "P-2026-0001" in parsed["additionalContext"], out[:100])
 
 # 7c. 项目感知：目录名推断 scope → 注入本项目优先且带标注
-proj_dir = TMP / "proj07工作区"; proj_dir.mkdir(exist_ok=True)
+proj_dir = TMP / "proj07"; proj_dir.mkdir(exist_ok=True)
 os.environ["CLAUDE_PROJECT_DIR"] = str(proj_dir)
 out = hooks.user_prompt("部署 出问题了 怎么办")
 check("scope 推断+标注", "scope=" in out and "proj07" in out, out[:150])

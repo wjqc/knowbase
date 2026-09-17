@@ -29,11 +29,14 @@ REPO_README = """# 薪火（knowbase）经验记忆库
 - 检索/读写走 MCP 工具（memory_search / read / save / update / feedback / stats）
 - INDEX.md 为自动生成的速览，勿手改
 - standards/（人员标准）与 preferences/ 只能由人直接写或经 staging/ 提案激活
-- memory.db 为派生索引，可随时 `knowbase reindex` 重建
+- memory.db 包含派生索引与不可重建的本地运行日志，请一起备份；reindex 保留运行日志
 """
 
 
-def cmd_init() -> int:
+def cmd_init(import_from=None, scope=None, dtype="workflow") -> int:
+    if import_from and not scope:
+        print("错误：init --import-from 必须指定 --scope，避免跨项目污染")
+        return 1
     cfg = config.load_config()
     rp = config.repo_path(cfg)
 
@@ -76,7 +79,8 @@ def cmd_init() -> int:
         print("✓ git 仓库已存在（不动）")
 
     # 4. 派生索引 + INDEX.md（全量重建，天然幂等）
-    n = index.rebuild(rp)
+    with RepoLock(rp, 10.0):
+        n = index.rebuild(rp)
     print(f"✓ 索引就绪：{n} 条记忆，INDEX.md 已生成")
 
     # 5. knowledge_path 联动检测：存在则提示，不存在绝不创建
@@ -88,13 +92,16 @@ def cmd_init() -> int:
 
     if new_repo:
         gitops.commit_all(rp, "init: 薪火记忆库初始化")
+    if import_from:
+        return cmd_import(import_from, dtype, scope, True, "human:init-import")
     print("完成。Agent 接入：在各 MCP 配置注册 knowbase serve 即可。")
     return 0
 
 
 def cmd_reindex() -> int:
     rp = config.repo_path()
-    n = index.rebuild(rp)
+    with RepoLock(rp, 10.0):
+        n = index.rebuild(rp)
     print(f"✓ 已全量重建：{n} 条记忆")
     return 0
 
@@ -168,31 +175,48 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
     """批量导入现存 markdown 文档为 once 级记忆（原文即 body，结构可后续 AI 提炼 + memory_update 转正）。"""
     import re as _re
     src_dir = Path(directory).expanduser()
-    if not src_dir.exists():
+    if not src_dir.is_dir():
         print(f"错误：目录不存在 {src_dir}")
         return 1
     rp = config.repo_path()
     cfg = config.load_config()
-    files = [f for f in sorted(src_dir.rglob("*.md")) if ".git" not in f.parts]
+    src_dir = src_dir.resolve()
+    if src_dir == rp.resolve() or rp.resolve() in src_dir.parents or src_dir in rp.resolve().parents:
+        print("错误：导入目录与记忆库不可互相包含")
+        return 1
+    files = [f for f in sorted(src_dir.rglob("*.md"))
+             if not any(part.startswith(".") for part in f.relative_to(src_dir).parts)
+             and not f.is_symlink() and src_dir in f.resolve().parents]
     if not files:
         print("目录中未找到 .md 文件")
         return 1
     imported = skipped = 0
     with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
         conn = index.connect(rp)
+        existing = {(m.get("import_path"), m.get("scope"), m.get("type")): m
+                    for m, _, _ in store.iter_all(rp, include_staging=True)}
         for f in files:
-            body = f.read_text(encoding="utf-8", errors="ignore").strip()
+            import hashlib
+            body = f.read_text(encoding="utf-8").strip()
+            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            prior = existing.get((str(f.resolve()), scope, dtype))
+            if prior:
+                skipped += 1
+                reason = "已导入" if prior.get("import_sha256") == digest else "源文已变化，请复核并更新已有条目"
+                print(f"  跳过（{reason} [{prior['id']}]）：{f.name}")
+                continue
+            if store.SECRET_RE.search(body):
+                skipped += 1
+                print(f"  跳过（疑似明文凭据）：{f.name}")
+                continue
             if not body:
                 skipped += 1
                 continue
             m = _re.search(r"^#\s+(.+)$", body, _re.M)
             title = (m.group(1).strip() if m else f.stem)[:80]
-            sim = store.find_similar(rp, title)
-            if sim:
-                skipped += 1
-                print(f"  跳过（相似 [{sim[1]['id']}] {sim[1].get('title', '')}）：{f.name}")
-                continue
             meta = store.new_meta(dtype, title, scope, ["import", src_dir.name], source)
+            meta["import_path"] = str(f.resolve())
+            meta["import_sha256"] = digest
             meta["id"] = store.alloc_id(rp, dtype)
             target = rp / ("staging" if staging else store.TYPE_DIR[dtype]) / f"{meta['id']}.md"
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -208,7 +232,7 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
         gitops.commit_all(rp, f"import({dtype}): {imported} 条 ← {src_dir.name}（scope={scope}，{'staging' if staging else '直接入库'}）")
     if imported and cfg["git"].get("auto_push"):
         gitops.push(rp, cfg["git"]["remote"].get("url", ""), cfg["git"].get("allowed_remote_prefixes", []))
-    print(f"完成：导入 {imported}，跳过 {skipped}（相似或空文件）")
+    print(f"完成：导入 {imported}，跳过 {skipped}（重复、空文件或被拦截）")
     return 0
 
 
@@ -221,7 +245,15 @@ def cmd_stats() -> int:
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="knowbase", description="薪火：跨 Agent 经验记忆库")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("init", help="初始化/补全（幂等）")
+    p_init = sub.add_parser("init", help="初始化/补全（幂等）")
+    p_init.add_argument("--import-from", help="现存 markdown 目录，导入 staging 待审")
+    p_init.add_argument("--scope", help="明确项目范围；通用资料用 global")
+    p_init.add_argument("--type", choices=store.TYPES, default="workflow")
+    p_dash = sub.add_parser("dashboard", help="生成本地 HTML 知识治理看板")
+    p_dash.add_argument("--output", default="knowbase-dashboard.html")
+    p_dash.add_argument("--open", action="store_true")
+    p_history = sub.add_parser("history", help="查看搜索命中记录 JSON")
+    p_history.add_argument("--limit", type=int, default=100)
     sub.add_parser("reindex", help="全量重建索引")
     p_verify = sub.add_parser("verify", help="人工确认有效")
     p_verify.add_argument("id")
@@ -245,7 +277,22 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.cmd == "init":
-        return cmd_init()
+        return cmd_init(args.import_from, args.scope, args.type)
+    if args.cmd == "dashboard":
+        from .dashboard import generate
+        output = generate(config.repo_path(), Path(args.output).expanduser().resolve())
+        print(f"✓ 看板已生成 {output}")
+        if args.open:
+            import webbrowser
+            webbrowser.open(output.as_uri())
+        return 0
+    if args.cmd == "history":
+        conn = index.connect(config.repo_path())
+        try:
+            print(json.dumps(index.search_history(conn, max(1, min(args.limit, 10000))), ensure_ascii=False, indent=2))
+        finally:
+            conn.close()
+        return 0
     if args.cmd == "reindex":
         return cmd_reindex()
     if args.cmd == "verify":

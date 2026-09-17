@@ -11,7 +11,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import config, index
+from . import config, index, store
 
 MIN_PROMPT_LEN = 6
 MAX_HITS = 3
@@ -54,13 +54,16 @@ def _scored_search(conn, kws: list[str], limit: int, scope: str | None = None) -
     """OR 语义兜底：按命中关键词个数打分（AND 语义对无空格长句必然漏检）。
     带 scope 时硬过滤（本项目+global）并给本项目微加成，防多项目术语碰撞混注。"""
     scored = []
-    for r in conn.execute("SELECT * FROM meta WHERE status != 'archived' AND staging = 0"):
+    for r in conn.execute("SELECT * FROM meta WHERE status = 'active' AND staging = 0"):
         m = index._row_meta(r)
         if scope and m["scope"] not in (scope, "global"):
             continue
         row = conn.execute("SELECT title, tags, body FROM mem_fts WHERE id=?", (m["id"],)).fetchone()
         hay = " ".join(row).lower() if row else ""
         score = float(sum(1 for k in kws if k.lower() in hay))
+        anchors = " ".join(row[:2]).lower() if row else ""
+        if score < 2 and not any(k.lower() in anchors for k in kws):
+            continue
         if score and scope and m["scope"] == scope:
             score += 0.5  # 同分时本项目优先，高分全局经验仍可入围
         if score:
@@ -70,7 +73,7 @@ def _scored_search(conn, kws: list[str], limit: int, scope: str | None = None) -
 
 
 def _infer_scope(conn) -> str | None:
-    """从 hook 环境变量的项目目录推断当前项目 scope（目录名含 scope 名即命中，取最长匹配）。"""
+    """从 hook 环境变量的项目目录推断当前项目 scope（目录名与 scope 精确匹配，未知项目不退化为全库）。"""
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR") or os.environ.get("ZCODE_PROJECT_DIR")
     if not project_dir:
         return None
@@ -79,12 +82,14 @@ def _infer_scope(conn) -> str | None:
         return None
     scopes = [r[0] for r in conn.execute(
         "SELECT DISTINCT scope FROM meta WHERE staging = 0 AND scope != 'global'")]
-    matches = [s for s in scopes if s and s.lower() in name]
-    return max(matches, key=len) if matches else None
+    matches = [s for s in scopes if s and s.lower() == name]
+    return max(matches, key=len) if matches else name
 
 
 def user_prompt(prompt: str) -> str:
     """对用户输入做本地检索（自动推断当前项目 scope），命中则返回注入文本。"""
+    if not config.load_config().get("hooks", {}).get("enabled", True):
+        return ""
     prompt = (prompt or "").strip()
     if len(prompt) < MIN_PROMPT_LEN:
         return ""
@@ -95,20 +100,23 @@ def user_prompt(prompt: str) -> str:
     if not kws:
         return ""
     conn = index.connect(rp)
-    scope = _infer_scope(conn)
+    scope = _infer_scope(conn) or "global"
     ascii_kws = [k for k in kws if k[0].isascii()]
-    hits = index.search(conn, " ".join(ascii_kws), scope=scope, limit=MAX_HITS) if ascii_kws else []
+    hits = index.search(conn, " ".join(ascii_kws), scope=scope, limit=100) if ascii_kws else []
     if not hits:
-        hits = _scored_search(conn, kws, MAX_HITS, scope=scope)
-    min_conf = (config.load_config().get("hooks", {}) or {}).get("inject_min_confidence", "any")
+        hits = _scored_search(conn, kws, 100, scope=scope)
+    min_conf = (config.load_config().get("hooks", {}) or {}).get("inject_min_confidence", "verified")
     if min_conf == "verified":
         hits = [h for h in hits if h.get("confidence") == "verified"]  # 防污染开关：自动注入只取已验证经验
-    if hits:
-        index.record_usage(conn, "auto_search", detail=f"{prompt[:60]} scope={scope or '-'}")
+    # 矛盾知识只供主动调查，不自动建议采用。
+    hits = [h for h in hits if not any(r.get("type") == "contradicts"
+            for r in (store.load(rp, h["id"])[0] or {}).get("relations", []))]
+    hits = hits[:MAX_HITS]
+    index.record_search(conn, prompt, scope, hits, tool="auto_search")
     conn.close()
     if not hits:
         return ""
-    lines = ["[knowbase 自动检索] 以下历史经验与当前任务相关，动手前先 memory_read 对应条目："]
+    lines = ["[knowbase 自动检索] 以下为词法匹配候选，尚未确认适用；先核对项目、版本与证据，再按需 memory_read："]
     for h in hits:
         lines.append(f"- [{h['id']}] {h['title']}（{h['confidence']}·{h['status']} · scope={h['scope']}）")
     return "\n".join(lines)

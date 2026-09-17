@@ -1,6 +1,6 @@
 """派生索引层：SQLite FTS5（trigram）+ 统计 + INDEX.md。
 
-全部数据可由 markdown 全量重建（knowbase reindex），损坏即重建。
+知识索引可由 markdown 重建；运行日志与读取统计不可重建，须备份 memory.db。
 hit_count 属运行统计，只存本库不入 frontmatter（避免读操作产生 git 提交）。
 """
 
@@ -44,7 +44,7 @@ def connect(repo: Path) -> sqlite3.Connection:
 
 # ---------- 写入与重建 ----------
 
-def upsert(conn: sqlite3.Connection, meta: dict, body: str, path: Path, staging: bool = False):
+def upsert(conn: sqlite3.Connection, meta: dict, body: str, path: Path, staging: bool = False, commit: bool = True):
     conn.execute("DELETE FROM mem_fts WHERE id=?", (meta["id"],))
     conn.execute(
         "INSERT INTO mem_fts(id, title, tags, body) VALUES(?,?,?,?)",
@@ -66,22 +66,30 @@ def upsert(conn: sqlite3.Connection, meta: dict, body: str, path: Path, staging:
          meta.get("updated", ""), int(meta.get("helpful_count", 0)),
          int(meta.get("unhelpful_count", 0)), meta["id"], str(path), int(staging)),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def rebuild(repo: Path) -> int:
     """全量重建（markdown → db + INDEX.md）。返回记忆条数。"""
     repo = Path(repo)
-    for suffix in ("", "-wal", "-shm"):
-        p = db_path(repo).with_name(DB_NAME + suffix)
-        if p.exists():
-            p.unlink()
     conn = connect(repo)
-    n = 0
-    for meta, body, path in store.iter_all(repo, include_staging=True):
-        upsert(conn, meta, body, path, staging=("staging" in str(path)))
-        n += 1
-    conn.close()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        old_hits = dict(conn.execute("SELECT id, hit_count FROM meta"))
+        conn.execute("DELETE FROM mem_fts")
+        conn.execute("DELETE FROM meta")
+        n = 0
+        for meta, body, path in store.iter_all(repo, include_staging=True):
+            upsert(conn, meta, body, path, staging=(path.parent.name == "staging"), commit=False)
+            conn.execute("UPDATE meta SET hit_count=? WHERE id=?", (old_hits.get(meta["id"], 0), meta["id"]))
+            n += 1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     build_index_md(repo)
     return n
 
@@ -132,7 +140,7 @@ def _match_ids(conn: sqlite3.Connection, terms: list[str]) -> dict[str, float] |
     match = " AND ".join(f'"{t}"' for t in big)
     try:
         rows = conn.execute(
-            "SELECT id, rank FROM mem_fts WHERE mem_fts MATCH ? ORDER BY rank LIMIT 200",
+            "SELECT id, rank FROM mem_fts WHERE mem_fts MATCH ? ORDER BY rank",
             (match,),
         ).fetchall()
     except sqlite3.OperationalError:
@@ -142,14 +150,15 @@ def _match_ids(conn: sqlite3.Connection, terms: list[str]) -> dict[str, float] |
 
 def _like_ids(conn: sqlite3.Connection, terms: list[str]) -> dict[str, float]:
     """短词 / MATCH 未命中的回退：LIKE 扫描。"""
-    conds = " AND ".join(["(title LIKE ? OR tags LIKE ? OR body LIKE ?)"] * len(terms))
-    params = [f"%{t}%" for t in terms for _ in range(3)]
+    conds = " AND ".join(["(instr(lower(title), lower(?)) > 0 OR instr(lower(tags), lower(?)) > 0 OR instr(lower(body), lower(?)) > 0)"] * len(terms))
+    params = [t for t in terms for _ in range(3)]
     rows = conn.execute(f"SELECT id FROM mem_fts WHERE {conds}", params).fetchall()
     return {r[0]: 1.0 for r in rows}
 
 
 def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
-           scope: str | None = None, tag: str | None = None, limit: int = 5) -> list[dict]:
+           scope: str | None = None, tag: str | None = None, limit: int = 5,
+           include_inactive: bool = False) -> list[dict]:
     """排序 = 词法相关度 × scope × confidence × 新鲜度 × 反馈。"""
     terms = [t for t in (query or "").split() if t]
     if not terms:
@@ -168,6 +177,8 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
     results = []
     for r in conn.execute("SELECT * FROM meta WHERE status != 'archived'"):
         m = _row_meta(r)
+        if not include_inactive and (m["staging"] or m["status"] != "active"):
+            continue
         if m["id"] not in lex:
             continue
         if mtype and m["type"] != mtype:
@@ -196,7 +207,7 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
         results.append({**m, "score": round(score, 4), "snippet": snippet})
 
     results.sort(key=lambda x: -x["score"])
-    return results[:limit]
+    return results[:max(0, min(limit, 100))]
 
 
 # ---------- 统计与日志 ----------
@@ -318,4 +329,28 @@ def build_index_md(repo: Path, cfg: dict | None = None) -> Path:
 
     out = repo / "INDEX.md"
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out
+
+
+def record_search(conn, query, scope, results, tool="search"):
+    """一条事件保存整次查询及最终返回列表，包括零命中；分数不是概率。"""
+    from uuid import uuid4
+    payload = {"search_id": str(uuid4()), "query": query, "scope": scope,
+               "hits": [{"id": h["id"], "title": h["title"], "rank": i + 1,
+                         "score": h["score"], "confidence": h["confidence"],
+                         "status": h["status"]} for i, h in enumerate(results)]}
+    record_usage(conn, tool, detail=json.dumps(payload, ensure_ascii=False))
+
+
+def search_history(conn, limit=100):
+    rows = conn.execute("SELECT ts, agent, tool, detail FROM usage_log WHERE tool IN ('search','auto_search') ORDER BY rowid DESC LIMIT ?", (limit,))
+    out = []
+    for ts, agent, tool, detail in rows:
+        try:
+            event = json.loads(detail)
+            if not isinstance(event, dict):
+                raise ValueError()
+        except (ValueError, TypeError):
+            event = {"query": detail, "hits": None}
+        out.append({**event, "ts": ts, "agent": agent, "tool": tool})
     return out

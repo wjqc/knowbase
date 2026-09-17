@@ -34,6 +34,8 @@ def check(name, cond, detail=""):
 # 准备：初始化 + 存量文档目录
 cli.main(["init"])
 os.environ["KNOWBASE_AGENT_NAME"] = "claude-code"
+os.environ["CLAUDE_PROJECT_DIR"] = "/tmp/projx"
+CFG.write_text(json.dumps({"hooks": {"inject_min_confidence": "any"}}), encoding="utf-8")
 SRC = TMP / "存量文档"
 SRC.mkdir()
 (SRC / "数据库连接池耗尽排查.md").write_text(
@@ -70,7 +72,7 @@ check("重复导入全跳过", rc2 == 0 and "导入 0，跳过 3" in buf.getvalu
 
 # 4. 注入置信度开关：默认 any（once 可注入）→ 收紧 verified（once 被挡）→ verify 后恢复
 out_any = hooks.user_prompt("数据库连接池 耗尽 排查")
-check("默认 any 放行 once", out_any != "")
+check("显式 any 放行 once", out_any != "")
 CFG.write_text(json.dumps({"hooks": {"enabled": True, "inject_min_confidence": "verified"}}),
                encoding="utf-8")
 out_strict = hooks.user_prompt("数据库连接池 耗尽 排查")

@@ -10,16 +10,18 @@ from pathlib import Path
 
 import yaml
 
-TYPES = ("pitfall", "standard", "decision", "workflow", "preference")
+TYPES = ("pitfall", "standard", "decision", "workflow", "preference", "reference")
 TYPE_DIR = {
     "pitfall": "pitfalls",
     "standard": "standards",
     "decision": "decisions",
     "workflow": "workflows",
     "preference": "preferences",
+    "reference": "references",
 }
-PREFIX = {"pitfall": "P", "standard": "S", "decision": "D", "workflow": "W", "preference": "PR"}
-ALL_DIRS = ("standards", "pitfalls", "decisions", "workflows", "preferences", "staging")
+PREFIX = {"pitfall": "P", "standard": "S", "decision": "D", "workflow": "W", "preference": "PR",
+          "reference": "R"}
+ALL_DIRS = ("standards", "pitfalls", "decisions", "workflows", "preferences", "references", "staging")
 DIR_TYPE = {v: k for k, v in TYPE_DIR.items()}
 
 # 各类型必填小节（body 的 ## 标题需包含这些词）
@@ -109,8 +111,8 @@ def alloc_id(repo: Path, dtype: str, year: int | None = None) -> str:
     d = Path(repo) / TYPE_DIR[dtype]
     seq = 0
     pat = re.compile(rf"^{PREFIX[dtype]}-{year}-(\d+)\.md$")
-    if d.exists():
-        for f in d.iterdir():
+    for directory in (d, Path(repo) / "staging"):
+        for f in directory.glob("*.md"):
             m = pat.match(f.name)
             if m:
                 seq = max(seq, int(m.group(1)))

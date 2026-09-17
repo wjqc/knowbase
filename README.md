@@ -1,6 +1,6 @@
 # knowbase（薪火）
 
-跨 Agent 共享的经验记忆库 MCP 服务：踩坑 / 决策 / 流程 / 偏好沉淀为一个本地 git 知识库，
+跨 Agent 共享的经验记忆库 MCP 服务：踩坑 / 决策 / 流程 / 偏好 / 项目参考文档沉淀为一个本地 git 知识库，
 供本机所有 AI Agent 检索复用。**一个人的坑，所有 Agent 的经验。**
 
 - 存储：markdown + frontmatter（唯一真相）+ git 审计 + SQLite FTS5 派生索引（可重建）
@@ -101,7 +101,7 @@ Claude Code（`~/.claude/settings.json`）与 ZCode（`~/.zcode/cli/config.json`
 ```
 
 `"verified"` 时任务前自动注入只取已验证经验（once 的新经验仍可被主动 search 检索到），
-默认 `"any"` 保持全部注入。MCP 主动检索不受此开关影响。
+默认 `"verified"`；已有配置显式 `"any"` 会保留兼容行为。MCP 主动检索不受置信度开关影响，但默认排除 staging/stale。
 
 ## 人工治理（CLI）
 
@@ -118,3 +118,24 @@ Claude Code（`~/.claude/settings.json`）与 ZCode（`~/.zcode/cli/config.json`
 - Windows 为实验性支持：跨进程锁在 Windows 走 msvcrt 字节范围锁（标准模式，但未在 Windows 真机回归），首次使用建议先跑 `.venv\Scripts\python tests\test_e2e.py` 验证；同义改写类查询命中弱（语义检索二期，本地向量方案已备）；
 - Trae 无 hook，自动化程度低于 Claude Code / ZCode；
 - 记忆库含内部系统经验，**只推内网 GitLab，永不推公网**。
+
+
+## 初始化导入、检索记录与治理看板
+
+```bash
+knowbase init --import-from /path/to/project-docs --scope 项目名 --type workflow
+knowbase history --limit 100
+knowbase dashboard --open
+# 指定输出位置
+knowbase dashboard --output /path/to/dashboard.html
+```
+
+未把虚拟环境加入 PATH 时，将 `knowbase` 替换为 `.venv/bin/python -m knowbase`。
+
+- `init --import-from` 要求明确 scope（通用资料填 global），全部进入 staging；先 `promote ID` 人审激活，再 `verify ID` 确认有效。普通 init 仍为空库初始化，不扫描外部目录。
+- 导入保留完整原文、源文件绝对路径和 SHA-256；按来源路径、scope、类型幂等。源内容变化时提示复核已有条目，不自动覆盖；当前只支持 Markdown，不自动提炼、分块或判断原文正确性。按项目分别导入，不把混合项目目录全部归为 global。
+- 默认 MCP 检索仅 active 且非 staging；调查旧知识可显式传 `include_inactive=true`（仍排除 archived）。自动 hook 默认只提示 verified、active、非 staging、无 contradicts 关系的候选；项目目录名与 scope 精确对应，无目录只查 global，未知目录只查该目录名与 global。
+- Hook 单词兜底要求命中标题/标签，或至少两个关键词命中正文；输出明确为候选，需检查适用项目、版本、证据和验证日期。词法分数不是正确率，verified 也不保证永远正确。
+- 每次 MCP/Hook 搜索记录查询、scope、Agent、时间、返回 ID/顺序/分数/状态，包括零命中。旧记录缺少的命中明细无法追溯补齐。`stats.enabled=false` 关闭使用日志。
+- 看板支持项目、标题搜索、有效反馈排行、疑似问题、staging 待审核、once 未验证及搜索明细。有效反馈数量不等于唯一任务数；负反馈/失效/矛盾属于复核线索，不自动判错。页面为静态快照，重新运行命令刷新。
+- `init/reindex` 保留读取统计、usage_log、feedback_log。这些日志不是 Markdown 派生态；删除数据库或仅克隆 Markdown 仓库无法恢复，备份需包含 memory.db（SQLite 一致性备份）。看板包含本地查询和来源信息，不自动发布到网络。
