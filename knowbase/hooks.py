@@ -100,6 +100,9 @@ def user_prompt(prompt: str) -> str:
     hits = index.search(conn, " ".join(ascii_kws), scope=scope, limit=MAX_HITS) if ascii_kws else []
     if not hits:
         hits = _scored_search(conn, kws, MAX_HITS, scope=scope)
+    min_conf = (config.load_config().get("hooks", {}) or {}).get("inject_min_confidence", "any")
+    if min_conf == "verified":
+        hits = [h for h in hits if h.get("confidence") == "verified"]  # 防污染开关：自动注入只取已验证经验
     if hits:
         index.record_usage(conn, "auto_search", detail=f"{prompt[:60]} scope={scope or '-'}")
     conn.close()

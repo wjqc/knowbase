@@ -84,6 +84,25 @@ Claude Code（`~/.claude/settings.json`）与 ZCode（`~/.zcode/cli/config.json`
 5. 标准/偏好类保存会自动进 staging 待人审，属正常治理，勿绕过；
 6. body 里禁止明文密钥（lint 会拦）。
 
+## 存量知识入库与防污染开关
+
+```bash
+# 把现存 markdown 文档批量导入为 once 级记忆（原文即正文，标题取 # 一级标题或文件名）
+.venv/bin/python -m knowbase import <文档目录> --type pitfall --scope 项目名
+.venv/bin/python -m knowbase import <文档目录> --type standard --staging   # 走人审路径
+```
+
+导入后建议让 AI 逐条 `memory_update` 提炼成标准结构（现象/原因/正确做法），`verify` 转正。
+
+防污染开关（`~/.knowbase/config.json` → hooks）：
+
+```json
+"hooks": { "enabled": true, "inject_min_confidence": "verified" }
+```
+
+`"verified"` 时任务前自动注入只取已验证经验（once 的新经验仍可被主动 search 检索到），
+默认 `"any"` 保持全部注入。MCP 主动检索不受此开关影响。
+
 ## 人工治理（CLI）
 
 ```bash

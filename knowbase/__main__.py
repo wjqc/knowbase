@@ -164,6 +164,54 @@ def cmd_list(dtype: str | None) -> int:
     return 0
 
 
+def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: str) -> int:
+    """批量导入现存 markdown 文档为 once 级记忆（原文即 body，结构可后续 AI 提炼 + memory_update 转正）。"""
+    import re as _re
+    src_dir = Path(directory).expanduser()
+    if not src_dir.exists():
+        print(f"错误：目录不存在 {src_dir}")
+        return 1
+    rp = config.repo_path()
+    cfg = config.load_config()
+    files = [f for f in sorted(src_dir.rglob("*.md")) if ".git" not in f.parts]
+    if not files:
+        print("目录中未找到 .md 文件")
+        return 1
+    imported = skipped = 0
+    with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
+        conn = index.connect(rp)
+        for f in files:
+            body = f.read_text(encoding="utf-8", errors="ignore").strip()
+            if not body:
+                skipped += 1
+                continue
+            m = _re.search(r"^#\s+(.+)$", body, _re.M)
+            title = (m.group(1).strip() if m else f.stem)[:80]
+            sim = store.find_similar(rp, title)
+            if sim:
+                skipped += 1
+                print(f"  跳过（相似 [{sim[1]['id']}] {sim[1].get('title', '')}）：{f.name}")
+                continue
+            meta = store.new_meta(dtype, title, scope, ["import", src_dir.name], source)
+            meta["id"] = store.alloc_id(rp, dtype)
+            target = rp / ("staging" if staging else store.TYPE_DIR[dtype]) / f"{meta['id']}.md"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(store.render(meta, body), encoding="utf-8")
+            index.upsert(conn, meta, body, target, staging)
+            imported += 1
+            print(f"  {meta['id']}  {title[:44]}")
+        if imported:
+            index.record_usage(conn, "import", detail=f"{imported} from {src_dir.name}")
+        conn.close()
+    index.build_index_md(rp, cfg)
+    if imported and cfg["git"].get("auto_commit", True):
+        gitops.commit_all(rp, f"import({dtype}): {imported} 条 ← {src_dir.name}（scope={scope}，{'staging' if staging else '直接入库'}）")
+    if imported and cfg["git"].get("auto_push"):
+        gitops.push(rp, cfg["git"]["remote"].get("url", ""), cfg["git"].get("allowed_remote_prefixes", []))
+    print(f"完成：导入 {imported}，跳过 {skipped}（相似或空文件）")
+    return 0
+
+
 def cmd_stats() -> int:
     from .server import stats_impl
     print(stats_impl())
@@ -187,6 +235,12 @@ def main(argv=None):
     p_hook = sub.add_parser("hook", help="Agent hook 入口")
     p_hook.add_argument("event", choices=["session-start", "user-prompt", "stop"])
     p_hook.add_argument("--style", choices=["claude", "zcode"], default="claude")
+    p_imp = sub.add_parser("import", help="批量导入现存 markdown 文档为 once 级记忆")
+    p_imp.add_argument("directory")
+    p_imp.add_argument("--type", choices=store.TYPES, default="pitfall")
+    p_imp.add_argument("--scope", default="global")
+    p_imp.add_argument("--source", default="human:import")
+    p_imp.add_argument("--staging", action="store_true", help="导入到 staging 待人审")
     sub.add_parser("serve", help="启动 MCP 服务（stdio）")
     args = parser.parse_args(argv)
 
@@ -204,6 +258,8 @@ def main(argv=None):
         return cmd_list(args.type)
     if args.cmd == "stats":
         return cmd_stats()
+    if args.cmd == "import":
+        return cmd_import(args.directory, args.type, args.scope, args.staging, args.source)
     if args.cmd == "hook":
         from . import hooks
         {"session-start": hooks.cmd_session_start,
