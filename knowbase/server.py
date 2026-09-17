@@ -5,6 +5,7 @@ confidence/status 是服务端状态机的输出，任何工具的入参都不�
 """
 
 from datetime import date
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
@@ -192,6 +193,15 @@ def read_impl(id: str):
     if err:
         return err
     meta, body, path = store.load(rp, id)
+    if not meta:
+        # 兼容兜底：旧服务进程的目录扫描范围可能不含新增类型目录，
+        # 此时按索引记录的实际路径读取（索引由写入方实时更新）。
+        conn = index.connect(rp)
+        row = conn.execute("SELECT path FROM meta WHERE id=?", (id,)).fetchone()
+        conn.close()
+        if row and Path(row[0]).exists():
+            meta, body = store.parse(Path(row[0]))
+            path = Path(row[0])
     if not meta:
         return f"错误：未找到 {id}"
     conn = index.connect(rp)
