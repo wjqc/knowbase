@@ -19,7 +19,7 @@ DEFAULTS = {
         "auto_commit": True,
         "auto_push": False,
         "remote": {"url": ""},
-        "allowed_remote_prefixes": ["http://10.21.20.112/"],
+        "allowed_remote_prefixes": ["http://10.21.20.112/", "http://10.21.20.112:18084/"],
     },
     "index": {"max_lines": 300},
     "stats": {"enabled": True},
