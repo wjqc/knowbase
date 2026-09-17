@@ -90,6 +90,14 @@ p = subprocess.run(
     capture_output=True, text=True)
 check("CLI hook 入口", "P-2026-0001" in p.stdout, p.stdout[:80] + p.stderr[:80])
 
+# 7b. zcode 风格输出：严格 JSON additionalContext
+import json as _json
+out = subprocess.run(
+    [".venv/bin/python", "-m", "knowbase", "hook", "user-prompt", "--style", "zcode"],
+    input=_json.dumps({"prompt": "vpn 内网连接问题"}), capture_output=True, text=True).stdout
+parsed = _json.loads(out)
+check("zcode 风格 additionalContext", "additionalContext" in parsed and "P-2026-0001" in parsed["additionalContext"], out[:100])
+
 # 8. auto_search 计入统计
 conn = config.repo_path()
 from knowbase import index  # noqa: E402

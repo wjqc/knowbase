@@ -149,20 +149,38 @@ def _read_stdin() -> dict:
         return {}
 
 
-def cmd_session_start():
-    print(session_start())
+def _first(d: dict, *keys) -> str:
+    for k in keys:
+        if d.get(k):
+            return str(d[k])
+    return ""
 
 
-def cmd_user_prompt():
+def cmd_session_start(style: str = "claude"):
+    _emit(session_start(), style)
+
+
+def cmd_user_prompt(style: str = "claude"):
     data = _read_stdin()
-    out = user_prompt(str(data.get("prompt", "")))
-    if out:
-        print(out)
+    prompt = _first(data, "prompt", "prompt_text", "user_prompt", "input")
+    _emit(user_prompt(prompt), style)
 
 
-def cmd_stop():
+def cmd_stop(style: str = "claude"):
     data = _read_stdin()
-    out = stop_event(str(data.get("session_id", "unknown")),
-                     str(data.get("transcript_path", "")))
+    sid = _first(data, "session_id", "sessionId") \
+        or os.environ.get("CLAUDE_SESSION_ID") or os.environ.get("ZCODE_SESSION_ID") or "unknown"
+    tp = _first(data, "transcript_path", "transcript", "transcriptPath")
+    out = stop_event(sid, tp)
     if out:
-        print(out)
+        print(out)  # 顶层 decision/reason：claude 与 zcode 同形
+
+
+def _emit(text: str, style: str):
+    """claude 风格=纯文本注入；zcode 风格=严格 JSON {"additionalContext": ...}。"""
+    if not text:
+        return
+    if style == "zcode":
+        print(json.dumps({"additionalContext": text}, ensure_ascii=False))
+    else:
+        print(text)

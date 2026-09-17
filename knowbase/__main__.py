@@ -184,8 +184,9 @@ def main(argv=None):
     p_list = sub.add_parser("list", help="列出记忆")
     p_list.add_argument("type", nargs="?", choices=store.TYPES)
     sub.add_parser("stats", help="统计")
-    p_hook = sub.add_parser("hook", help="Claude Code hook 入口")
+    p_hook = sub.add_parser("hook", help="Agent hook 入口")
     p_hook.add_argument("event", choices=["session-start", "user-prompt", "stop"])
+    p_hook.add_argument("--style", choices=["claude", "zcode"], default="claude")
     sub.add_parser("serve", help="启动 MCP 服务（stdio）")
     args = parser.parse_args(argv)
 
@@ -207,7 +208,7 @@ def main(argv=None):
         from . import hooks
         {"session-start": hooks.cmd_session_start,
          "user-prompt": hooks.cmd_user_prompt,
-         "stop": hooks.cmd_stop}[args.event]()
+         "stop": hooks.cmd_stop}[args.event](style=args.style)
         return 0
     if args.cmd == "serve":
         from .server import main as serve
