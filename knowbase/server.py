@@ -87,7 +87,9 @@ def _relation_side_effects(rp, meta):
 
 def save_impl(type: str, title: str, body: str, tags: list | None = None,
               scope: str = "global", relations: list | None = None,
-              evidence: list | None = None, source: str | None = None):
+              evidence: list | None = None, source: str | None = None,
+              provenance: str | None = None, domain: str | None = None,
+              rule_status: str | None = None):
     rp, err = _repo()
     if err:
         return err
@@ -97,6 +99,12 @@ def save_impl(type: str, title: str, body: str, tags: list | None = None,
         return "错误：title 与 body 必填"
     src = source or f"agent:{config.agent_name()}:adhoc"
     meta = store.new_meta(type, title, scope, tags or [], src, relations, evidence)
+    if provenance:
+        meta["provenance"] = provenance
+    if domain:
+        meta["domain"] = domain
+    if rule_status:
+        meta["rule_status"] = rule_status
     meta["id"] = "(待分配)"
 
     errs = store.lint(meta, body)
@@ -112,7 +120,7 @@ def save_impl(type: str, title: str, body: str, tags: list | None = None,
                 f"若为取代旧经验，请在 relations 中声明 {{id: {smeta['id']}, type: supersedes}} 后重试。")
 
     cfg = _cfg()
-    staging = type in ("standard", "preference") and not src.startswith("human")
+    staging = type in ("standard", "preference", "bizrule") and not src.startswith("human")
     with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
         mid = store.alloc_id(rp, type)
         meta["id"] = mid

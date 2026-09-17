@@ -217,6 +217,9 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
             meta = store.new_meta(dtype, title, scope, ["import", src_dir.name], source)
             meta["import_path"] = str(f.resolve())
             meta["import_sha256"] = digest
+            if dtype == "bizrule":
+                staging = True  # 业务规则强制人审：无出处的规则是危险品
+                meta["provenance"] = f"待补出处（导入自 {src_dir.name}/{f.name}）"
             meta["id"] = store.alloc_id(rp, dtype)
             target = rp / ("staging" if staging else store.TYPE_DIR[dtype]) / f"{meta['id']}.md"
             target.parent.mkdir(parents=True, exist_ok=True)

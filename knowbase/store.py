@@ -10,7 +10,7 @@ from pathlib import Path
 
 import yaml
 
-TYPES = ("pitfall", "standard", "decision", "workflow", "preference", "reference")
+TYPES = ("pitfall", "standard", "decision", "workflow", "preference", "reference", "bizrule")
 TYPE_DIR = {
     "pitfall": "pitfalls",
     "standard": "standards",
@@ -18,10 +18,11 @@ TYPE_DIR = {
     "workflow": "workflows",
     "preference": "preferences",
     "reference": "references",
+    "bizrule": "bizrules",
 }
 PREFIX = {"pitfall": "P", "standard": "S", "decision": "D", "workflow": "W", "preference": "PR",
-          "reference": "R"}
-ALL_DIRS = ("standards", "pitfalls", "decisions", "workflows", "preferences", "references", "staging")
+          "reference": "R", "bizrule": "B"}
+ALL_DIRS = ("standards", "pitfalls", "decisions", "workflows", "preferences", "references", "bizrules", "staging")
 DIR_TYPE = {v: k for k, v in TYPE_DIR.items()}
 
 # 各类型必填小节（body 的 ## 标题需包含这些词）
@@ -31,6 +32,7 @@ REQUIRED_SECTIONS = {
     "decision": ["背景", "决策"],
     "workflow": ["步骤"],
     "preference": ["规则"],
+    "bizrule": ["规则"],
 }
 RELATION_TYPES = ("related", "supersedes", "contradicts", "derived_from")
 SOURCE_RE = re.compile(r"^agent:[\w.\-]+:[\w.\-]+$|^human:.+$")
@@ -164,6 +166,8 @@ def lint(meta: dict, body: str) -> list[str]:
     for sec in REQUIRED_SECTIONS.get(t, []):
         if not any(sec in h for h in heads):
             errs.append(f"缺少必填小节: {sec}")
+    if t == "bizrule" and not str(meta.get("provenance", "")).strip():
+        errs.append("业务规则必须带出处 provenance（PRD 编号/条款/业务方确认记录），无出处的规则不入库")
     if SECRET_RE.search(body or ""):
         errs.append("body 疑似包含明文密钥(password/token 等)，请脱敏后再存")
     return errs

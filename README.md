@@ -1,6 +1,6 @@
 # knowbase（薪火）
 
-跨 Agent 共享的经验记忆库 MCP 服务：踩坑 / 决策 / 流程 / 偏好 / 项目参考文档沉淀为一个本地 git 知识库，
+跨 Agent 共享的经验记忆库 MCP 服务：踩坑 / 决策 / 流程 / 偏好 / 业务规则 / 项目参考文档沉淀为一个本地 git 知识库，
 供本机所有 AI Agent 检索复用。**一个人的坑，所有 Agent 的经验。**
 
 - 存储：markdown + frontmatter（唯一真相）+ git 审计 + SQLite FTS5 派生索引（可重建）
