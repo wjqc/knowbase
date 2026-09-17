@@ -241,6 +241,7 @@ def stats(conn: sqlite3.Connection) -> dict:
         "read": conn.execute("SELECT COUNT(*) FROM usage_log WHERE tool='read'").fetchone()[0],
         "save": conn.execute("SELECT COUNT(*) FROM usage_log WHERE tool='save'").fetchone()[0],
         "feedback": conn.execute("SELECT COUNT(*) FROM usage_log WHERE tool='feedback'").fetchone()[0],
+        "auto_search": conn.execute("SELECT COUNT(*) FROM usage_log WHERE tool='auto_search'").fetchone()[0],
         "feedback_helpful": conn.execute(
             "SELECT COUNT(*) FROM feedback_log WHERE outcome='helpful'").fetchone()[0],
     }

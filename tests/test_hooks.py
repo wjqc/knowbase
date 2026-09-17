@@ -1,0 +1,101 @@
+"""Hook 集成测试：自动检索注入 / 漏存阻断一次性 / 规则注入。
+
+运行：.venv/bin/python tests/test_hooks.py
+"""
+
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+TMP = Path(tempfile.mkdtemp(prefix="knowbase-hooks-"))
+os.environ["KNOWBASE_REPO_PATH"] = str(TMP / "repo")
+os.environ["KNOWBASE_CONFIG"] = str(TMP / "no-config.json")
+os.environ["KNOWBASE_HOOK_STATE"] = str(TMP)
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from knowbase import __main__ as cli  # noqa: E402
+from knowbase import config, hooks  # noqa: E402
+from knowbase.server import save_impl  # noqa: E402
+
+PASS = 0
+
+
+def check(name, cond, detail=""):
+    global PASS
+    if not cond:
+        print(f"❌ {name}  {detail}")
+        sys.exit(1)
+    PASS += 1
+    print(f"✓ {name}")
+
+
+BODY = "## 现象\n现象描述测试。\n## 原因\n原因描述测试。\n## 正确做法\n做法描述测试。\n"
+
+# 准备：初始化 + 存一条记忆
+cli.main(["init"])
+os.environ["KNOWBASE_AGENT_NAME"] = "claude-code"
+save_impl("pitfall", "EasyConnect 7.6.7 在 macOS 上启动即死锁", BODY,
+          tags=["network", "vpn"], source="agent:claude-code:sess_t1")
+
+# 1. 规则注入
+text = hooks.session_start()
+check("session-start 注入规则", "memory_search" in text and "memory_feedback" in text)
+
+# 2. 自动检索：相关提示词命中
+out = hooks.user_prompt("帮我看看内网 vpn 连不上的问题")
+check("user-prompt 命中注入", "P-2026-0001" in out and "knowbase 自动检索" in out, out[:80])
+
+# 3. 自动检索：无关/过短提示词静默
+check("user-prompt 短输入静默", hooks.user_prompt("你好") == "")
+check("user-prompt 无命中静默", hooks.user_prompt("今天天气真不错啊朋友们") == "")
+
+# 4. 漏存阻断：有实质操作、无记忆操作 → 阻断一次
+tr = TMP / "transcript.jsonl"
+tr.write_text("\n".join([
+    json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Edit", "input": {}}]}}),
+    json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Bash", "input": {}}]}}),
+]), encoding="utf-8")
+out1 = hooks.stop_event("sess-A", str(tr))
+out2 = hooks.stop_event("sess-A", str(tr))
+r1 = json.loads(out1)
+check("stop 首次阻断", r1["decision"] == "block" and "memory_save" in r1["reason"])
+check("stop 二次放行", out2 == "")
+
+# 5. 已沉淀会话 → 不阻断
+tr2 = TMP / "transcript2.jsonl"
+tr2.write_text("\n".join([
+    json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Edit", "input": {}}]}}),
+    json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "memory_save", "input": {}}]}}),
+]), encoding="utf-8")
+check("stop 已沉淀放行", hooks.stop_event("sess-B", str(tr2)) == "")
+
+# 6. 无实质操作 → 不阻断
+tr3 = TMP / "transcript3.jsonl"
+tr3.write_text(json.dumps({"type": "assistant", "message": {"content": [
+    {"type": "text", "text": "只是聊天"}]}}), encoding="utf-8")
+check("stop 无操作放行", hooks.stop_event("sess-C", str(tr3)) == "")
+
+# 7. CLI 入口（管道模拟 stdin）
+import subprocess
+p = subprocess.run(
+    [".venv/bin/python", "-m", "knowbase", "hook", "user-prompt"],
+    input=json.dumps({"prompt": "vpn 内网连接问题"}),
+    capture_output=True, text=True)
+check("CLI hook 入口", "P-2026-0001" in p.stdout, p.stdout[:80] + p.stderr[:80])
+
+# 8. auto_search 计入统计
+conn = config.repo_path()
+from knowbase import index  # noqa: E402
+c = index.connect(conn)
+s = index.stats(c)
+c.close()
+check("auto_search 计入漏斗", s["funnel"]["auto_search"] >= 2, str(s["funnel"]))
+
+print(f"\n全部 {PASS} 项断言通过 ✅  {TMP}")
