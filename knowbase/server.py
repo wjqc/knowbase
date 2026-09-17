@@ -51,9 +51,12 @@ def _post_save(rp, cfg, meta, body, path, staging, commit_msg):
     return git_warn, push_warn
 
 
-def _relation_side_effects(rp, meta) -> list[str]:
-    """supersedes：被取代条目自动标 stale 候选；contradicts：返回提示。"""
-    notes = []
+def _relation_side_effects(rp, meta):
+    """supersedes：被取代条目自动标 stale；
+    contradicts：被矛盾方 relations 自动回指形成双向标记（状态不动，由人裁决）。
+    返回 (notes, modified)：modified 为被改动的目标记忆，调用方须同步索引。"""
+    notes, modified = [], []
+    today = date.today().isoformat()
     for r in meta.get("relations") or []:
         rid, rtype = r.get("id"), r.get("type")
         if not rid or rid == meta["id"]:
@@ -64,12 +67,19 @@ def _relation_side_effects(rp, meta) -> list[str]:
             continue
         if rtype == "supersedes" and tmeta.get("status") == "active":
             tmeta["status"] = "stale"
-            tmeta["updated"] = date.today().isoformat()
+            tmeta["updated"] = today
             tpath.write_text(store.render(tmeta, tbody), encoding="utf-8")
+            modified.append((tmeta, tbody, tpath))
             notes.append(f"{rid} 已因被取代标记为 stale")
         elif rtype == "contradicts":
-            notes.append(f"注意：与 {rid} 存在矛盾关系（{tmeta.get('title','')}），建议人工裁决")
-    return notes
+            rels = tmeta.get("relations") or []
+            if not any(x.get("id") == meta["id"] and x.get("type") == "contradicts" for x in rels):
+                tmeta["relations"] = rels + [{"id": meta["id"], "type": "contradicts"}]
+                tmeta["updated"] = today
+                tpath.write_text(store.render(tmeta, tbody), encoding="utf-8")
+                modified.append((tmeta, tbody, tpath))
+            notes.append(f"注意：与 {rid} 存在矛盾关系（{tmeta.get('title','')}），已双向标记，建议人工裁决")
+    return notes, modified
 
 
 # ---------- 6 个 MCP 工具（impl 供测试直接调用） ----------
@@ -91,6 +101,7 @@ def save_impl(type: str, title: str, body: str, tags: list | None = None,
     errs = store.lint(meta, body)
     if errs:
         return "错误：lint 未通过，未保存。\n- " + "\n- ".join(errs)
+    warns = store.lint_warnings(meta, body)
 
     sim = store.find_similar(rp, title)
     if sim:
@@ -107,15 +118,22 @@ def save_impl(type: str, title: str, body: str, tags: list | None = None,
         path = store.mem_path(rp, type, mid, staging=staging)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(store.render(meta, body), encoding="utf-8")
-        notes = _relation_side_effects(rp, meta)
+        notes, modified = _relation_side_effects(rp, meta)
         conn0 = index.connect(rp)
         index.record_usage(conn0, "save", mid, title)
         conn0.close()
         gw, pw = _post_save(rp, cfg, meta, body, path, staging, f"memory({mid}): {meta['title']} [{src}]")
+        if modified:
+            connm = index.connect(rp)
+            for tm, tb, tp in modified:
+                index.upsert(connm, tm, tb, tp, "staging" in str(tp))
+            connm.close()
 
     where = "staging（提案待人工审核：git mv 到 preferences/ 或 standards/ 后生效）" if staging else str(path)
     out = [f"已保存 {mid} → {where}"]
     out += notes
+    if warns:
+        out.append("写作规范建议（不影响入库）：\n- " + "\n- ".join(warns))
     if gw:
         out.append(gw)
     if pw:
@@ -149,12 +167,17 @@ def update_impl(id: str, body: str | None = None, title: str | None = None,
         if errs:
             return "错误：lint 未通过，未修改。\n- " + "\n- ".join(errs)
         path.write_text(store.render(meta, new_body), encoding="utf-8")
-        notes = _relation_side_effects(rp, meta)
+        notes, modified = _relation_side_effects(rp, meta)
         conn0 = index.connect(rp)
         index.record_usage(conn0, "update", id)
         conn0.close()
         gw, pw = _post_save(rp, cfg, meta, new_body, path,
                             "staging" in str(path), f"update({id}): {meta['title']}")
+        if modified:
+            connm = index.connect(rp)
+            for tm, tb, tp in modified:
+                index.upsert(connm, tm, tb, tp, "staging" in str(tp))
+            connm.close()
     out = [f"已更新 {id}（内容修改；confidence/status 由服务端状态机管理，如需人工复核请用 CLI: knowbase verify {id}）"]
     out += notes
     if gw:

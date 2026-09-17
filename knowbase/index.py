@@ -111,6 +111,8 @@ def _freshness_factor(m: dict) -> float:
 
 def _feedback_factor(m: dict) -> float:
     h, u = int(m.get("helpful_count", 0)), int(m.get("unhelpful_count", 0))
+    if u and not h:
+        return 0.3  # 只收过负反馈 → 直接沉底
     if h + u == 0:
         return 1.0
     return 0.5 + h / (h + u)  # 0.5 ~ 1.5

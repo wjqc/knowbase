@@ -167,6 +167,21 @@ def lint(meta: dict, body: str) -> list[str]:
     return errs
 
 
+def lint_warnings(meta: dict, body: str) -> list[str]:
+    """写作规范建议（warn 级，不阻断入库）：面向跨语言检索质量。"""
+    warns = []
+    title = str(meta.get("title", ""))
+    tags = [str(t) for t in (meta.get("tags") or [])]
+    title_ascii = any(c.isascii() and c.isalnum() for c in title)
+    tags_ascii = any(any(c.isascii() and c.isalnum() for c in t) for t in tags)
+    tags_cjk = any("\u4e00" <= c <= "\u9fff" for t in tags for c in t)
+    if not title_ascii and not tags_ascii:
+        warns.append("标题与标签均无英文/字母关键词，跨语言检索易漏检，建议补技术名词")
+    if not tags_cjk:
+        warns.append("标签无中文关键词，建议补一个中文通俗说法")
+    return warns
+
+
 def new_meta(dtype: str, title: str, scope: str, tags: list, source: str,
              relations: list | None = None, evidence: list | None = None) -> dict:
     """新建记忆的 frontmatter。confidence/status 由服务端定，调用方不可指定。"""

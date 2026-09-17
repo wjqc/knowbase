@@ -123,6 +123,10 @@ r = save_impl("pitfall", "EasyConnect 8.x 新版安装与验证方法", PITFALL_
 new_pid = r.split()[1]
 meta, _, _ = store.load(rp, pid)
 check("supersedes → 旧条目 stale", meta["status"] == "stale", r)
+conn = index.connect(rp)
+row = conn.execute("SELECT status FROM meta WHERE id=?", (pid,)).fetchone()
+conn.close()
+check("supersedes 同步索引状态", row[0] == "stale", str(row))
 
 # 14. update 修改内容
 r = update_impl(new_pid, body=PITFALL_BODY + "\n补充：升级后需重启网卡服务。\n")
@@ -156,5 +160,24 @@ for i, (t, dom) in enumerate(mods):
                   f"## 背景\n{dom}压测中发现{t}问题。\n## 决策\n采用方案{chr(65+i)}。\n")
     ids.add(r.split()[1])
 check("并发 id 唯一", len(ids) == 5, str(ids))
+
+# 20. contradicts 双向回指 + 不改状态
+os.environ["XINHUO_AGENT_NAME"] = "claude-code"
+r = save_impl("pitfall", "EasyConnect 9.x 企业证书安装流程", PITFALL_BODY,
+              relations=[{"id": new_pid, "type": "contradicts"}])
+c_pid = r.split()[1]
+meta_n, _, _ = store.load(rp, new_pid)
+rev = [x for x in (meta_n.get("relations") or []) if x.get("id") == c_pid and x.get("type") == "contradicts"]
+check("contradicts 反向回指", len(rev) == 1, str(meta_n.get("relations")))
+check("contradicts 不改状态", meta_n["status"] == "active", str(meta_n["status"]))
+
+# 21. 负反馈沉底因子
+from knowbase.index import _feedback_factor
+check("负反馈沉底因子 0.3", _feedback_factor({"helpful_count": 0, "unhelpful_count": 2}) == 0.3)
+check("正反馈因子区间 1.25", abs(_feedback_factor({"helpful_count": 3, "unhelpful_count": 1}) - 1.25) < 1e-9)
+
+# 22. 写作规范 warn 不阻断入库
+r = save_impl("pitfall", "纯中文标题的踩坑记录样本", PITFALL_BODY, tags=["中文标签"])
+check("写作规范 warn 不阻断", r.startswith("已保存 P-") and "写作规范建议" in r, r)
 
 print(f"\n全部 {PASS} 项断言通过 ✅  仓库：{rp}")
