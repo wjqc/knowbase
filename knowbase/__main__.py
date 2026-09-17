@@ -1,14 +1,14 @@
 """薪火 CLI：显式、幂等、可观察的初始化与人工治理操作。
 
 用法：
-  xinhuo init                  初始化/补全配置与仓库（幂等，绝不破坏已有数据）
-  xinhuo reindex               全量重建 SQLite 索引与 INDEX.md
-  xinhuo verify <id>           人工确认有效（once→verified / stale 复活）
-  xinhuo archive <id>          人工归档
-  xinhuo promote <id>          人工激活 staging 提案（git mv 到正式目录）
-  xinhuo list [type]           列出记忆
-  xinhuo stats                 统计
-  xinhuo serve                 启动 MCP 服务（stdio，供各 Agent 配置调用）
+  knowbase init                  初始化/补全配置与仓库（幂等，绝不破坏已有数据）
+  knowbase reindex               全量重建 SQLite 索引与 INDEX.md
+  knowbase verify <id>           人工确认有效（once→verified / stale 复活）
+  knowbase archive <id>          人工归档
+  knowbase promote <id>          人工激活 staging 提案（git mv 到正式目录）
+  knowbase list [type]           列出记忆
+  knowbase stats                 统计
+  knowbase serve                 启动 MCP 服务（stdio，供各 Agent 配置调用）
 """
 
 import argparse
@@ -23,13 +23,13 @@ from .locking import RepoLock
 
 GITIGNORE = "memory.db\nmemory.db-wal\nmemory.db-shm\n.lock\n*.log\n"
 
-REPO_README = """# 薪火（xinhuo）经验记忆库
+REPO_README = """# 薪火（knowbase）经验记忆库
 
 机器高频写入的热记忆层，8 个 AI Agent 共享读写。
 - 检索/读写走 MCP 工具（memory_search / read / save / update / feedback / stats）
 - INDEX.md 为自动生成的速览，勿手改
 - standards/（人员标准）与 preferences/ 只能由人直接写或经 staging/ 提案激活
-- memory.db 为派生索引，可随时 `xinhuo reindex` 重建
+- memory.db 为派生索引，可随时 `knowbase reindex` 重建
 """
 
 
@@ -88,7 +88,7 @@ def cmd_init() -> int:
 
     if new_repo:
         gitops.commit_all(rp, "init: 薪火记忆库初始化")
-    print("完成。Agent 接入：在各 MCP 配置注册 xinhuo serve 即可。")
+    print("完成。Agent 接入：在各 MCP 配置注册 knowbase serve 即可。")
     return 0
 
 
@@ -171,7 +171,7 @@ def cmd_stats() -> int:
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="xinhuo", description="薪火：跨 Agent 经验记忆库")
+    parser = argparse.ArgumentParser(prog="knowbase", description="薪火：跨 Agent 经验记忆库")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("init", help="初始化/补全（幂等）")
     sub.add_parser("reindex", help="全量重建索引")

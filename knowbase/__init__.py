@@ -1,4 +1,4 @@
-"""薪火（xinhuo）：跨 Agent 共享的经验记忆库 MCP 服务。
+"""薪火（knowbase）：跨 Agent 共享的经验记忆库 MCP 服务。
 
 不变量：
 1. Markdown 是唯一真相，Git 是唯一审计，SQLite/INDEX.md 是可重建的派生态；

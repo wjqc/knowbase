@@ -1,5 +1,5 @@
 [project]
-name = "xinhuo"
+name = "knowbase"
 version = "0.1.0"
 description = "薪火：跨 Agent 共享的经验记忆库 MCP 服务（本地 markdown + git + SQLite FTS5）"
 requires-python = ">=3.10"
@@ -10,7 +10,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["xinhuo"]
+packages = ["knowbase"]
 
 [project.scripts]
-xinhuo = "xinhuo.__main__:main"
+knowbase = "knowbase.__main__:main"

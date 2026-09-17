@@ -1,4 +1,4 @@
-"""配置加载：默认值 < ~/.xinhuo/config.json < 环境变量。
+"""配置加载：默认值 < ~/.knowbase/config.json < 环境变量。
 
 配置文件不放仓库内（克隆新机时鸡生蛋），不放各 Agent 的 MCP 配置里
 （8 个 Agent 必须读同一份配置才是同一视图）。
@@ -9,10 +9,10 @@ import json
 import os
 from pathlib import Path
 
-CONFIG_PATH = Path(os.environ.get("XINHUO_CONFIG", str(Path.home() / ".xinhuo" / "config.json")))
+CONFIG_PATH = Path(os.environ.get("KNOWBASE_CONFIG", str(Path.home() / ".knowbase" / "config.json")))
 
 DEFAULTS = {
-    "repo_path": "~/xinhuo",
+    "repo_path": "~/knowbase",
     "knowledge_path": "~/knowledge",
     "lock_timeout": 10.0,
     "git": {
@@ -40,7 +40,7 @@ def load_config() -> dict:
     cfg = copy.deepcopy(DEFAULTS)
     if CONFIG_PATH.exists():
         cfg = _deep_merge(cfg, json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
-    env_repo = os.environ.get("XINHUO_REPO_PATH")
+    env_repo = os.environ.get("KNOWBASE_REPO_PATH")
     if env_repo:
         cfg["repo_path"] = env_repo
     return cfg
@@ -52,5 +52,5 @@ def repo_path(cfg: dict | None = None) -> Path:
 
 
 def agent_name() -> str:
-    """调用方身份：各 Agent 的 MCP 配置通过 env XINHUO_AGENT_NAME 声明。"""
-    return os.environ.get("XINHUO_AGENT_NAME") or "unknown"
+    """调用方身份：各 Agent 的 MCP 配置通过 env KNOWBASE_AGENT_NAME 声明。"""
+    return os.environ.get("KNOWBASE_AGENT_NAME") or "unknown"

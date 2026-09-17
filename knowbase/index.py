@@ -1,6 +1,6 @@
 """派生索引层：SQLite FTS5（trigram）+ 统计 + INDEX.md。
 
-全部数据可由 markdown 全量重建（xinhuo reindex），损坏即重建。
+全部数据可由 markdown 全量重建（knowbase reindex），损坏即重建。
 hit_count 属运行统计，只存本库不入 frontmatter（避免读操作产生 git 提交）。
 """
 
@@ -290,7 +290,7 @@ def build_index_md(repo: Path, cfg: dict | None = None) -> Path:
 
     type_summary = " ".join(f"{store.TYPE_DIR[t]}{n}" for t, n in sorted(counts["by_type"].items()))
     lines = [
-        "# 薪火记忆索引（自动生成，勿手改）",
+        "# knowbase 记忆索引（薪火 · 自动生成，勿手改）",
         "",
         f"> 共 {counts['total']} 条（{type_summary}），staging 提案 {counts['staging']} 条。"
         f"生成时间 {datetime.now().isoformat(timespec='seconds')}。",

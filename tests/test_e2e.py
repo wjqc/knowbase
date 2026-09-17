@@ -10,15 +10,15 @@ import sys
 import tempfile
 from pathlib import Path
 
-TMP = Path(tempfile.mkdtemp(prefix="xinhuo-e2e-"))
-os.environ["XINHUO_REPO_PATH"] = str(TMP / "repo")
-os.environ["XINHUO_CONFIG"] = str(TMP / "nonexistent-config.json")  # 用默认配置
+TMP = Path(tempfile.mkdtemp(prefix="knowbase-e2e-"))
+os.environ["KNOWBASE_REPO_PATH"] = str(TMP / "repo")
+os.environ["KNOWBASE_CONFIG"] = str(TMP / "nonexistent-config.json")  # 用默认配置
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from xinhuo import __main__ as cli  # noqa: E402
-from xinhuo import config, index, store  # noqa: E402
-from xinhuo.server import (feedback_impl, read_impl, save_impl, search_impl,  # noqa: E402
+from knowbase import __main__ as cli  # noqa: E402
+from knowbase import config, index, store  # noqa: E402
+from knowbase.server import (feedback_impl, read_impl, save_impl, search_impl,  # noqa: E402
                            stats_impl, update_impl)
 
 PASS = 0
@@ -50,7 +50,7 @@ check("init 第2次(幂等)", cli.main(["init"]) == 0)
 rp = config.repo_path()
 
 # 1. Agent A（claude-code）踩坑入库
-os.environ["XINHUO_AGENT_NAME"] = "claude-code"
+os.environ["KNOWBASE_AGENT_NAME"] = "claude-code"
 r = save_impl("pitfall", "EasyConnect 7.6.7 在 macOS 上启动即死锁", PITFALL_BODY,
               tags=["network", "vpn"], source="agent:claude-code:sess_a1")
 check("save pitfall", r.startswith("已保存 P-"), r)
@@ -73,7 +73,7 @@ r = save_impl("standard", "接口发布门禁标准", "## 规则\n接口上线�
 check("standard 落 staging", "staging" in r and "S-2026" in r, r)
 
 # 6. preference 由 Agent 保存 → staging；人直接写（human source）→ 正式目录
-os.environ["XINHUO_AGENT_NAME"] = "claude-code"
+os.environ["KNOWBASE_AGENT_NAME"] = "claude-code"
 r = save_impl("preference", "输出必须中文", "## 规则\n对用户输出一律中文。\n")
 check("preference(Agent) 落 staging", "staging" in r, r)
 r = save_impl("preference", "绝不自动提交知识库", "## 规则\n知识库变更不自动 commit。\n",
@@ -96,13 +96,13 @@ check("read 计数", row[0] >= 1, str(row))
 conn.close()
 
 # 10. feedback：A helpful（1 工具，不晋升）→ B helpful（跨 2 工具，晋升 verified）
-os.environ["XINHUO_AGENT_NAME"] = "claude-code"
+os.environ["KNOWBASE_AGENT_NAME"] = "claude-code"
 r = feedback_impl(pid, "helpful", "避坑成功")
 check("feedback A", "已记录反馈" in r, r)
 meta, _, _ = store.load(rp, pid)
 check("单工具不晋升", meta["confidence"] == "once", str(meta["confidence"]))
 
-os.environ["XINHUO_AGENT_NAME"] = "cursor"
+os.environ["KNOWBASE_AGENT_NAME"] = "cursor"
 r = feedback_impl(pid, "helpful", "跨工具同样有效")
 meta, _, _ = store.load(rp, pid)
 check("跨工具晋升 verified", meta["confidence"] == "verified" and meta["last_verified"], r)
@@ -147,7 +147,7 @@ r = stats_impl()
 check("stats 汇总", "记忆总数" in r and "使用漏斗" in r, r)
 
 # 19. 并发锁：同仓库快速连续写 id 唯一（标题须真实差异，避免触发查重）
-os.environ["XINHUO_AGENT_NAME"] = "claude-code"
+os.environ["KNOWBASE_AGENT_NAME"] = "claude-code"
 mods = [("网关超时重试", "网络"), ("镜像仓库切换", "存储"), ("日志采样率", "观测"),
         ("会话持久化", "状态"), ("灰度发布门禁", "发布")]
 ids = set()

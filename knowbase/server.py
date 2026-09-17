@@ -12,7 +12,7 @@ from . import config, gitops, index, lifecycle, store
 from .locking import RepoLock
 
 mcp = FastMCP(
-    "xinhuo",
+    "knowbase",
     instructions=(
         "薪火：跨 Agent 共享的经验记忆库。"
         "任务开始涉及具体项目/系统/报错时先 memory_search；"
@@ -27,7 +27,7 @@ mcp = FastMCP(
 def _repo():
     rp = config.repo_path()
     if not rp.exists() or not (rp / ".git").exists():
-        return None, "错误：记忆库未初始化。请先运行 `xinhuo init`（显式初始化，服务不会偷偷创建）。"
+        return None, "错误：记忆库未初始化。请先运行 `knowbase init`（显式初始化，服务不会偷偷创建）。"
     return rp, None
 
 
@@ -155,7 +155,7 @@ def update_impl(id: str, body: str | None = None, title: str | None = None,
         conn0.close()
         gw, pw = _post_save(rp, cfg, meta, new_body, path,
                             "staging" in str(path), f"update({id}): {meta['title']}")
-    out = [f"已更新 {id}（内容修改；confidence/status 由服务端状态机管理，如需人工复核请用 CLI: xinhuo verify {id}）"]
+    out = [f"已更新 {id}（内容修改；confidence/status 由服务端状态机管理，如需人工复核请用 CLI: knowbase verify {id}）"]
     out += notes
     if gw:
         out.append(gw)

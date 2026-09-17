@@ -1,4 +1,4 @@
-"""种子记忆迁移脚本：把本机已有真实经验迁入 ~/xinhuo（一次性，保留作迁移记录）。
+"""种子记忆迁移脚本：把本机已有真实经验迁入 ~/knowbase（一次性，保留作迁移记录）。
 
 置信度说明：以下条目均在真实工作中验证过，迁移时直接置 verified，
 last_verified 为迁移日；helpful 统计从零开始积累。
@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from xinhuo import config, gitops, index, store  # noqa: E402
+from knowbase import config, gitops, index, store  # noqa: E402
 
 TODAY = "2026-09-17"
 SRC_Z = f"agent:zcode:migrated-{TODAY}"
