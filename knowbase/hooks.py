@@ -50,22 +50,41 @@ def _keywords(prompt: str) -> list[str]:
     return out[:24]
 
 
-def _scored_search(conn, kws: list[str], limit: int) -> list[dict]:
-    """OR 语义兜底：按命中关键词个数打分（AND 语义对无空格长句必然漏检）。"""
+def _scored_search(conn, kws: list[str], limit: int, scope: str | None = None) -> list[dict]:
+    """OR 语义兜底：按命中关键词个数打分（AND 语义对无空格长句必然漏检）。
+    带 scope 时硬过滤（本项目+global）并给本项目微加成，防多项目术语碰撞混注。"""
     scored = []
     for r in conn.execute("SELECT * FROM meta WHERE status != 'archived' AND staging = 0"):
         m = index._row_meta(r)
+        if scope and m["scope"] not in (scope, "global"):
+            continue
         row = conn.execute("SELECT title, tags, body FROM mem_fts WHERE id=?", (m["id"],)).fetchone()
         hay = " ".join(row).lower() if row else ""
-        score = sum(1 for k in kws if k.lower() in hay)
+        score = float(sum(1 for k in kws if k.lower() in hay))
+        if score and scope and m["scope"] == scope:
+            score += 0.5  # 同分时本项目优先，高分全局经验仍可入围
         if score:
             scored.append((score, m))
     scored.sort(key=lambda x: -x[0])
     return [{**m, "score": s} for s, m in scored[:limit]]
 
 
+def _infer_scope(conn) -> str | None:
+    """从 hook 环境变量的项目目录推断当前项目 scope（目录名含 scope 名即命中，取最长匹配）。"""
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR") or os.environ.get("ZCODE_PROJECT_DIR")
+    if not project_dir:
+        return None
+    name = Path(project_dir).name.lower()
+    if not name:
+        return None
+    scopes = [r[0] for r in conn.execute(
+        "SELECT DISTINCT scope FROM meta WHERE staging = 0 AND scope != 'global'")]
+    matches = [s for s in scopes if s and s.lower() in name]
+    return max(matches, key=len) if matches else None
+
+
 def user_prompt(prompt: str) -> str:
-    """对用户输入做本地检索，命中则返回注入文本；无命中返回空串。"""
+    """对用户输入做本地检索（自动推断当前项目 scope），命中则返回注入文本。"""
     prompt = (prompt or "").strip()
     if len(prompt) < MIN_PROMPT_LEN:
         return ""
@@ -76,18 +95,19 @@ def user_prompt(prompt: str) -> str:
     if not kws:
         return ""
     conn = index.connect(rp)
+    scope = _infer_scope(conn)
     ascii_kws = [k for k in kws if k[0].isascii()]
-    hits = index.search(conn, " ".join(ascii_kws), limit=MAX_HITS) if ascii_kws else []
+    hits = index.search(conn, " ".join(ascii_kws), scope=scope, limit=MAX_HITS) if ascii_kws else []
     if not hits:
-        hits = _scored_search(conn, kws, MAX_HITS)
+        hits = _scored_search(conn, kws, MAX_HITS, scope=scope)
     if hits:
-        index.record_usage(conn, "auto_search", detail=prompt[:80])
+        index.record_usage(conn, "auto_search", detail=f"{prompt[:60]} scope={scope or '-'}")
     conn.close()
     if not hits:
         return ""
     lines = ["[knowbase 自动检索] 以下历史经验与当前任务相关，动手前先 memory_read 对应条目："]
     for h in hits:
-        lines.append(f"- [{h['id']}] {h['title']}（{h['confidence']}·{h['status']}）")
+        lines.append(f"- [{h['id']}] {h['title']}（{h['confidence']}·{h['status']} · scope={h['scope']}）")
     return "\n".join(lines)
 
 
