@@ -227,21 +227,26 @@ def search_impl(query: str, type: str | None = None, scope: str | None = None,
     rp, err = _repo()
     if err:
         return err
+    _updated, sync_warn = gitops.sync_before_read(rp, _cfg())
     conn = index.connect(rp)
     results = index.search(conn, query, mtype=type, scope=scope, tag=tag, limit=limit, include_inactive=include_inactive)
     index.record_search(conn, query, scope, results)
     conn.close()
     if not results:
-        return (f"未命中「{query}」。建议：检索词用 ≥3 字的具体名词/报错关键词，"
+        base = (f"未命中「{query}」。建议：检索词用 ≥3 字的具体名词/报错关键词，"
                 "或换英文技术词；也可放宽 scope/type 过滤。")
-    lines = [f"命中 {len(results)} 条（按 词法×scope×置信度×新鲜度×反馈 排序）："]
+        return base + (f"\n同步告警：{sync_warn}" if sync_warn else "")
+    lines = [f"命中 {len(results)} 条（原地混合召回：词法+dense→RRF×scope×置信度×新鲜度×反馈）："]
     for r in results:
         stg = "（staging 提案）" if r["staging"] else ""
         lines.append(
             f"- [{r['id']}]{stg} {r['title']} ｜ {r['confidence']}·{r['status']}"
             f" ｜ scope={r['scope']} ｜ hit={r['hit_count']} helpful={r['helpful_count']}"
-            f" ｜ score={r['score']}\n  摘要：{r['snippet'][:80]}\n  详情：memory_read(\"{r['id']}\")"
+            f" ｜ score={r['score']} ｜ channels={','.join(r.get('channels', []))}"
+            f"\n  摘要：{r['snippet'][:80]}\n  详情：memory_read(\"{r['id']}\")"
         )
+    if sync_warn:
+        lines.append(f"同步告警：{sync_warn}")
     return "\n".join(lines)
 
 

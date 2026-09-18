@@ -4,6 +4,7 @@
 供本机所有 AI Agent 检索复用。**一个人的坑，所有 Agent 的经验。**
 
 - 存储：markdown + frontmatter（唯一真相）+ git 审计 + SQLite FTS5 派生索引（可重建）
+- 检索：在同一 `memory.db` 内执行词法 + dense 模糊双路召回、RRF 融合及原有 scope/可信度/新鲜度/反馈排序；不创建第二套数据库
 - 治理：人员标准/偏好 Agent 只能提案（staging 人审）；confidence/status 由服务端状态机管理
 - 完整设计：知识库 `通用/05-智能助手/Agent经验记忆库MCP服务-设计方案-v1.md`
 
@@ -87,7 +88,7 @@ Claude Code（`~/.claude/settings.json`）与 ZCode（`~/.zcode/cli/config.json`
 ## 存量知识入库与防污染开关
 
 ```bash
-# 把现存 markdown 文档批量导入为 once 级记忆（原文即正文，标题取 # 一级标题或文件名）
+# 把现存文档批量导入为 once 级记忆（支持 Markdown/TXT/PDF/Office/HTML/图片 OCR/代码/日志）
 .venv/bin/python -m knowbase import <文档目录> --type pitfall --scope 项目名
 .venv/bin/python -m knowbase import <文档目录> --type standard --staging   # 走人审路径
 ```

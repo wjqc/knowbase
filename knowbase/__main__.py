@@ -8,8 +8,8 @@
   knowbase promote <id>          人工激活 staging 提案（git mv 到正式目录）
   knowbase list [type]           列出记忆
   knowbase stats                 统计
-  knowbase doctor                V2 健康检查（schema/积压/死信/mirror…）
-  knowbase alerts                V2 运维告警（基于 doctor + 多 sink 派发）
+  knowbase doctor                单库健康检查（memory.db/FTS/Git/治理）
+  knowbase alerts                输出单库异常状态，供调度器通知
   knowbase serve                 启动 MCP 服务（stdio，供各 Agent 配置调用）
 """
 
@@ -17,7 +17,7 @@ import argparse
 import json
 import shutil
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from . import config, gitops, index, lifecycle, store
@@ -186,11 +186,14 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
     if src_dir == rp.resolve() or rp.resolve() in src_dir.parents or src_dir in rp.resolve().parents:
         print("错误：导入目录与记忆库不可互相包含")
         return 1
-    files = [f for f in sorted(src_dir.rglob("*.md"))
-             if not any(part.startswith(".") for part in f.relative_to(src_dir).parts)
+    supported = {".md", ".txt", ".pdf", ".docx", ".xlsx", ".pptx", ".html", ".htm",
+                 ".png", ".jpg", ".jpeg", ".py", ".js", ".ts", ".java", ".log"}
+    files = [f for f in sorted(src_dir.rglob("*"))
+             if f.is_file() and f.suffix.lower() in supported
+             and not any(part.startswith(".") for part in f.relative_to(src_dir).parts)
              and not f.is_symlink() and src_dir in f.resolve().parents]
     if not files:
-        print("目录中未找到 .md 文件")
+        print("目录中未找到支持的文档文件")
         return 1
     imported = skipped = 0
     with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
@@ -199,7 +202,23 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
                     for m, _, _ in store.iter_all(rp, include_staging=True)}
         for f in files:
             import hashlib
-            body = f.read_text(encoding="utf-8").strip()
+            if f.suffix.lower() == ".md":
+                body = f.read_text(encoding="utf-8").strip()
+                parsed_title = ""
+            else:
+                try:
+                    from .parsers import register_builtin, registry
+                    register_builtin()
+                    parser = registry().find(f)
+                    if parser is None:
+                        raise ValueError(f"无可用解析器: {f.suffix}")
+                    parsed = parser.parse(f)
+                    body = parsed.text.strip()
+                    parsed_title = str(parsed.meta.get("title", ""))
+                except Exception as exc:
+                    skipped += 1
+                    print(f"  跳过（解析失败: {exc}）：{f.name}")
+                    continue
             digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
             prior = existing.get((str(f.resolve()), scope, dtype))
             if prior:
@@ -215,8 +234,9 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
                 skipped += 1
                 continue
             m = _re.search(r"^#\s+(.+)$", body, _re.M)
-            title = (m.group(1).strip() if m else f.stem)[:80]
-            meta = store.new_meta(dtype, title, scope, ["import", src_dir.name], source)
+            title = (m.group(1).strip() if m else parsed_title or f.stem)[:80]
+            meta = store.new_meta(dtype, title, scope,
+                                  ["import", src_dir.name, f.suffix.lower().lstrip(".")], source)
             meta["import_path"] = str(f.resolve())
             meta["import_sha256"] = digest
             if dtype == "bizrule":
@@ -227,6 +247,10 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(store.render(meta, body), encoding="utf-8")
             index.upsert(conn, meta, body, target, staging)
+            index.record_source_state(
+                conn, str(f.resolve()), digest,
+                datetime.fromtimestamp(f.stat().st_mtime).isoformat(timespec="seconds"),
+            )
             imported += 1
             print(f"  {meta['id']}  {title[:44]}")
         if imported:
@@ -248,144 +272,74 @@ def cmd_stats() -> int:
 
 
 def cmd_doctor(json_output: bool = False) -> int:
-    """V2 健康检查（schema / outbox 积压 / 死信 / 24h 失败 / mirror / 冲突态）。
-
-    对``v2.db`` 缺失或不可访问的情况：返回 1 条 schema_version fail + 1 条
-    ``init_error`` fail，不抛异常（doctor 必须能跑、不能拖垮运维）。
-    """
-    from .v2.repositories import V2Repository
-    from .v2.repositories.schema import V2_DB_FILENAME
-    from .v2.sync import (
-        DoctorCheck,
-        DoctorThresholds,
-        doctor_exit_code,
-        render_doctor,
-        run_doctor_checks,
-    )
-
+    """检查现有 Markdown + memory.db + Git 单库运行状态。"""
+    import subprocess
     rp = config.repo_path()
-    db_path = rp / ".knowbase" / V2_DB_FILENAME
-    if not db_path.exists():
-        # 主仓库未 init：所有 DB check 退化为 fail，mirror 仍按真实路径检查
-        checks: list[DoctorCheck] = [
-            DoctorCheck(
-                "schema_version", "fail",
-                f"v2.db 不存在（{db_path}）；先 knowbase init",
-            ),
-            DoctorCheck(
-                "init_error", "fail",
-                "V2Repository 不可用（v2.db 缺失）；其他 DB check 跳过",
-            ),
-            # mirror 检查仍跑（独立于 DB）
-        ]
-        # 手动跑 mirror_git 一次（不依赖 V2Repository）
-        from .v2.sync.doctor import check_mirror_git
-        checks.append(check_mirror_git(rp))
+    checks: list[dict] = []
+    db = rp / index.DB_NAME
+    if not db.exists():
+        checks.append({"name": "memory_db", "level": "fail", "message": f"不存在：{db}"})
     else:
-        repo = V2Repository(rp)
         try:
-            thresholds = DoctorThresholds()
-            checks = run_doctor_checks(repo, rp, thresholds=thresholds)
-        except (PermissionError, OSError) as e:
-            # sandbox 拦截 / 权限不足：把整轮退化为一组 fail，仍能给出汇总
-            checks = [
-                DoctorCheck("schema_version", "fail", f"读 v2.db 异常: {e!r}"),
-                DoctorCheck("init_error", "fail", "V2Repository 不可访问"),
-            ]
-            from .v2.sync.doctor import check_mirror_git
-            checks.append(check_mirror_git(rp))
+            conn = index.connect(rp)
+            meta_n = conn.execute("SELECT COUNT(*) FROM meta").fetchone()[0]
+            fts_n = conn.execute("SELECT COUNT(*) FROM mem_fts").fetchone()[0]
+            staging_n = conn.execute("SELECT COUNT(*) FROM meta WHERE staging=1").fetchone()[0]
+            stale_n = conn.execute("SELECT COUNT(*) FROM meta WHERE status='stale'").fetchone()[0]
+            md_n = sum(1 for _ in store.iter_all(rp, include_staging=True))
+            conn.execute("SELECT id FROM mem_fts WHERE mem_fts MATCH 'doctor' LIMIT 1").fetchall()
+            level = "pass" if meta_n == fts_n == md_n else "fail"
+            checks.append({"name": "index_parity", "level": level,
+                           "message": f"markdown={md_n} meta={meta_n} fts={fts_n}"})
+            checks.append({"name": "governance", "level": "warn" if stale_n else "pass",
+                           "message": f"staging={staging_n} stale={stale_n}"})
+            emb_n = conn.execute("SELECT COUNT(*) FROM embedding_index").fetchone()[0]
+            checks.append({"name": "embedding_index", "level": "pass" if emb_n == meta_n else "fail",
+                           "message": f"embedding={emb_n} meta={meta_n}"})
+            sync_row = conn.execute(
+                "SELECT status,error,last_fetch_at,last_push_at FROM sync_state "
+                "ORDER BY COALESCE(last_fetch_at,last_push_at) DESC LIMIT 1"
+            ).fetchone()
+            if sync_row:
+                checks.append({"name": "sync", "level": "pass" if sync_row[0] == "ok" else "warn",
+                               "message": f"status={sync_row[0]} fetch={sync_row[2]} push={sync_row[3]} error={sync_row[1] or ''}"})
+            else:
+                checks.append({"name": "sync", "level": "warn", "message": "尚无远程同步记录"})
+        except Exception as exc:
+            checks.append({"name": "memory_db", "level": "fail", "message": repr(exc)})
         finally:
-            repo.close()
-
+            try: conn.close()
+            except Exception: pass
+    try:
+        status = subprocess.run(["git", "-C", str(rp), "status", "--porcelain", "--branch"],
+                                capture_output=True, text=True, timeout=5,
+                                env={**__import__('os').environ, "GIT_TERMINAL_PROMPT": "0"})
+        lines = status.stdout.splitlines()
+        dirty = max(0, len(lines) - 1)
+        checks.append({"name": "git", "level": "warn" if dirty else "pass",
+                       "message": f"{lines[0] if lines else 'unknown branch'}; dirty={dirty}"})
+    except Exception as exc:
+        checks.append({"name": "git", "level": "fail", "message": repr(exc)})
+    import importlib.util
+    parser_modules = ("pypdf", "docx", "openpyxl", "pptx", "PIL", "pytesseract")
+    missing = [m for m in parser_modules if importlib.util.find_spec(m) is None]
+    checks.append({"name": "parsers", "level": "warn" if missing else "pass",
+                   "message": "missing=" + (",".join(missing) if missing else "none")})
+    checks.append({"name": "ocr_binary", "level": "pass" if shutil.which("tesseract") else "warn",
+                   "message": shutil.which("tesseract") or "tesseract 未安装，图片 OCR 不可用"})
     if json_output:
-        print(json.dumps(
-            [{"name": c.name, "level": c.level, "message": c.message} for c in checks],
-            ensure_ascii=False, indent=2,
-        ))
+        print(json.dumps(checks, ensure_ascii=False, indent=2))
     else:
-        print(render_doctor(checks))
-    return doctor_exit_code(checks)
+        for c in checks:
+            print(f"[{c['level'].upper()}] {c['name']}: {c['message']}")
+    return 2 if any(c["level"] == "fail" for c in checks) else 0
 
 
 def cmd_alerts(dry_run: bool = False) -> int:
-    """V2 运维告警（基于 doctor + AlertDispatcher 派发，含 webhook / stdout / 文件）。
-
-    - 不传 dry_run：按 cfg.v2.alerts 派发（含 webhook POST / log_file 追加）
-    - --dry-run：跳过派发，只在 stdout 打印将要发的告警（默认带 1 个 console sink，
-      但因 cooldown 仍生效，重复跑将看到 suppressed 计数）
-
-    对 v2.db 不可访问 / 缺失：fallback 到 schema_version fail + 派发它。
-    """
-    from .v2.repositories import V2Repository
-    from .v2.repositories.schema import V2_DB_FILENAME
-    from .v2.sync import (
-        AlertConfig,
-        AlertDispatcher,
-        AlertEvent,
-        DoctorCheck,
-        load_alert_config,
-        sink_console,
-    )
-
-    cfg_dict = config.load_config()
-    alert_cfg = load_alert_config(cfg_dict)
+    """单库告警入口：直接复用 doctor，非正常状态由调度器根据退出码通知。"""
     if dry_run:
-        dispatcher = AlertDispatcher(
-            AlertConfig(
-                enabled=True,
-                cooldown_seconds=alert_cfg.cooldown_seconds,
-                webhook_url="",  # 不发 webhook
-                log_to_file="",  # 不落盘
-            ),
-            sinks=[sink_console],
-        )
-    else:
-        dispatcher = AlertDispatcher(alert_cfg)
-
-    rp = config.repo_path()
-    db_path = rp / ".knowbase" / V2_DB_FILENAME
-    if not db_path.exists():
-        checks: list[DoctorCheck] = [
-            DoctorCheck("schema_version", "fail",
-                        f"v2.db 不存在（{db_path}）；先 knowbase init"),
-        ]
-        events = [AlertEvent(check="schema_version", level="fail",
-                             message=checks[0].message)]
-        stats = dispatcher.dispatch(events) if alert_cfg.enabled else {
-            "sent": 0, "suppressed": 0, "failed": 0,
-        }
-        result = {"checks": checks, "events": events, "dispatch": stats}
-    else:
-        repo = V2Repository(rp)
-        try:
-            from .v2.sync import run_alerts
-            result = run_alerts(repo_root=rp, repo=repo,
-                                cfg=alert_cfg, dispatcher=dispatcher)
-        except (PermissionError, OSError) as e:
-            checks = [DoctorCheck("schema_version", "fail",
-                                  f"读 v2.db 异常: {e!r}")]
-            events = [AlertEvent(check="schema_version", level="fail",
-                                 message=checks[0].message)]
-            stats = dispatcher.dispatch(events) if alert_cfg.enabled else {
-                "sent": 0, "suppressed": 0, "failed": 0,
-            }
-            result = {"checks": checks, "events": events, "dispatch": stats}
-        finally:
-            repo.close()
-
-    # 输出（两种模式都打：dry_run 不靠 dispatcher 派发也能看到事件清单）
-    checks = result["checks"]
-    events = result["events"]
-    stats = result["dispatch"]
-    if dry_run:
-        print(f"[dry-run] {len(events)} 个告警待派发（已跳过实际 sink）：")
-        for ev in events:
-            print(f"  {ev.level.upper()} {ev.check}: {ev.message}")
-    else:
-        print(f"checks={len(checks)} events={len(events)} sent={stats['sent']} "
-              f"suppressed={stats['suppressed']} failed={stats['failed']}")
-    # 任一事件存在且有 fail 级 → 非零退出（方便 cron 触发）
-    return 0 if not events or stats["failed"] == 0 else 1
+        print("[dry-run] 单库 doctor 检查如下：")
+    return cmd_doctor(json_output=False)
 
 
 def main(argv=None):
@@ -410,9 +364,9 @@ def main(argv=None):
     p_list = sub.add_parser("list", help="列出记忆")
     p_list.add_argument("type", nargs="?", choices=store.TYPES)
     sub.add_parser("stats", help="统计")
-    p_doc = sub.add_parser("doctor", help="V2 健康检查（schema/积压/死信/mirror）")
+    p_doc = sub.add_parser("doctor", help="单库健康检查（memory.db/FTS/Git/治理）")
     p_doc.add_argument("--json", action="store_true", help="以 JSON 列表输出")
-    p_alerts = sub.add_parser("alerts", help="V2 运维告警（基于 doctor + 多 sink 派发）")
+    p_alerts = sub.add_parser("alerts", help="输出单库异常状态，供调度器通知")
     p_alerts.add_argument("--dry-run", action="store_true",
                           help="不实际派发 webhook/文件，仅 stdout 打印事件清单")
     p_hook = sub.add_parser("hook", help="Agent hook 入口")

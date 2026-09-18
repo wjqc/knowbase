@@ -3,6 +3,12 @@
 完成 CLI/init/import/search/hooks/dashboard；e2e 30、hooks 13、import 12、治理回归通过；检索必须命中 8/8，同义盲区 0/4。diff --check 通过。真实库 HTML 已生成；浏览器策略禁止本地 file 页面，未做替代绕行。
 知识库只提交本次独立增补文件，保留其他未提交内容。
 
+2026-09-18：用户确认要求为单库原地升级，不接受第二套 V2 运行时。已撤回本轮误建 runtime/v2.db，正式库误建 DB 移至 `/tmp/knowbase-v2db-backup.ntnHpQ/v2.db`；开始按“改方案→改 doctor/alerts→迁 parser→合并检索→删死代码→全量验证”顺序实施。
+
+2026-09-18：单库原地升级与清理完成。新方案 `docs/knowbase-inplace-upgrade-plan.md` 替代双系统方案；doctor/alerts 只检查 memory.db/FTS parity/治理/Git；10 个解析器迁至 `knowbase/parsers`；现有 memory.db 检索升级为 lexical+dense 模糊+受控同义扩展+RRF；Git push 加非交互和超时；删除第二套 v2 domain/repository/ACL/outbox/sync/governance/contracts/features 及专属测试/脚本。生产 Python LOC 从约 1.3 万（含 v2）降至 2927；运行时代码扫描无 v2.db/V2Repository/document_version/outbox_event/mirror.git/knowbase.v2。验证：E2E 30、hooks 13、import 12、bizrule 6、governance、retrieval 12/12、parser 73 全通过，wheel 构建与 diff check 通过。
+
+2026-09-18：继续完成方案剩余项：在现有 memory.db 增加 embedding_index/source_state/sync_state，reindex 已为真实库 48 条补齐 embedding；import 写 source_state；检索前按 TTL fetch，只有干净且可 fast-forward 才更新，否则记录状态并继续 last-known-good；配置增加 scope_map；doctor 增 embedding parity、同步状态、parser 依赖和 tesseract 检查。真实远端 fetch 返回 Empty reply，已在 10 秒内降级并记录 warn；未影响检索。新增 3 项单库状态测试，合并 parser 共 76 项通过。
+
 2026-09-18：启动 V2 完整升级方案编制。已复核当前代码、有效配置、真实库分布、远端状态和检索评测；方案将以兼容现有 6 个 MCP 工具、Markdown+Git 权威经验层和现有治理状态机为前提，不把设计文档视为运行证明。
 
 2026-09-18：完成 `docs/knowbase-v2-upgrade-plan.md`。交付包含 Local/Lite 与 Team/Scale 双部署剖面、统一数据模型、9 类格式摄取、四路召回+RRF+rerank、前置 ACL、唯一写入者与 outbox 同步、治理、MCP/API 兼容、文件级清单、Phase 0～6、测试指标、迁移、部署、灰度和回滚。文档覆盖项检查全部通过，`git diff --check` 通过；本次只编写方案，未实施代码、未运行 OCR/向量/同步/UAT。
@@ -675,4 +681,3 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - **可选 P5-D**:把 CLI 接入 cron / GitHub Actions，定时跑评测 + 自动建 PR 报告 regression
 - **可选 P5-E**:把 parser_versions 快照写入 DocumentVersion / Operation payload（已预留 chunk meta 入口，需补 schema migration）
 - **当前 Phase 5 全部完成** — 可进入 Phase 6 (SLA / on-call / 文档发布)
-

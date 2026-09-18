@@ -3,6 +3,9 @@
 - reindex 删除数据库，也删除 usage/feedback 日志及 hit_count。
 - import 仅标题相似去重，没有来源文件哈希；init 只检测知识目录。
 - hit_count 实际为读取次数，helpful 才是有效反馈，不能等同采用。
+- 原 V2 方案错误假设需要第二套 v2.db、Document/Version/Chunk、outbox、双读和迁移；用户需求实际是对现有 Markdown + memory.db + Git 原地升级。
+- knowbase/v2 约 9969 行生产代码、tests/v2 约 9008 行；真实数据面仅复用多格式 parsers，doctor/alerts 仍错误依赖 v2.db，其余多数模块只被测试或同目录内部引用。
+- 原地混合检索已在现有 memory.db 上验证：明确检索 8/8、同义口语 4/4、无答案保持空；现有 30 项 E2E、12 项 import、13 项 hooks 通过。
 - 当前主动检索是 FTS5 trigram + LIKE 回退，并按 scope、confidence、新鲜度、反馈排序；Hook 的 OR 兜底仍是子串计数，不是语义检索。
 - 真实库 32 条：reference 18、pitfall 7、preference 3、workflow 2、decision 1、standard 1；没有 bizrule 实例，scope 仅 cmi/global/knowbase。
 - 真实 golden set：明确关键词 8/8，同义口语改写 0/4，HitRate@3=8/12。
@@ -341,4 +344,3 @@ fi
 ```
 
 **预防**：任何"评测 / 治理 / 准入检查"的 CLI 都采用三态 exit code；写 wrapper 脚本前先确认 root cause 分类。
-

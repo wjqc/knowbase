@@ -6,14 +6,13 @@ requires-python = ">=3.10"
 dependencies = [
   "mcp>=1.2,<2",
   "pyyaml>=6.0",
-  # V2 多格式摄取与治理（Phase 0/1/5 必需；PDF/DOCX/XLSX/PPTX/OCR/JSON Schema/test）
+  # 原地多格式摄取（PDF/DOCX/XLSX/PPTX/OCR）
   "pypdf>=5.0",
   "python-docx>=1.1",
   "openpyxl>=3.1",
   "python-pptx>=1.0",
   "pillow>=10.0",        # P5-A3 OCR 解析图片字节
-  "pytesseract>=0.3",    # P5-A3 OCR Python 包装（tesseract 二进制仍需手动安装）
-  "jsonschema>=4.0",
+  "pytesseract>=0.3",    # OCR Python 包装（tesseract 二进制仍需手动安装）
 ]
 
 [project.optional-dependencies]
@@ -24,7 +23,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["knowbase"]
+
+[tool.setuptools.packages.find]
+include = ["knowbase*"]
 
 [project.scripts]
 knowbase = "knowbase.__main__:main"

@@ -18,23 +18,15 @@ DEFAULTS = {
     "git": {
         "auto_commit": True,
         "auto_push": False,
+        "auto_pull": True,
+        "pull_ttl_seconds": 60,
         "remote": {"url": ""},
         "allowed_remote_prefixes": ["http://10.21.20.112/", "http://10.21.20.112:18084/"],
     },
-    "index": {"max_lines": 300},
+    "index": {"max_lines": 300, "vector_model": "char-ngram-v1", "dense_threshold": 0.25},
+    "scope_map": {},
     "stats": {"enabled": True},
     "hooks": {"enabled": True, "inject_min_confidence": "verified"},
-    "v2": {
-        "alerts": {
-            # 运维告警（knowbase alerts / knowbase doctor 共同读取）
-            # webhook_url 为空时仅打 stdout；log_to_file 留空表示不落盘
-            "enabled": True,
-            "cooldown_seconds": 300.0,
-            "webhook_url": "",
-            "webhook_timeout": 5.0,
-            "log_to_file": "",
-        },
-    },
 }
 
 

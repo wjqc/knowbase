@@ -5,6 +5,10 @@ hit_count 属运行统计，只存本库不入 frontmatter（避免读操作产�
 """
 
 import json
+import hashlib
+import math
+import os
+import re
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -37,6 +41,15 @@ def connect(repo: Path) -> sqlite3.Connection:
       ts TEXT, agent TEXT, tool TEXT, memory_id TEXT, detail TEXT);
     CREATE TABLE IF NOT EXISTS feedback_log(
       ts TEXT, memory_id TEXT, agent TEXT, outcome TEXT);
+    CREATE TABLE IF NOT EXISTS embedding_index(
+      memory_id TEXT PRIMARY KEY, model_version TEXT NOT NULL,
+      content_hash TEXT NOT NULL, vector TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS source_state(
+      source_path TEXT PRIMARY KEY, source_hash TEXT NOT NULL,
+      modified_at TEXT, indexed_at TEXT NOT NULL, status TEXT NOT NULL, error TEXT);
+    CREATE TABLE IF NOT EXISTS sync_state(
+      remote TEXT PRIMARY KEY, local_revision TEXT, remote_revision TEXT,
+      last_fetch_at TEXT, last_push_at TEXT, status TEXT NOT NULL, error TEXT);
     """)
     conn.commit()
     return conn
@@ -49,6 +62,17 @@ def upsert(conn: sqlite3.Connection, meta: dict, body: str, path: Path, staging:
     conn.execute(
         "INSERT INTO mem_fts(id, title, tags, body) VALUES(?,?,?,?)",
         (meta["id"], meta.get("title", ""), " ".join(meta.get("tags", [])), body),
+    )
+    vector_text = f"{meta.get('title', '')} {' '.join(meta.get('tags', []))} {body}"
+    content_hash = hashlib.sha256(vector_text.encode("utf-8")).hexdigest()
+    model = config.load_config().get("index", {}).get("vector_model", "char-ngram-v1")
+    conn.execute(
+        "INSERT INTO embedding_index(memory_id,model_version,content_hash,vector,updated_at) "
+        "VALUES(?,?,?,?,?) ON CONFLICT(memory_id) DO UPDATE SET "
+        "model_version=excluded.model_version,content_hash=excluded.content_hash,"
+        "vector=excluded.vector,updated_at=excluded.updated_at",
+        (meta["id"], model, content_hash, json.dumps(_fallback_vector(vector_text)),
+         datetime.now().isoformat(timespec="seconds")),
     )
     conn.execute(
         """INSERT INTO meta(id,type,title,scope,tags,confidence,status,last_verified,updated,
@@ -84,6 +108,7 @@ def rebuild(repo: Path) -> int:
             upsert(conn, meta, body, path, staging=(path.parent.name == "staging"), commit=False)
             conn.execute("UPDATE meta SET hit_count=? WHERE id=?", (old_hits.get(meta["id"], 0), meta["id"]))
             n += 1
+        conn.execute("DELETE FROM embedding_index WHERE memory_id NOT IN (SELECT id FROM meta)")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -156,6 +181,81 @@ def _like_ids(conn: sqlite3.Connection, terms: list[str]) -> dict[str, float]:
     return {r[0]: 1.0 for r in rows}
 
 
+def _fallback_vector(text: str, dim: int = 512) -> list[float]:
+    """无模型时的字符 n-gram 向量；用于模糊召回，不冒充语义模型。"""
+    s = (text or "").lower()
+    ascii_terms = re.findall(r"[a-z0-9_.-]{2,}", s)
+    cjk_runs = re.findall(r"[\u4e00-\u9fff]+", s)
+    tokens = ascii_terms[:]
+    for run in cjk_runs:
+        tokens.extend(run[i:i + 2] for i in range(max(1, len(run) - 1)))
+        tokens.extend(run[i:i + 3] for i in range(max(1, len(run) - 2)))
+    vec = [0.0] * dim
+    for token in tokens:
+        pos = int.from_bytes(hashlib.md5(token.encode("utf-8")).digest()[:4], "big") % dim
+        vec[pos] += 1.0
+    norm = math.sqrt(sum(x * x for x in vec))
+    return [x / norm for x in vec] if norm else vec
+
+
+def _dense_ids(conn: sqlite3.Connection, query: str, allowed_ids: set[str], limit: int = 100) -> dict[str, float]:
+    """直接对现有 FTS 内容做 dense 召回；不创建第二套数据库。"""
+    qv = _fallback_vector(query)
+    if not any(qv):
+        return {}
+    threshold = float(config.load_config().get("index", {}).get("dense_threshold", 0.25))
+    scored = []
+    for mid, raw_vector in conn.execute("SELECT memory_id,vector FROM embedding_index"):
+        if mid not in allowed_ids:
+            continue
+        try:
+            dv = json.loads(raw_vector)
+        except (TypeError, ValueError):
+            continue
+        score = sum(a * b for a, b in zip(qv, dv))
+        if score >= threshold:
+            scored.append((mid, score))
+    scored.sort(key=lambda item: -item[1])
+    return dict(scored[:limit])
+
+
+_QUERY_ALIASES = {
+    "连不上": ("连接失败", "启动失败", "vpn"),
+    "很卡": ("加载慢", "查询慢", "性能"),
+    "怎么写": ("生成流程", "编写流程"),
+    "问一下": ("征求同意", "确认"),
+}
+
+
+def _expanded_lexical_ids(conn: sqlite3.Connection, query: str,
+                          base: dict[str, float] | None) -> dict[str, float]:
+    """原查询精确召回 + 受控同义短语扩展；扩展项使用 OR，不改变原词高优先级。"""
+    scores = dict(base or {})
+    terms = []
+    for phrase, aliases in _QUERY_ALIASES.items():
+        if phrase in query:
+            terms.extend(aliases)
+    # 长中文提问至少保留首个有信息量的 2~4 字片段，如“日报”。
+    for run in re.findall(r"[\u4e00-\u9fff]{2,}", query):
+        cleaned = re.sub(r"(怎么写|怎么办|如何|一下吗|一下)$", "", run)
+        if len(cleaned) >= 2:
+            terms.append(cleaned)
+    for term in dict.fromkeys(terms):
+        hit = _match_ids(conn, [term]) or _like_ids(conn, [term])
+        for mid, score in hit.items():
+            scores[mid] = max(scores.get(mid, 0.0), score * 0.7)
+    return scores
+
+
+def _rrf_scores(*rankings: dict[str, float], k: int = 60) -> dict[str, float]:
+    fused: dict[str, float] = {}
+    for ranking in rankings:
+        ordered = sorted(ranking, key=lambda mid: -ranking[mid])
+        for rank, mid in enumerate(ordered, 1):
+            fused[mid] = fused.get(mid, 0.0) + 1.0 / (k + rank)
+    return fused
+
+
 def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
            scope: str | None = None, tag: str | None = None, limit: int = 5,
            include_inactive: bool = False) -> list[dict]:
@@ -171,15 +271,11 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
     if not lex:
         # trigram 无命中时整体回退 LIKE（错别字/词形变化兜底）
         lex = _like_ids(conn, terms)
-    if not lex:
-        return []
-
-    results = []
+    lex = _expanded_lexical_ids(conn, query, lex)
+    eligible = []
     for r in conn.execute("SELECT * FROM meta WHERE status != 'archived'"):
         m = _row_meta(r)
         if not include_inactive and (m["staging"] or m["status"] != "active"):
-            continue
-        if m["id"] not in lex:
             continue
         if mtype and m["type"] != mtype:
             continue
@@ -187,14 +283,26 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
             continue
         if tag and tag not in m["tags"]:
             continue
-        if short_terms and lex is not None:
+        eligible.append(m)
+    allowed_ids = {m["id"] for m in eligible}
+    lex = {mid: score for mid, score in (lex or {}).items() if mid in allowed_ids}
+    dense = _dense_ids(conn, query, allowed_ids)
+    fused = _rrf_scores(lex, dense)
+    if not fused:
+        return []
+
+    results = []
+    for m in eligible:
+        if m["id"] not in fused:
+            continue
+        if short_terms and m["id"] in lex:
             row = conn.execute(
                 "SELECT title, tags, body FROM mem_fts WHERE id=?", (m["id"],)
             ).fetchone()
             hay = " ".join(row).lower() if row else ""
             if not all(t.lower() in hay for t in short_terms):
                 continue
-        score = (lex[m["id"]] or 1.0) * _scope_factor(m, scope) \
+        score = fused[m["id"]] * _scope_factor(m, scope) \
             * (1.5 if m["confidence"] == "verified" else 1.0) \
             * _freshness_factor(m) * _feedback_factor(m)
         snippet = ""
@@ -204,7 +312,9 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
         ).fetchone()
         if row:
             snippet = row[0]
-        results.append({**m, "score": round(score, 4), "snippet": snippet})
+        channels = [name for name, ranking in (("lexical", lex), ("dense", dense)) if m["id"] in ranking]
+        results.append({**m, "score": round(score, 6), "snippet": snippet,
+                        "channels": channels})
 
     results.sort(key=lambda x: -x["score"])
     return results[:max(0, min(limit, 100))]
@@ -340,6 +450,35 @@ def record_search(conn, query, scope, results, tool="search"):
                          "score": h["score"], "confidence": h["confidence"],
                          "status": h["status"]} for i, h in enumerate(results)]}
     record_usage(conn, tool, detail=json.dumps(payload, ensure_ascii=False))
+
+
+def record_source_state(conn, source_path: str, source_hash: str,
+                        modified_at: str = "", status: str = "indexed", error: str = ""):
+    conn.execute(
+        "INSERT INTO source_state(source_path,source_hash,modified_at,indexed_at,status,error) "
+        "VALUES(?,?,?,?,?,?) ON CONFLICT(source_path) DO UPDATE SET "
+        "source_hash=excluded.source_hash,modified_at=excluded.modified_at,"
+        "indexed_at=excluded.indexed_at,status=excluded.status,error=excluded.error",
+        (source_path, source_hash, modified_at,
+         datetime.now().isoformat(timespec="seconds"), status, error or None),
+    )
+    conn.commit()
+
+
+def record_sync_state(conn, remote: str, *, local_revision: str = "",
+                      remote_revision: str = "", last_fetch_at: str | None = None,
+                      last_push_at: str | None = None, status: str = "ok", error: str = ""):
+    conn.execute(
+        "INSERT INTO sync_state(remote,local_revision,remote_revision,last_fetch_at,last_push_at,status,error) "
+        "VALUES(?,?,?,?,?,?,?) ON CONFLICT(remote) DO UPDATE SET "
+        "local_revision=excluded.local_revision,remote_revision=excluded.remote_revision,"
+        "last_fetch_at=COALESCE(excluded.last_fetch_at,sync_state.last_fetch_at),"
+        "last_push_at=COALESCE(excluded.last_push_at,sync_state.last_push_at),"
+        "status=excluded.status,error=excluded.error",
+        (remote, local_revision or None, remote_revision or None,
+         last_fetch_at, last_push_at, status, error or None),
+    )
+    conn.commit()
 
 
 def search_history(conn, limit=100):

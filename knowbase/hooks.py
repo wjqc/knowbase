@@ -77,13 +77,18 @@ def _infer_scope(conn) -> str | None:
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR") or os.environ.get("ZCODE_PROJECT_DIR")
     if not project_dir:
         return None
-    name = Path(project_dir).name.lower()
+    resolved = str(Path(project_dir).expanduser().resolve())
+    scope_map = config.load_config().get("scope_map", {}) or {}
+    mapped = scope_map.get(resolved) or scope_map.get(Path(resolved).name)
+    if mapped:
+        return str(mapped)
+    name = Path(resolved).name.lower()
     if not name:
         return None
     scopes = [r[0] for r in conn.execute(
         "SELECT DISTINCT scope FROM meta WHERE staging = 0 AND scope != 'global'")]
     matches = [s for s in scopes if s and s.lower() == name]
-    return max(matches, key=len) if matches else name
+    return max(matches, key=len) if matches else None
 
 
 def user_prompt(prompt: str) -> str:
