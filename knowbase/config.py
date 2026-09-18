@@ -24,6 +24,17 @@ DEFAULTS = {
     "index": {"max_lines": 300},
     "stats": {"enabled": True},
     "hooks": {"enabled": True, "inject_min_confidence": "verified"},
+    "v2": {
+        "alerts": {
+            # 运维告警（knowbase alerts / knowbase doctor 共同读取）
+            # webhook_url 为空时仅打 stdout；log_to_file 留空表示不落盘
+            "enabled": True,
+            "cooldown_seconds": 300.0,
+            "webhook_url": "",
+            "webhook_timeout": 5.0,
+            "log_to_file": "",
+        },
+    },
 }
 
 

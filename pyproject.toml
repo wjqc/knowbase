@@ -3,7 +3,21 @@ name = "knowbase"
 version = "0.1.0"
 description = "薪火：跨 Agent 共享的经验记忆库 MCP 服务（本地 markdown + git + SQLite FTS5）"
 requires-python = ">=3.10"
-dependencies = ["mcp>=1.2,<2", "pyyaml>=6.0"]
+dependencies = [
+  "mcp>=1.2,<2",
+  "pyyaml>=6.0",
+  # V2 多格式摄取与治理（Phase 0/1/5 必需；PDF/DOCX/XLSX/PPTX/OCR/JSON Schema/test）
+  "pypdf>=5.0",
+  "python-docx>=1.1",
+  "openpyxl>=3.1",
+  "python-pptx>=1.0",
+  "pillow>=10.0",        # P5-A3 OCR 解析图片字节
+  "pytesseract>=0.3",    # P5-A3 OCR Python 包装（tesseract 二进制仍需手动安装）
+  "jsonschema>=4.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
 
 [build-system]
 requires = ["setuptools>=68"]
