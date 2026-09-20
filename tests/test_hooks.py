@@ -89,7 +89,7 @@ check("stop 无操作放行", hooks.stop_event("sess-C", str(tr3)) == "")
 import subprocess
 p = subprocess.run(
     [".venv/bin/python", "-m", "knowbase", "hook", "user-prompt"],
-    input=json.dumps({"prompt": "vpn 内网连接问题"}),
+    input=json.dumps({"prompt": "EasyConnect 死锁"}),
     capture_output=True, text=True)
 check("CLI hook 入口", "P-2026-0001" in p.stdout, p.stdout[:80] + p.stderr[:80])
 
@@ -97,7 +97,7 @@ check("CLI hook 入口", "P-2026-0001" in p.stdout, p.stdout[:80] + p.stderr[:80
 import json as _json
 out = subprocess.run(
     [".venv/bin/python", "-m", "knowbase", "hook", "user-prompt", "--style", "zcode"],
-    input=_json.dumps({"prompt": "vpn 内网连接问题"}), capture_output=True, text=True).stdout
+    input=_json.dumps({"prompt": "EasyConnect 死锁"}), capture_output=True, text=True).stdout
 parsed = _json.loads(out)
 check("zcode 风格 additionalContext", "additionalContext" in parsed and "P-2026-0001" in parsed["additionalContext"], out[:100])
 

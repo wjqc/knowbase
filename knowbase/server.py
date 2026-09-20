@@ -36,20 +36,27 @@ def _cfg():
     return config.load_config()
 
 
-def _post_save(rp, cfg, meta, body, path, staging, commit_msg):
-    """写盘之后的公共管道：git 提交 → 同步索引 → 重建 INDEX → (可选)推送。"""
-    git_warn = None
-    if cfg["git"].get("auto_commit", True):
-        git_warn = gitops.commit_all(rp, commit_msg)
+def _post_save(rp, cfg, meta, body, path, staging, commit_msg, modified=()):
+    """锁内本地事务：同步索引 → INDEX → git commit。远程 push 必须在锁外。"""
     conn = index.connect(rp)
     index.upsert(conn, meta, body, path, staging)
+    for target_meta, target_body, target_path in modified:
+        index.upsert(conn, target_meta, target_body, target_path,
+                     target_path.parent.name == "staging")
     conn.close()
     index.build_index_md(rp, cfg)
-    push_warn = None
-    if cfg["git"].get("auto_push"):
-        push_warn = gitops.push(rp, cfg["git"]["remote"].get("url", ""),
-                                cfg["git"].get("allowed_remote_prefixes", []))
-    return git_warn, push_warn
+    git_warn = None
+    if cfg["git"].get("auto_commit", True):
+        owned_paths = [path, rp / "INDEX.md"] + [item[2] for item in modified]
+        git_warn = gitops.commit_paths(rp, commit_msg, owned_paths)
+    return git_warn
+
+
+def _push_after_write(rp, cfg, git_warn):
+    """兼容旧调用名：只排队，不在 MCP 写请求中执行网络 push。"""
+    if git_warn or not cfg["git"].get("auto_push"):
+        return None
+    return gitops.schedule_push(rp, cfg["git"])
 
 
 def _relation_side_effects(rp, meta):
@@ -97,6 +104,9 @@ def save_impl(type: str, title: str, body: str, tags: list | None = None,
         return f"错误：type 须为 {store.TYPES}"
     if not title.strip() or not body.strip():
         return "错误：title 与 body 必填"
+    # MCP 入参不具备身份权威：source 只可作为普通 agent 来源，不能声明 human。
+    if source and source.lower().startswith("human:"):
+        source = None
     src = source or f"agent:{config.agent_name()}:adhoc"
     meta = store.new_meta(type, title, scope, tags or [], src, relations, evidence)
     if provenance:
@@ -120,8 +130,15 @@ def save_impl(type: str, title: str, body: str, tags: list | None = None,
                 f"若为取代旧经验，请在 relations 中声明 {{id: {smeta['id']}, type: supersedes}} 后重试。")
 
     cfg = _cfg()
-    staging = type in ("standard", "preference", "bizrule") and not src.startswith("human")
+    staging = type in ("standard", "preference", "bizrule")
     with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
+        # 查重必须在写锁内再次执行，封住两个进程同时通过预检查的窗口。
+        sim = store.find_similar(rp, title)
+        if sim:
+            _, smeta, spath = sim
+            return (f"已存在高度相似的记忆 [{smeta['id']}] {smeta.get('title','')}（{spath}）。\n"
+                    f"本次未保存。若为补充/修正请改用 memory_update({smeta['id']}, ...)；"
+                    f"若为取代旧经验，请在 relations 中声明 {{id: {smeta['id']}, type: supersedes}} 后重试。")
         mid = store.alloc_id(rp, type)
         meta["id"] = mid
         path = store.mem_path(rp, type, mid, staging=staging)
@@ -131,12 +148,9 @@ def save_impl(type: str, title: str, body: str, tags: list | None = None,
         conn0 = index.connect(rp)
         index.record_usage(conn0, "save", mid, title)
         conn0.close()
-        gw, pw = _post_save(rp, cfg, meta, body, path, staging, f"memory({mid}): {meta['title']} [{src}]")
-        if modified:
-            connm = index.connect(rp)
-            for tm, tb, tp in modified:
-                index.upsert(connm, tm, tb, tp, "staging" in str(tp))
-            connm.close()
+        gw = _post_save(rp, cfg, meta, body, path, staging,
+                        f"memory({mid}): {meta['title']} [{src}]", modified)
+    pw = _push_after_write(rp, cfg, gw)
 
     where = "staging（提案待人工审核：git mv 到 preferences/ 或 standards/ 后生效）" if staging else str(path)
     out = [f"已保存 {mid} → {where}"]
@@ -162,6 +176,10 @@ def update_impl(id: str, body: str | None = None, title: str | None = None,
         meta, old_body, path = store.load(rp, id)
         if not meta:
             return f"错误：未找到 {id}"
+        if meta.get("type") in ("standard", "preference", "bizrule") \
+                and path.parent.name != "staging":
+            return (f"错误：{id} 是已生效的 {meta.get('type')}，Agent 无权直接修改；"
+                    f"请由人工执行 `knowbase revise {id} --body-file <文件>`。")
         meta["updated"] = date.today().isoformat()
         if title is not None:
             meta["title"] = title.strip()
@@ -180,13 +198,9 @@ def update_impl(id: str, body: str | None = None, title: str | None = None,
         conn0 = index.connect(rp)
         index.record_usage(conn0, "update", id)
         conn0.close()
-        gw, pw = _post_save(rp, cfg, meta, new_body, path,
-                            "staging" in str(path), f"update({id}): {meta['title']}")
-        if modified:
-            connm = index.connect(rp)
-            for tm, tb, tp in modified:
-                index.upsert(connm, tm, tb, tp, "staging" in str(tp))
-            connm.close()
+        gw = _post_save(rp, cfg, meta, new_body, path,
+                        path.parent.name == "staging", f"update({id}): {meta['title']}", modified)
+    pw = _push_after_write(rp, cfg, gw)
     out = [f"已更新 {id}（内容修改；confidence/status 由服务端状态机管理，如需人工复核请用 CLI: knowbase verify {id}）"]
     out += notes
     if gw:
@@ -229,6 +243,14 @@ def search_impl(query: str, type: str | None = None, scope: str | None = None,
         return err
     _updated, sync_warn = gitops.sync_before_read(rp, _cfg())
     conn = index.connect(rp)
+    if scope is None:
+        from .hooks import _infer_scope, has_project_context
+        inferred = _infer_scope(conn)
+        if has_project_context() and inferred is None:
+            conn.close()
+            return ("错误：当前项目无法解析 scope；请在 ~/.knowbase/config.json 的 "
+                    "scope_map 中配置项目路径，或显式传入 scope。")
+        scope = inferred or "global"
     results = index.search(conn, query, mtype=type, scope=scope, tag=tag, limit=limit, include_inactive=include_inactive)
     index.record_search(conn, query, scope, results)
     conn.close()
@@ -269,8 +291,9 @@ def feedback_impl(id: str, outcome: str, context: str = ""):
         index.upsert(conn, meta, body, path, staging)
         index.record_usage(conn, "feedback", id, f"{outcome} {context}".strip())
         conn.close()
-        gw, pw = _post_save(rp, cfg, meta, body, path, staging,
-                            f"feedback({id}): {outcome} by {by}")
+        gw = _post_save(rp, cfg, meta, body, path, staging,
+                        f"feedback({id}): {outcome} by {by}")
+    pw = _push_after_write(rp, cfg, gw)
     out = [f"已记录反馈：{id} ← {outcome}（by {by}）"] + events
     if gw:
         out.append(gw)

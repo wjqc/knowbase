@@ -27,6 +27,8 @@ memory.db（FTS/向量派生索引、统计、反馈、同步状态）
 5. 业务规则、标准、经验继续使用现有 staging、provenance、confidence 和 feedback 治理。
 6. 保持现有 ID、Markdown 路径、Git 历史和 MCP 参数兼容。
 
+治理补充：MCP 的 `source` 参数不具备身份权威；standard/preference/bizrule 始终进入 staging，激活后的修订只能通过本机可信人工 CLI `knowbase revise`。
+
 ## 2. 明确不做
 
 - 不创建 `.knowbase/v2.db`。
@@ -121,10 +123,12 @@ confidence × freshness × feedback 排序
 - `GIT_TERMINAL_PROMPT=0`，禁止 MCP 后台等待凭据输入。
 - commit/push 必须有超时。
 - push 失败记录状态并返回明确警告，不能返回 `undefined`。
+- 本地 INDEX/SQLite/Markdown 完成并提交后释放 RepoLock，再执行远程 push。
 
 ### 7.2 检索前更新
 
 - 后台或 TTL 到期时执行 fetch，不在每次查询无限阻塞。
+- fetch/merge/reindex 全程持 RepoLock，remote 名称和分支从配置/当前 Git 分支解析，不写死 origin/main。
 - 仅在工作区安全且可以 fast-forward 时自动更新。
 - 更新成功后对变化文件增量 reindex；初期允许全量 reindex。
 - 冲突、dirty worktree、认证失败均保留 last-known-good，并在 doctor 中展示。

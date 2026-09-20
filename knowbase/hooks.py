@@ -31,45 +31,7 @@ def session_start() -> str:
     )
 
 
-# ---------- 2. 用户提示词：本地自动检索并注入命中 ----------
-
-def _keywords(prompt: str) -> list[str]:
-    """从自然语言提示词提取检索关键词：ASCII 词 + 中文短段（长段切 4 字滑窗）。"""
-    import re
-    kws = [w for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.\-]+", prompt) if len(w) >= 2]
-    for run in re.findall(r"[\u4e00-\u9fff]{2,}", prompt):
-        if len(run) <= 4:
-            kws.append(run)
-        else:
-            kws.extend(run[i:i + 4] for i in range(0, len(run) - 3, 3))
-    seen, out = set(), []
-    for k in kws:
-        if k.lower() not in seen:
-            seen.add(k.lower())
-            out.append(k)
-    return out[:24]
-
-
-def _scored_search(conn, kws: list[str], limit: int, scope: str | None = None) -> list[dict]:
-    """OR 语义兜底：按命中关键词个数打分（AND 语义对无空格长句必然漏检）。
-    带 scope 时硬过滤（本项目+global）并给本项目微加成，防多项目术语碰撞混注。"""
-    scored = []
-    for r in conn.execute("SELECT * FROM meta WHERE status = 'active' AND staging = 0"):
-        m = index._row_meta(r)
-        if scope and m["scope"] not in (scope, "global"):
-            continue
-        row = conn.execute("SELECT title, tags, body FROM mem_fts WHERE id=?", (m["id"],)).fetchone()
-        hay = " ".join(row).lower() if row else ""
-        score = float(sum(1 for k in kws if k.lower() in hay))
-        anchors = " ".join(row[:2]).lower() if row else ""
-        if score < 2 and not any(k.lower() in anchors for k in kws):
-            continue
-        if score and scope and m["scope"] == scope:
-            score += 0.5  # 同分时本项目优先，高分全局经验仍可入围
-        if score:
-            scored.append((score, m))
-    scored.sort(key=lambda x: -x[0])
-    return [{**m, "score": s} for s, m in scored[:limit]]
+# ---------- 2. 用户提示词：统一检索并注入命中 ----------
 
 
 def _infer_scope(conn) -> str | None:
@@ -91,6 +53,10 @@ def _infer_scope(conn) -> str | None:
     return max(matches, key=len) if matches else None
 
 
+def has_project_context() -> bool:
+    return bool(os.environ.get("CLAUDE_PROJECT_DIR") or os.environ.get("ZCODE_PROJECT_DIR"))
+
+
 def user_prompt(prompt: str) -> str:
     """对用户输入做本地检索（自动推断当前项目 scope），命中则返回注入文本。"""
     if not config.load_config().get("hooks", {}).get("enabled", True):
@@ -101,15 +67,13 @@ def user_prompt(prompt: str) -> str:
     rp = config.repo_path()
     if not rp.exists():
         return ""
-    kws = _keywords(prompt)
-    if not kws:
-        return ""
     conn = index.connect(rp)
-    scope = _infer_scope(conn) or "global"
-    ascii_kws = [k for k in kws if k[0].isascii()]
-    hits = index.search(conn, " ".join(ascii_kws), scope=scope, limit=100) if ascii_kws else []
-    if not hits:
-        hits = _scored_search(conn, kws, 100, scope=scope)
+    inferred = _infer_scope(conn)
+    if has_project_context() and inferred is None:
+        conn.close()
+        return "[knowbase] 当前项目未配置 scope_map，已跳过自动检索，避免跨项目召回。"
+    scope = inferred or "global"
+    hits = index.search(conn, prompt, scope=scope, limit=100)
     min_conf = (config.load_config().get("hooks", {}) or {}).get("inject_min_confidence", "verified")
     if min_conf == "verified":
         hits = [h for h in hits if h.get("confidence") == "verified"]  # 防污染开关：自动注入只取已验证经验
@@ -121,7 +85,7 @@ def user_prompt(prompt: str) -> str:
     conn.close()
     if not hits:
         return ""
-    lines = ["[knowbase 自动检索] 以下为词法匹配候选，尚未确认适用；先核对项目、版本与证据，再按需 memory_read："]
+    lines = ["[knowbase 自动检索] 以下为统一混合检索候选，尚未确认适用；先核对项目、版本与证据，再按需 memory_read："]
     for h in hits:
         lines.append(f"- [{h['id']}] {h['title']}（{h['confidence']}·{h['status']} · scope={h['scope']}）")
     return "\n".join(lines)

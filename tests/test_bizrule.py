@@ -37,15 +37,16 @@ r = save_impl("bizrule", "欠费停机用户不可发起新业务受理", BODY,
               domain="cmi-受理", rule_status="effective")
 check("bizrule 落 staging", "staging" in r and "B-2026" in r, r)
 
-# 3. 人直接写 → 直接入库
+# 3. human source 入参不可绕过 staging；人工 CLI promote 后生效
 r = save_impl("bizrule", "VIP 透支受理额度规则", BODY,
               tags=["受理"], scope="cmi", provenance="2026-08-12 业务方邮件确认",
               source="human:文剑", domain="cmi-受理", rule_status="effective")
-check("人写直入 bizrules/", r.startswith("已保存 B-2026") and "staging" not in r.splitlines()[0], r)
+check("human source 不可绕过 staging", "staging" in r, r)
 bid = r.split()[1]
+check("人工 promote bizrule", cli.main(["promote", bid]) == 0)
 
 # 4. 检索命中业务规则
-r = search_impl("欠费停机 受理")
+r = search_impl("欠费停机 受理", scope="cmi")
 check("业务规则可检索", bid in r, r[:120])
 
 # 5. import 强制 staging + 出处占位

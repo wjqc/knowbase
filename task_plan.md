@@ -21,3 +21,12 @@
 6. 设计 V2 目标架构、数据模型、混合检索和同步协议（完成）
 7. 补齐接口兼容、迁移、部署、测试、灰度和回滚方案（完成）
 8. 形成 `docs/knowbase-v2-upgrade-plan.md` 独立交付文档并静态校验（完成）
+
+## 生产缺陷修复（2026-09-20）
+
+11. 权限：封死 source=human 伪造；正式规则更新必须走可信人工 CLI（完成）
+12. 写事务：INDEX/SQLite/Markdown 一致后再 commit；push 移出 RepoLock（完成）
+13. 同步：fetch/merge/reindex 加 RepoLock；动态 remote/default branch；校验真实 URL（完成）
+14. 检索：Hook 与 MCP 走同一路径；项目上下文强制 scope（完成）
+15. 测试：修复标准 pytest/CI 收集入口（完成）
+16. 全量回归、真实库静态检查、文档更新（完成）

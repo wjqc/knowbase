@@ -6,6 +6,7 @@
   knowbase verify <id>           人工确认有效（once→verified / stale 复活）
   knowbase archive <id>          人工归档
   knowbase promote <id>          人工激活 staging 提案（git mv 到正式目录）
+  knowbase revise <id>           人工修订已生效的标准/偏好/业务规则
   knowbase list [type]           列出记忆
   knowbase stats                 统计
   knowbase doctor                单库健康检查（memory.db/FTS/Git/治理）
@@ -109,21 +110,26 @@ def cmd_reindex() -> int:
 
 
 def _human_op(rp, fn, mid, label):
-    with RepoLock(rp, 10.0):
-        meta = fn(rp, mid)
-    if not meta:
-        print(f"错误：未找到 {mid}")
-        return 1
     cfg = config.load_config()
-    _body_path = store.find_file(rp, mid)
-    meta2, body, path = store.load(rp, mid)
-    conn = index.connect(rp)
-    index.upsert(conn, meta2, body, path, "staging" in str(path))
-    conn.close()
-    index.build_index_md(rp, cfg)
-    if cfg["git"].get("auto_commit", True):
-        gitops.commit_all(rp, f"{label}({mid}): by human")
+    with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
+        meta = fn(rp, mid)
+        if not meta:
+            print(f"错误：未找到 {mid}")
+            return 1
+        meta2, body, path = store.load(rp, mid)
+        conn = index.connect(rp)
+        index.upsert(conn, meta2, body, path, path.parent.name == "staging")
+        conn.close()
+        index.build_index_md(rp, cfg)
+        git_warn = gitops.commit_paths(rp, f"{label}({mid}): by human", [path, rp / "INDEX.md"]) \
+            if cfg["git"].get("auto_commit", True) else None
+    push_warn = None if git_warn or not cfg["git"].get("auto_push") else \
+        gitops.schedule_push(rp, cfg["git"])
     print(f"✓ {label} {mid} 完成")
+    if git_warn:
+        print(f"⚠ {git_warn}")
+    if push_warn:
+        print(f"⚠ {push_warn}")
     return 0
 
 
@@ -138,28 +144,81 @@ def cmd_archive(mid: str) -> int:
 def cmd_promote(mid: str) -> int:
     """人工激活 staging 提案：等价于审过的 git mv，等价于通过状态机入口的治理动作。"""
     rp = config.repo_path()
-    meta, body, path = store.load(rp, mid)
-    if not meta:
-        print(f"错误：未找到 {mid}")
-        return 1
-    if "staging" not in str(path):
-        print(f"错误：{mid} 不在 staging/（无需 promote）")
-        return 1
-    dtype = meta.get("type")
-    target = store.mem_path(rp, dtype, mid)
-    with RepoLock(rp, 10.0):
+    cfg = config.load_config()
+    with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
+        meta, body, path = store.load(rp, mid)
+        if not meta:
+            print(f"错误：未找到 {mid}")
+            return 1
+        if path.parent.name != "staging":
+            print(f"错误：{mid} 不在 staging/（无需 promote）")
+            return 1
+        dtype = meta.get("type")
+        target = store.mem_path(rp, dtype, mid)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(path), str(target))
         meta["updated"] = date.today().isoformat()
         target.write_text(store.render(meta, body), encoding="utf-8")
-    cfg = config.load_config()
-    conn = index.connect(rp)
-    index.upsert(conn, meta, body, target, False)
-    conn.close()
-    index.build_index_md(rp, cfg)
-    if cfg["git"].get("auto_commit", True):
-        gitops.commit_all(rp, f"promote({mid}): staging → {store.TYPE_DIR[dtype]}（人工审核通过）")
+        conn = index.connect(rp)
+        index.upsert(conn, meta, body, target, False)
+        conn.close()
+        index.build_index_md(rp, cfg)
+        git_warn = gitops.commit_paths(
+            rp, f"promote({mid}): staging → {store.TYPE_DIR[dtype]}（人工审核通过）",
+            [path, target, rp / "INDEX.md"],
+        ) if cfg["git"].get("auto_commit", True) else None
+    push_warn = None if git_warn or not cfg["git"].get("auto_push") else \
+        gitops.schedule_push(rp, cfg["git"])
     print(f"✓ {mid} 已激活 → {target}")
+    if git_warn:
+        print(f"⚠ {git_warn}")
+    if push_warn:
+        print(f"⚠ {push_warn}")
+    return 0
+
+
+def cmd_revise(mid: str, body_file: str, title: str | None = None) -> int:
+    """可信人工 CLI：修订已生效的 standard/preference/bizrule。"""
+    rp = config.repo_path()
+    cfg = config.load_config()
+    body_path = Path(body_file).expanduser().resolve()
+    if not body_path.is_file():
+        print(f"错误：正文文件不存在 {body_path}")
+        return 1
+    new_body = body_path.read_text(encoding="utf-8")
+    with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
+        meta, _old_body, path = store.load(rp, mid)
+        if not meta:
+            print(f"错误：未找到 {mid}")
+            return 1
+        if meta.get("type") not in ("standard", "preference", "bizrule"):
+            print(f"错误：revise 仅用于 standard/preference/bizrule，当前为 {meta.get('type')}")
+            return 1
+        if path.parent.name == "staging":
+            print(f"错误：{mid} 仍在 staging，请使用 memory_update 后再 promote")
+            return 1
+        if title is not None:
+            meta["title"] = title.strip()
+        meta["updated"] = date.today().isoformat()
+        errs = store.lint(meta, new_body)
+        if errs:
+            print("错误：lint 未通过，未修改。\n- " + "\n- ".join(errs))
+            return 1
+        path.write_text(store.render(meta, new_body), encoding="utf-8")
+        conn = index.connect(rp)
+        index.upsert(conn, meta, new_body, path, False)
+        conn.close()
+        index.build_index_md(rp, cfg)
+        git_warn = gitops.commit_paths(rp, f"revise({mid}): {meta['title']} by human",
+                                       [path, rp / "INDEX.md"]) \
+            if cfg["git"].get("auto_commit", True) else None
+    push_warn = None if git_warn or not cfg["git"].get("auto_push") else \
+        gitops.schedule_push(rp, cfg["git"])
+    print(f"✓ revise {mid} 完成")
+    if git_warn:
+        print(f"⚠ {git_warn}")
+    if push_warn:
+        print(f"⚠ {push_warn}")
     return 0
 
 
@@ -174,7 +233,7 @@ def cmd_list(dtype: str | None) -> int:
 
 
 def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: str) -> int:
-    """批量导入现存 markdown 文档为 once 级记忆（原文即 body，结构可后续 AI 提炼 + memory_update 转正）。"""
+    """批量解析支持的文档格式并导入为 once 级记忆。"""
     import re as _re
     src_dir = Path(directory).expanduser()
     if not src_dir.is_dir():
@@ -196,6 +255,8 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
         print("目录中未找到支持的文档文件")
         return 1
     imported = skipped = 0
+    written_paths: list[Path] = []
+    effective_staging = staging or dtype in ("standard", "preference", "bizrule")
     with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
         conn = index.connect(rp)
         existing = {(m.get("import_path"), m.get("scope"), m.get("type")): m
@@ -240,13 +301,13 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
             meta["import_path"] = str(f.resolve())
             meta["import_sha256"] = digest
             if dtype == "bizrule":
-                staging = True  # 业务规则强制人审：无出处的规则是危险品
                 meta["provenance"] = f"待补出处（导入自 {src_dir.name}/{f.name}）"
             meta["id"] = store.alloc_id(rp, dtype)
-            target = rp / ("staging" if staging else store.TYPE_DIR[dtype]) / f"{meta['id']}.md"
+            target = rp / ("staging" if effective_staging else store.TYPE_DIR[dtype]) / f"{meta['id']}.md"
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(store.render(meta, body), encoding="utf-8")
-            index.upsert(conn, meta, body, target, staging)
+            written_paths.append(target)
+            index.upsert(conn, meta, body, target, effective_staging)
             index.record_source_state(
                 conn, str(f.resolve()), digest,
                 datetime.fromtimestamp(f.stat().st_mtime).isoformat(timespec="seconds"),
@@ -256,12 +317,18 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
         if imported:
             index.record_usage(conn, "import", detail=f"{imported} from {src_dir.name}")
         conn.close()
-    index.build_index_md(rp, cfg)
-    if imported and cfg["git"].get("auto_commit", True):
-        gitops.commit_all(rp, f"import({dtype}): {imported} 条 ← {src_dir.name}（scope={scope}，{'staging' if staging else '直接入库'}）")
-    if imported and cfg["git"].get("auto_push"):
-        gitops.push(rp, cfg["git"]["remote"].get("url", ""), cfg["git"].get("allowed_remote_prefixes", []))
+        index.build_index_md(rp, cfg)
+        git_warn = gitops.commit_paths(
+            rp, f"import({dtype}): {imported} 条 ← {src_dir.name}（scope={scope}，{'staging' if effective_staging else '直接入库'}）",
+            written_paths + [rp / "INDEX.md"],
+        ) if imported and cfg["git"].get("auto_commit", True) else None
+    push_warn = None if git_warn or not imported or not cfg["git"].get("auto_push") else \
+        gitops.schedule_push(rp, cfg["git"])
     print(f"完成：导入 {imported}，跳过 {skipped}（重复、空文件或被拦截）")
+    if git_warn:
+        print(f"⚠ {git_warn}")
+    if push_warn:
+        print(f"⚠ {push_warn}")
     return 0
 
 
@@ -361,6 +428,10 @@ def main(argv=None):
     p_arch.add_argument("id")
     p_pro = sub.add_parser("promote", help="激活 staging 提案")
     p_pro.add_argument("id")
+    p_rev = sub.add_parser("revise", help="人工修订已生效的标准/偏好/业务规则")
+    p_rev.add_argument("id")
+    p_rev.add_argument("--body-file", required=True)
+    p_rev.add_argument("--title")
     p_list = sub.add_parser("list", help="列出记忆")
     p_list.add_argument("type", nargs="?", choices=store.TYPES)
     sub.add_parser("stats", help="统计")
@@ -372,7 +443,7 @@ def main(argv=None):
     p_hook = sub.add_parser("hook", help="Agent hook 入口")
     p_hook.add_argument("event", choices=["session-start", "user-prompt", "stop"])
     p_hook.add_argument("--style", choices=["claude", "zcode"], default="claude")
-    p_imp = sub.add_parser("import", help="批量导入现存 markdown 文档为 once 级记忆")
+    p_imp = sub.add_parser("import", help="批量导入 Markdown/PDF/Office/HTML/图片/代码/日志")
     p_imp.add_argument("directory")
     p_imp.add_argument("--type", choices=store.TYPES, default="pitfall")
     p_imp.add_argument("--scope", default="global")
@@ -406,6 +477,8 @@ def main(argv=None):
         return cmd_archive(args.id)
     if args.cmd == "promote":
         return cmd_promote(args.id)
+    if args.cmd == "revise":
+        return cmd_revise(args.id, args.body_file, args.title)
     if args.cmd == "list":
         return cmd_list(args.type)
     if args.cmd == "stats":

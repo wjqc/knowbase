@@ -28,7 +28,7 @@ assert main(['promote',mid])==0
 assert hooks.user_prompt('AlphaUnique 工程部署')==''
 assert main(['verify',mid])==0
 os.environ['CLAUDE_PROJECT_DIR']='/tmp/unrelated'
-assert hooks.user_prompt('AlphaUnique 工程部署')==''
+assert '未配置 scope_map' in hooks.user_prompt('AlphaUnique 工程部署')
 os.environ['CLAUDE_PROJECT_DIR']='/tmp/demo'
 assert mid in hooks.user_prompt('AlphaUnique 工程部署')
 read_impl(mid);feedback_impl(mid,'helpful')

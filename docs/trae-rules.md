@@ -12,7 +12,7 @@
    返回"已存在相似记忆"时改用 memory_update；
 3. 按某条记忆解决问题（或发现它失效）→ memory_feedback 回填 helpful / not_helpful / outdated / incorrect；
 4. stale / once 状态的记忆采信前先在当前环境验证；不要整读 INDEX.md，检索一律走 memory_search；
-5. standard / preference 类内容保存时自动进 staging 待人审，属正常治理流程，不要重试绕过；
+5. standard / preference / bizrule 保存时强制进 staging 待人审；正式规则 Agent 不可 memory_update，人工使用 promote/revise CLI；
 6. body 里不要出现明文密钥。
 ```
 

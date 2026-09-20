@@ -72,13 +72,13 @@ check("查重拦截", "已存在高度相似" in r and pid in r, r)
 r = save_impl("standard", "接口发布门禁标准", "## 规则\n接口上线必须过验收环境回归。\n## 理由\n保障交付质量。\n")
 check("standard 落 staging", "staging" in r and "S-2026" in r, r)
 
-# 6. preference 由 Agent 保存 → staging；人直接写（human source）→ 正式目录
+# 6. preference 无论 source 入参如何都必须 staging；人工通过 CLI promote
 os.environ["KNOWBASE_AGENT_NAME"] = "claude-code"
 r = save_impl("preference", "输出必须中文", "## 规则\n对用户输出一律中文。\n")
 check("preference(Agent) 落 staging", "staging" in r, r)
 r = save_impl("preference", "绝不自动提交知识库", "## 规则\n知识库变更不自动 commit。\n",
               source="human:文剑")
-check("preference(人) 直接入库", r.startswith("已保存 PR-") and "staging" not in r.split("\n")[0], r)
+check("preference human source 不可绕过 staging", "staging" in r, r)
 
 # 7. 检索：FTS5 命中 + 排序字段
 r = search_impl("EasyConnect 死锁")

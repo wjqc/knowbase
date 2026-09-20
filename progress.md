@@ -681,3 +681,9 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - **可选 P5-D**:把 CLI 接入 cron / GitHub Actions，定时跑评测 + 自动建 PR 报告 regression
 - **可选 P5-E**:把 parser_versions 快照写入 DocumentVersion / Operation payload（已预留 chunk meta 入口，需补 schema migration）
 - **当前 Phase 5 全部完成** — 可进入 Phase 6 (SLA / on-call / 文档发布)
+
+## 2026-09-20 生产缺陷修复
+
+基线确认：完整 `pytest -q` 在收集 `tests/test_hooks.py` 时因模块级 `sys.exit(1)` 触发 INTERNALERROR，最终 0 tests；逐脚本 E2E/import/retrieval 仍通过。真实库 51 条 parity 正常、sync=ok，但 `INDEX.md` 持续 dirty。需修复权限伪造、写事务/push、同步锁与动态分支、Hook/MCP 路径和 pytest/CI。
+
+完成：MCP source 不再能声明 human，三类治理知识强制 staging，正式规则的 Agent update 被拒并新增可信人工 `knowbase revise`；import 同样强制治理类型 staging。写事务改为文件/SQLite/INDEX 完成后仅提交本事务路径，网络 push 改为 sync_state pending，不再发生在写请求；TTL 同步在 RepoLock 内 fetch/merge/reindex，动态解析 remote/当前分支，实时校验实际 URL，并在锁外处理本地 ahead push。Hook 与 MCP 统一走 index.search；项目上下文无法解析 scope 时明确拒绝。脚本回归由 pytest 子进程包装并新增 GitHub Actions。验证：针对性 11 项、标准全套 93 项通过，wheel 构建、compileall、diff check 和禁止模式扫描通过；真实库 51/51/51/51 parity 正常。环境边界：tesseract 未安装；真实库 INDEX.md 为本轮开始前已有用户侧 dirty 状态，本轮未修改该数据仓库文件。
