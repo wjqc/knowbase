@@ -344,7 +344,6 @@ def cmd_stats() -> int:
 
 def cmd_doctor(json_output: bool = False) -> int:
     """检查现有 Markdown + memory.db + Git 单库运行状态。"""
-    import subprocess
     rp = config.repo_path()
     checks: list[dict] = []
     db = rp / index.DB_NAME
@@ -382,10 +381,7 @@ def cmd_doctor(json_output: bool = False) -> int:
             try: conn.close()
             except Exception: pass
     try:
-        status = subprocess.run(["git", "-C", str(rp), "status", "--porcelain", "--branch"],
-                                capture_output=True, text=True, timeout=5,
-                                env={**__import__('os').environ, "GIT_TERMINAL_PROMPT": "0"})
-        lines = status.stdout.splitlines()
+        lines = gitops._run(rp, "status", "--porcelain", "--branch", timeout=5).splitlines()
         dirty = max(0, len(lines) - 1)
         checks.append({"name": "git", "level": "warn" if dirty else "pass",
                        "message": f"{lines[0] if lines else 'unknown branch'}; dirty={dirty}"})

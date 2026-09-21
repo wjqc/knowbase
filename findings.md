@@ -341,3 +341,19 @@ fi
 ```
 
 **预防**：任何"评测 / 治理 / 准入检查"的 CLI 都采用三态 exit code；写 wrapper 脚本前先确认 root cause 分类。
+
+### F-WIN-01：subprocess.run(timeout) 在 Windows 上会永久挂起 — 超时必须杀整棵进程树
+
+**现象**：Windows + stdio MCP 下 `memory_save` 无限加载不返回；重启 knowbase MCP 进程后同一调用立即成功。多 Agent 窗口各自拉起服务实例共享同一记忆库时复现。
+
+**根因**：`gitops._run` 用 `subprocess.run(timeout=N)`。超时触发的 `proc.kill()` 在 Windows 上只终止 `git.exe` 本身；孙进程（git-remote-http / 凭据管理器 / gc）继承 stdout/stderr 管道句柄继续存活，`communicate()` 等 EOF 永久阻塞 → 调用线程卡死 → `.lock` 事务不释放 → 后续所有写请求排队挂死。"重启后立即成功"是因为重启连带杀掉了泄漏的 git 进程树与持锁进程。
+
+**正确做法**（已落地 `gitops._run_git`，`_run` / `commit_all` / `commit_paths` / `cmd_doctor` 全部改走它）：
+- `Popen` + `stdin=DEVNULL`，杜绝任何子进程等待终端输入
+- POSIX：`start_new_session=True` 独立会话，超时 `os.killpg(pgid, SIGKILL)` 整组击杀
+- Windows：`creationflags=CREATE_NEW_PROCESS_GROUP`，超时 `taskkill /F /T /PID` 按进程树击杀
+- 杀树后 `communicate(timeout=5)` 二次兜底回收，绝不在管道 EOF 上无限等
+- 回归测试 `tests/test_gitops_timeout.py`：假 git 父进程 sleep + 孙进程持有管道 sleep 60，断言超时后 <15s 快速失败且孙进程被清掉
+
+**预防**：任何"外部命令 + timeout"的代码都先问一句：超时路径杀的是进程还是进程树？跨平台子进程一律 `stdin=DEVNULL`。`subprocess.run(timeout=)` 的超时语义是"发起 kill 后等输出流关闭"，不是"保证返回"。
+

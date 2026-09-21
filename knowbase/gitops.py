@@ -5,6 +5,7 @@
 """
 
 import os
+import signal
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -14,15 +15,67 @@ from .locking import RepoLock
 
 _LAST_FETCH_MONO: dict[str, float] = {}
 
+_IS_WINDOWS = os.name == "nt"
 
-def _run(repo: Path, *args, timeout: float = 15.0) -> str:
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """强杀 git 及其全部子孙进程。
+
+    Windows 上 proc.kill() 只终止 git.exe 本身；孙进程（git-remote-http、
+    凭据管理器、gc）继承 stdout/stderr 管道句柄继续存活，communicate()
+    等 EOF 会永久阻塞——这是 memory_save 在 Windows 上无限加载的根因。
+    """
+    try:
+        if _IS_WINDOWS:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=5)
+        else:
+            # start_new_session=True 使 pgid == proc.pid，整组击杀覆盖全部子孙
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def _run_git(cmd: list[str], timeout: float) -> tuple[int, str, str]:
+    """带超时执行 git，超时强杀整棵进程树后回收，绝不在管道 EOF 上永久阻塞。
+
+    stdin 接 DEVNULL 杜绝子进程等终端输入；POSIX 放进独立会话以便 killpg
+    整组击杀，Windows 新建进程组后用 taskkill /T 按进程树击杀。
+    """
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
-    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
-                       encoding="utf-8", timeout=timeout, env=env)
-    if r.returncode != 0:
-        raise RuntimeError((r.stderr or r.stdout).strip())
-    return r.stdout.strip()
+    kwargs: dict = {}
+    if _IS_WINDOWS:
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env, **kwargs,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:  # 树已死，正常应立即返回；再兜一层超时防句柄泄漏导致的二次挂起
+            out, err = proc.communicate(timeout=5)
+        except Exception:
+            out, err = "", ""
+        raise RuntimeError(
+            f"git 超时({timeout}s)，已强制终止进程树: {' '.join(cmd[3:])}"
+            f"；输出: {((err or out) or '').strip()[:200]}")
+    return proc.returncode, out or "", err or ""
+
+
+def _run(repo: Path, *args, timeout: float = 15.0) -> str:
+    code, out, err = _run_git(["git", "-C", str(repo), *args], timeout)
+    if code != 0:
+        raise RuntimeError((err or out).strip())
+    return out.strip()
 
 
 def is_repo(repo: Path) -> bool:
@@ -33,15 +86,12 @@ def commit_all(repo: Path, message: str) -> str | None:
     """add -A + commit。返回告警信息（None=成功），绝不抛出。"""
     try:
         _run(repo, "add", "-A")
-        r = subprocess.run(
-            ["git", "-C", str(repo), "commit", "-m", message],
-            capture_output=True, text=True, encoding="utf-8", timeout=15,
-        )
-        out = (r.stdout or "") + (r.stderr or "")
-        if r.returncode != 0 and "nothing to commit" not in out:
-            return f"git commit 失败: {out.strip()}"
+        code, out, err = _run_git(["git", "-C", str(repo), "commit", "-m", message], 15)
+        output = out + err
+        if code != 0 and "nothing to commit" not in output:
+            return f"git commit 失败: {output.strip()}"
         return None
-    except Exception as e:  # git 缺失、无身份配置等：保存已落盘，只告警
+    except Exception as e:  # git 缺失、无身份配置、超时等：保存已落盘，只告警
         return f"git 操作告警(不影响保存): {e}"
 
 
@@ -56,14 +106,10 @@ def commit_paths(repo: Path, message: str, paths: list[Path]) -> str | None:
         if not relative:
             return None
         _run(repo, "add", "--", *dict.fromkeys(relative))
-        env = os.environ.copy()
-        env["GIT_TERMINAL_PROMPT"] = "0"
-        result = subprocess.run(
-            ["git", "-C", str(repo), "commit", "-m", message, "--", *dict.fromkeys(relative)],
-            capture_output=True, text=True, encoding="utf-8", timeout=15, env=env,
-        )
-        output = (result.stdout or "") + (result.stderr or "")
-        if result.returncode != 0 and "nothing to commit" not in output:
+        code, out, err = _run_git(
+            ["git", "-C", str(repo), "commit", "-m", message, "--", *dict.fromkeys(relative)], 15)
+        output = out + err
+        if code != 0 and "nothing to commit" not in output:
             return f"git commit 失败: {output.strip()}"
         return None
     except Exception as exc:
