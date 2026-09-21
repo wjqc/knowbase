@@ -4,3 +4,6 @@ __pycache__/
 .lock
 
 knowbase-dashboard.html
+.idea/
+.trae/
+.pytest_cache/

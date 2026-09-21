@@ -2,67 +2,86 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>薪火 knowbase · AI 实践分享</title>
+<title>薪火 knowbase · 给 AI 装上部门集体记忆</title>
 <style>
   :root{
-    --bg:#0c1220; --bg2:#111a2e; --card:#16223a; --line:#243450;
-    --line2:#26334f; --txt:#e8edf6; --dim:#9fb0c9; --faint:#6b7d99;
-    --fire1:#ff7a18; --fire2:#ffb347; --teal:#39d0c4; --blue:#5b9dff;
-    --good:#4ade80; --warn:#fbbf24; --bad:#f87171;
+    --bg0:#04060d; --bg1:#0a1122; --panel:rgba(13,22,44,.55); --panel2:rgba(10,17,34,.72);
+    --line:rgba(0,229,255,.22); --line2:rgba(120,160,220,.14);
+    --txt:#e6f1ff; --dim:#8fa8c7; --faint:#5d7395;
+    --cyan:#00e5ff; --purple:#8f6bff; --green:#00ff9d; --amber:#ffc857; --red:#ff5d7a;
   }
   *{margin:0;padding:0;box-sizing:border-box}
-  html,body{height:100%;background:var(--bg);color:var(--txt);
-    font-family:"PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;overflow:hidden}
-  .slide{position:absolute;inset:0;display:none;flex-direction:column;
-    padding:56px 72px 64px;background:
-      radial-gradient(1200px 600px at 85% -10%, rgba(255,122,24,.10), transparent 60%),
-      radial-gradient(900px 500px at -10% 110%, rgba(57,208,196,.07), transparent 60%),
-      linear-gradient(160deg,var(--bg) 0%,var(--bg2) 100%)}
+  html,body{height:100%;background:var(--bg0);color:var(--txt);overflow:hidden;
+    font-family:"PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif}
+  .mono{font-family:"SF Mono",Menlo,Consolas,"Courier New",monospace}
+  .slide{position:absolute;inset:0;display:none;flex-direction:column;padding:52px 68px 58px;
+    background:
+      radial-gradient(1000px 520px at 88% -12%, rgba(143,107,255,.14), transparent 60%),
+      radial-gradient(880px 460px at -8% 112%, rgba(0,229,255,.09), transparent 62%),
+      repeating-linear-gradient(0deg, rgba(120,180,255,.045) 0 1px, transparent 1px 46px),
+      repeating-linear-gradient(90deg, rgba(120,180,255,.045) 0 1px, transparent 1px 46px),
+      linear-gradient(168deg,var(--bg0) 0%,var(--bg1) 100%)}
   .slide.active{display:flex}
-  .kicker{font-size:15px;letter-spacing:.35em;color:var(--fire2);text-transform:uppercase;margin-bottom:10px}
-  h1{font-size:56px;line-height:1.2;font-weight:700}
-  h2{font-size:38px;line-height:1.25;font-weight:700;margin-bottom:26px}
-  h2 .em{color:var(--fire2)}
-  .sub{font-size:20px;color:var(--dim);line-height:1.7}
-  .grow{flex:1;display:flex;flex-direction:column;justify-content:center}
-  .foot{position:absolute;bottom:22px;left:72px;right:72px;display:flex;
-    justify-content:space-between;font-size:13px;color:var(--faint)}
-  .grid{display:grid;gap:18px}
-  .grow .card{display:flex;flex-direction:column;justify-content:center}
-  .card{background:rgba(22,34,58,.82);border:1px solid var(--line2);border-radius:14px;padding:22px 24px}
-  .card h3{font-size:20px;margin-bottom:8px}
-  .card p,.card li{font-size:15.5px;color:var(--dim);line-height:1.65}
-  .card ul{list-style:none}
-  .card li{padding-left:16px;position:relative;margin-top:6px}
-  .card li::before{content:"›";position:absolute;left:0;color:var(--fire2)}
-  .num{font-size:44px;font-weight:800;color:var(--fire2);line-height:1.1}
-  .num small{font-size:18px;color:var(--dim);font-weight:400}
-  .tag{display:inline-block;padding:3px 12px;border-radius:999px;font-size:13px;
-    border:1px solid var(--line2);color:var(--dim);margin-right:8px}
-  .tag.fire{color:var(--fire2);border-color:rgba(255,122,24,.45)}
-  .tag.teal{color:var(--teal);border-color:rgba(57,208,196,.4)}
-  table{width:100%;border-collapse:collapse;font-size:15.5px}
-  th{color:var(--fire2);font-weight:600;text-align:left;padding:10px 12px;border-bottom:1px solid var(--line2)}
-  td{padding:9px 12px;border-bottom:1px solid rgba(38,51,79,.55);color:var(--txt);vertical-align:top}
+  .hud{align-self:flex-start;font-size:12px;letter-spacing:.22em;color:var(--cyan);
+    border:1px solid var(--line);border-radius:4px;padding:4px 12px;margin-bottom:16px;
+    background:rgba(0,229,255,.05);text-shadow:0 0 8px rgba(0,229,255,.6)}
+  h1{font-size:58px;line-height:1.2;font-weight:800;letter-spacing:.02em}
+  h2{font-size:34px;line-height:1.3;font-weight:700;margin-bottom:22px;letter-spacing:.02em}
+  .em{background:linear-gradient(92deg,var(--cyan) 10%,var(--purple) 90%);
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{font-size:19px;color:var(--dim);line-height:1.75}
+  .grow{flex:1;display:flex;flex-direction:column;justify-content:center;min-height:0}
+  .foot{position:absolute;bottom:18px;left:68px;right:68px;display:flex;justify-content:space-between;
+    font-size:12px;color:var(--faint);letter-spacing:.08em}
+  .grid{display:grid;gap:16px;min-height:0}
+  .card{background:var(--panel);border:1px solid var(--line2);border-radius:12px;padding:18px 20px;
+    box-shadow:0 0 22px rgba(0,229,255,.05),inset 0 0 22px rgba(0,229,255,.02)}
+  .card.c{border-color:var(--line)} .card.p{border-color:rgba(143,107,255,.35)}
+  .card.g{border-color:rgba(0,255,157,.3)} .card.r{border-color:rgba(255,93,122,.35)}
+  .card h3{font-size:18px;margin-bottom:8px}
+  .card p,.card li{font-size:14.5px;color:var(--dim);line-height:1.7}
+  .card ul{list-style:none} .card li{padding-left:16px;position:relative;margin-top:6px}
+  .card li::before{content:"▸";position:absolute;left:0;color:var(--cyan)}
+  .b{color:var(--txt);font-weight:600} .cy{color:var(--cyan)} .pu{color:var(--purple)}
+  .gr{color:var(--green)} .am{color:var(--amber)} .rd{color:var(--red)}
+  .tag{display:inline-block;padding:4px 15px;border-radius:999px;font-size:13.5px;margin-right:8px;
+    border:1px solid var(--line);color:var(--cyan);background:rgba(0,229,255,.06)}
+  .tag.p{color:var(--purple);border-color:rgba(143,107,255,.45);background:rgba(143,107,255,.07)}
+  .num{font-size:46px;font-weight:800;color:var(--cyan);line-height:1.1;text-shadow:0 0 16px rgba(0,229,255,.45)}
+  table{width:100%;border-collapse:collapse;font-size:14.5px}
+  th{color:var(--cyan);font-weight:600;text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);
+    letter-spacing:.06em;font-size:13px}
+  td{padding:8px 10px;border-bottom:1px solid var(--line2);color:var(--txt);vertical-align:top;line-height:1.55}
   td.dim{color:var(--dim)}
-  .good{color:var(--good)} .bad{color:var(--bad)} .warn{color:var(--warn)}
-  .bar{height:12px;border-radius:6px;background:#1d2a45;overflow:hidden;margin-top:8px}
-  .bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--fire1),var(--fire2))}
-  .bar.teal>i{background:linear-gradient(90deg,#1f9e94,var(--teal))}
-  .nav{position:fixed;bottom:20px;right:28px;z-index:9;display:flex;gap:8px;align-items:center}
-  .nav button{background:var(--card);border:1px solid var(--line2);color:var(--txt);
-    width:38px;height:38px;border-radius:10px;font-size:16px;cursor:pointer}
-  #pg{font-size:13px;color:var(--faint);min-width:52px;text-align:center}
-  .prog{position:fixed;top:0;left:0;height:3px;background:linear-gradient(90deg,var(--fire1),var(--fire2));z-index:9;transition:width .25s}
-  .flow{display:flex;align-items:stretch;gap:0}
-  .flow .node{flex:1;background:rgba(22,34,58,.85);border:1px solid var(--line2);border-radius:12px;padding:16px}
-  .flow .node b{font-size:16px}
-  .flow .node p{font-size:13.5px;color:var(--dim);margin-top:6px;line-height:1.55}
-  .flow .arr{display:flex;align-items:center;padding:0 10px;color:var(--fire2);font-size:22px}
-  .kbd{font-family:Menlo,Consolas,monospace;font-size:13px;background:#0a0f1a;border:1px solid var(--line2);
-    border-radius:6px;padding:2px 8px;color:var(--teal)}
-  .quote{font-size:26px;line-height:1.6;color:var(--txt);border-left:4px solid var(--fire1);padding-left:20px}
+  .flow{display:flex;align-items:stretch}
+  .flow .node{flex:1;background:var(--panel);border:1px solid var(--line2);border-radius:10px;padding:13px 13px}
+  .flow .node b{font-size:14.5px;display:block}
+  .flow .node p{font-size:12.5px;color:var(--dim);margin-top:5px;line-height:1.55}
+  .flow .arr{display:flex;align-items:center;padding:0 8px;color:var(--cyan);font-size:19px;
+    text-shadow:0 0 10px rgba(0,229,255,.7)}
+  .bar{height:10px;border-radius:5px;background:rgba(120,160,220,.12);overflow:hidden;margin-top:6px}
+  .bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--purple));
+    box-shadow:0 0 12px rgba(0,229,255,.5)}
+  .bar.g>i{background:linear-gradient(90deg,#00b877,var(--green));box-shadow:0 0 12px rgba(0,255,157,.4)}
   .lbl{font-size:12.5px;color:var(--faint)}
+  .quote{font-size:20px;line-height:1.65;border-left:3px solid var(--cyan);padding-left:18px;
+    text-shadow:0 0 14px rgba(0,229,255,.25)}
+  .key{display:inline-block;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;color:var(--cyan);
+    background:#0a1220;border:1px solid var(--line);border-radius:6px;padding:2px 9px;margin-right:2px}
+  .nav{position:fixed;bottom:16px;right:24px;z-index:9;display:flex;gap:8px;align-items:center}
+  .nav button{background:var(--panel2);border:1px solid var(--line);color:var(--cyan);width:36px;height:36px;
+    border-radius:9px;font-size:15px;cursor:pointer}
+  #pg{font-size:12px;color:var(--faint);min-width:50px;text-align:center}
+  .prog{position:fixed;top:0;left:0;height:3px;background:linear-gradient(90deg,var(--cyan),var(--purple));
+    z-index:9;transition:width .25s;box-shadow:0 0 12px rgba(0,229,255,.6)}
+  @keyframes breathe{0%,100%{box-shadow:0 0 20px rgba(0,229,255,.06),inset 0 0 20px rgba(0,229,255,.02)}
+    50%{box-shadow:0 0 34px rgba(0,229,255,.13),inset 0 0 26px rgba(0,229,255,.04)}}
+  .card.glow{animation:breathe 4s ease-in-out infinite}
+  .core{position:absolute;right:8%;top:18%;width:300px;height:300px;border-radius:50%;
+    background:radial-gradient(circle at 35% 35%,rgba(0,229,255,.22),rgba(143,107,255,.10) 45%,transparent 70%);
+    filter:blur(2px)}
+  .core::before{content:"";position:absolute;inset:36px;border-radius:50%;border:1px solid rgba(0,229,255,.4)}
+  .core::after{content:"";position:absolute;inset:74px;border-radius:50%;border:1px dashed rgba(143,107,255,.5)}
 </style>
 </head>
 <body>
@@ -70,307 +89,300 @@
 
 <!-- 1 封面 -->
 <section class="slide active">
-  <div class="grow" style="align-items:flex-start">
-    <div class="kicker">部门 AI 实践分享 · 第一赛季</div>
-    <h1>薪火 <span style="color:var(--fire2)">knowbase</span></h1>
-    <div class="sub" style="margin-top:18px;font-size:26px;color:var(--txt)">
-      一个人的坑，所有 Agent 的经验
-    </div>
-    <div class="sub" style="margin-top:14px;max-width:760px">
-      一个本地化运行的 MCP 服务：把 AI Agent 执行任务中踩过的坑、做的决策、人员制定的标准，自动沉淀为 git 管理的知识库——部门全部 AI 工具共享检索，越用越准。
-    </div>
-    <div style="margin-top:34px">
-      <span class="tag fire">已落地运行</span>
-      <span class="tag teal">纯本地 · 数据不出内网</span>
-      <span class="tag">Claude Code / ZCode / Trae 已接入</span>
+  <div class="core"></div>
+  <div class="grow" style="align-items:flex-start;position:relative">
+    <div class="hud">XINHUO://BOOT</div>
+    <h1>薪火 <span class="em">knowbase</span></h1>
+    <div style="font-size:27px;margin-top:16px">给 AI 装上<span class="cy">"部门集体记忆"</span></div>
+    <div class="sub" style="margin-top:16px;max-width:740px">AI 帮你干活时踩过的坑、学会的招，自动记下来、全部门共享——
+    下一个遇到同样问题的人，一问就有答案。</div>
+    <div style="margin-top:30px">
+      <span class="tag">数据不出内网</span>
+      <span class="tag p">所有 AI 工具共用</span>
+      <span class="tag">全程有记录可回溯</span>
     </div>
   </div>
   <div class="foot"><span>文剑 · 政企产品战客交付部</span><span>2026-09</span></div>
 </section>
 
-<!-- 2 问题：三层浪费 -->
+<!-- 2 是干什么的 -->
 <section class="slide">
-  <div class="kicker">解决的问题 · 01</div>
-  <h2>AI 用得越深，经验浪费得越狠：<span class="em">三层浪费</span></h2>
+  <div class="hud">XINHUO://WHAT.01</div>
+  <h2>薪火 knowbase <span class="em">是干什么的？</span></h2>
   <div class="grow grid" style="grid-template-columns:1fr 1fr 1fr">
-    <div class="card">
-      <div class="num" style="font-size:30px;color:var(--bad)">会话内</div>
-      <p style="margin-top:10px">会话结束，踩坑过程、试错结论随上下文<b style="color:var(--txt)">全部销毁</b>——
-      为了一个配置反复试错一下午，结论只活了两小时。</p>
-    </div>
-    <div class="card">
-      <div class="num" style="font-size:30px;color:var(--warn)">工具内</div>
-      <p style="margin-top:10px">Claude Code、ZCode、Trae 各有各的记忆，但<b style="color:var(--txt)">互不相通</b>——
-      在这个工具里踩过的坑，换个工具原样再踩。</p>
-    </div>
-    <div class="card">
-      <div class="num" style="font-size:30px;color:var(--blue)">人际间</div>
-      <p style="margin-top:10px">老员工的排查经验靠口口相传，<b style="color:var(--txt)">无结构化载体</b>——
-      不能沉淀、不能审计、不能复用。</p>
-    </div>
+    <div class="card c glow"><h3 class="cy">同一个坑，不再踩第二遍</h3>
+      <p>AI 排查两小时才解决的问题，自动记成一条经验；下次任何人遇到同样问题，<span class="b">AI 直接给答案</span>，不用重来。</p></div>
+    <div class="card c glow"><h3 class="cy">换个工具，经验还在</h3>
+      <p>你在 Claude Code 里踩的坑，ZCode、Trae 都能查到——<span class="b">所有 AI 共用一本记忆</span>，不锁在任何一个工具里。</p></div>
+    <div class="card c glow"><h3 class="cy">老经验不再"人走茶凉"</h3>
+      <p>排查诀窍、团队规矩，从"口口相传"变成<span class="b">"随时可查"</span>的卡片，新人也能直接继承。</p></div>
   </div>
-  <div class="card" style="margin-top:18px;border-color:rgba(255,122,24,.4)">
-    <p style="font-size:17px;color:var(--txt)">真实代价举例：内网 VPN 客户端在 macOS 上启动即死锁——
-    反复重启重登、多轮搜索无果；正确答案（升级版本 + 一条验证命令）其实一行字就能说清。
-    <b style="color:var(--fire2)">这样的坑，每个人、每个工具都在重复踩。</b></p>
-  </div>
-  <div class="foot"><span>薪火 knowbase</span><span>02 / 12</span></div>
+  <div class="card p glow" style="margin-top:16px"><p style="font-size:18px;text-align:center">
+    把踩过的坑，从<span class="rd">个人的、一次性的</span>，变成<span class="gr">部门的、永久的</span></p></div>
+  <div class="foot"><span>XINHUO // 薪火 knowbase</span><span>02 / 14</span></div>
 </section>
 
-<!-- 3 定位 -->
+<!-- 3 怎么干的 -->
 <section class="slide">
-  <div class="kicker">解决的方案 · 02</div>
-  <h2>定位：不是"又一个记忆功能"，是<span class="em">可治理的经验基础设施</span></h2>
-  <div class="grow">
-    <table>
-      <tr><th style="width:30%">现成方案</th><th>短板（我们的场景）</th><th style="width:32%">薪火的做法</th></tr>
-      <tr><td>Mem0 / Zep 等云端记忆</td><td class="dim">数据出内网，一票否决</td><td>纯本地：markdown + git + SQLite</td></tr>
-      <tr><td>Letta / MemOS 等平台</td><td class="dim">平台级部署，绑框架，运维重</td><td>MCP 协议，任何 Agent 零侵入接入</td></tr>
-      <tr><td>单工具内置记忆</td><td class="dim">经验锁死在单个工具里</td><td class="good">一个库喂所有 Agent（核心差异）</td></tr>
-      <tr><td>通用开源记忆方案</td><td class="dim">无人员标准治理、无部门联动</td><td>标准仅人改 + 与部门知识库分层联动</td></tr>
-    </table>
-    <div class="quote" style="margin-top:26px">
-      Agent 可以贡献事实性经验，但不能自行定义组织规范——<br>
-      证据由 Agent 提交，状态由服务端裁决。
-    </div>
-  </div>
-  <div class="foot"><span>薪火 knowbase</span><span>03 / 12</span></div>
-</section>
-
-<!-- 4 架构 -->
-<section class="slide">
-  <div class="kicker">使用的方式 · 03</div>
-  <h2>架构：三条不变量撑起的<span class="em">经验流水线</span></h2>
+  <div class="hud">XINHUO://HOW.02</div>
+  <h2>怎么做到的？——<span class="em">一条经验的旅程</span></h2>
   <div class="grow">
     <div class="flow">
-      <div class="node"><b>收集层</b><p>会话开场注入规则<br>用户每条输入 → 本地自动检索注入<br>会话收尾漏存再判断</p></div>
-      <div class="arr">→</div>
-      <div class="node"><b>MCP 服务层</b><p>6 个工具<br>search / read / save<br>update / feedback / stats</p></div>
-      <div class="arr">→</div>
-      <div class="node"><b>存储层</b><p>markdown 人可读可审计（git）<br>SQLite 全文索引（可重建）<br>标准/偏好 staging 人审</p></div>
+      <div class="node"><b class="cy">① AI 干活</b><p>踩坑、排查、解决</p></div>
+      <div class="arr">➤</div>
+      <div class="node"><b class="cy">② 写成经验卡</b><p>现象是什么 / 为什么 / 怎么办——<span style="color:var(--txt)">三段齐全才收</span></p></div>
+      <div class="arr">➤</div>
+      <div class="node"><b class="cy">③ 存进部门经验库</b><p>每张卡带作者和时间，改动全程有记录</p></div>
+      <div class="arr">➤</div>
+      <div class="node"><b class="cy">④ 自动递到眼前</b><p>下次有人问到相关问题，经验自动出现——<span style="color:var(--txt)">不用记得去搜</span></p></div>
+      <div class="arr">➤</div>
+      <div class="node"><b class="cy">⑤ 越用越可信</b><p>用过的人反馈"有用/没用"，经验随之升级或淘汰</p></div>
     </div>
-    <div class="grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:20px">
-      <div class="card"><h3 class="good">① 唯一真相</h3><p>Markdown 是唯一真相，Git 是唯一审计；索引坏了 <span class="kbd">reindex</span> 一键重建。</p></div>
-      <div class="card"><h3 class="good">② 写路径单行化</h3><p>多 Agent 并发写全部过 repo 级跨进程锁，分配编号→落盘→提交→重建索引一气呵成。</p></div>
-      <div class="card"><h3 class="good">③ 状态机裁决</h3><p>经验等级 once → verified → stale 由服务端按使用反馈计算，Agent 无法自封"已验证"。</p></div>
-    </div>
+    <div class="card g glow" style="margin-top:18px"><p style="font-size:16.5px;text-align:center">
+      像<span class="b">老司机带路</span>：走过一次的路自动画进地图，后来的人照着走就行</p></div>
   </div>
-  <div class="foot"><span>薪火 knowbase</span><span>04 / 12</span></div>
+  <div class="foot"><span>XINHUO // 薪火 knowbase</span><span>03 / 14</span></div>
 </section>
 
-<!-- 5 使用方式：6 工具 -->
+<!-- 4 怎么找到的：三路搜索 -->
 <section class="slide">
-  <div class="kicker">使用的方式 · 04</div>
-  <h2>日常怎么用：Agent 的<span class="em">六步习惯</span>，人的三件治理</h2>
-  <div class="grow grid" style="grid-template-columns:1.35fr 1fr">
-    <div class="card">
+  <div class="hud">XINHUO://FIND.HOW</div>
+  <h2>怎么找到的？——<span class="em">三路搜索各干各的活</span></h2>
+  <p class="sub" style="margin-bottom:14px;font-size:15.5px">拿一个真实例子走一遍：你搜"测试总是随机挂"，库里躺着一张《CI 上测试随机失败的排查记录》——它是怎么被找到的？</p>
+  <div class="grow grid" style="grid-template-columns:1fr 1fr 1fr">
+    <div class="card c glow"><h3 class="cy">路① 索引对照表（主路）</h3>
+      <p><b>怎么做</b>：每张卡入库时切成"三字碎片"（"随机失败"→"随机 / 机失 / 失败"），攒成一张对照表：<span class="b">碎片 → 出现在哪些卡</span>，就像书的索引页。搜索时把你的问题同样切碎去翻表，共同碎片越多越靠前。</p>
+      <p style="margin-top:8px"><b>例子里</b>：问题切出的"总是""随机"等碎片，目标卡里都有 → 秒对上。就算写错一个字（"随几失败"），"失败"等其余碎片照样命中。</p></div>
+    <div class="card c glow"><h3 class="cy">路② 逐字查找（兜底）</h3>
+      <p><b>怎么做</b>：像在文档里按 <span class="key">Ctrl+F</span>——只要你的词作为一串连续文字出现在卡里就算对上。</p>
+      <p style="margin-top:8px"><b>例子里</b>：像"CI"这种两个字母的短词，切不出三字碎片，主路使不上劲——由它补上。</p></div>
+    <div class="card c glow"><h3 class="cy">路③ 指纹比对（意思相近）</h3>
+      <p><b>怎么做</b>：给每张卡算一幅<span class="b">"词汇指纹"</span>（卡里所有词晕染成的数字画像），你的问题也算一幅，两幅画像越像分越高——字面完全不同也能对上。</p>
+      <p style="margin-top:8px"><b>例子里</b>：卡标题是英文"flaky test"，但卡里满是"测试 / 失败 / 随机"相关词，画像和你的问题接近 → 捞了上来。</p>
+      <p class="lbl" style="margin-top:6px">现在的指纹是"字面画像"，还不是一个字不差就能懂含义——真·语义理解排在下一站</p></div>
+  </div>
+  <div class="card p glow" style="margin-top:14px"><p style="font-size:15px;text-align:center">
+    三路结果怎么合？<span class="pu b">不比分数，比名次</span>——像三位评委各自排名再综合，三路都靠前的卡胜出，然后进入下一页的排座次</p></div>
+  <div class="foot"><span>XINHUO // 薪火 knowbase</span><span>04 / 14</span></div>
+</section>
+
+<!-- 5 找到后怎么排座次 -->
+<section class="slide">
+  <div class="hud">XINHUO://FIND.RANK</div>
+  <h2>找到了一堆候选，<span class="em">怎么排座次？</span></h2>
+  <div class="grow grid" style="grid-template-columns:1fr 1fr 1fr">
+    <div class="card c glow"><h3 class="cy">① 先给本项目的答案</h3>
+      <p>在 A 项目里问，A 项目的经验排最前，全部门通用的随后——<b>绝不拿 B 项目的答案糊弄你</b>（20 次测试 20 次全对）。</p></div>
+    <div class="card c glow"><h3 class="cy">② 靠谱的排前面</h3>
+      <p>被多人用过、说"有用"的<b>加分靠前</b>；没人验证过的原样待着；被反馈"过时"的<b>沉底</b>。</p></div>
+    <div class="card c glow"><h3 class="cy">③ 垃圾进不了场</h3>
+      <p>已退休的、待人审核的、互相矛盾的——<b>在排座次之前就被请出去</b>，不会拿旧答案误导你。</p></div>
+  </div>
+  <div class="card g glow" style="margin-top:16px"><p style="font-size:15.5px;text-align:center">
+    上一页的例子跑通："测试总是随机挂" →《CI 上测试随机失败的排查记录》——<span class="gr b">中文问题，英文标题，照样秒中</span></p></div>
+  <div class="foot"><span>XINHUO // 薪火 knowbase</span><span>05 / 14</span></div>
+</section>
+
+<!-- 6 怎么存的 -->
+<section class="slide">
+  <div class="hud">XINHUO://SAVE.HOW</div>
+  <h2>怎么存进去的？——<span class="em">不是什么都收，收了就规规矩矩</span></h2>
+  <p class="sub" style="margin-bottom:14px;font-size:15.5px">接着走例子：AI 花两小时解决了"支付网关验签失败"（根因：时间戳要用毫秒）——哪些能进库？怎么进的？</p>
+  <div class="grow grid" style="grid-template-columns:1fr 1.4fr">
+    <div class="card c glow"><h3 class="cy">存哪些——先过"值不值得"关</h3>
+      <ul>
+        <li><b>收</b>：下次还会踩的坑、排查结论、团队规矩</li>
+        <li><b>不收</b>：干完就完的一次性修复记录（过程进代码提交历史）；"208/208 通过"这类过程数字；代码库里本来就能查到的事实</li>
+      </ul>
+      <p style="margin-top:8px">例子里：《两小时排查过程记录》<span class="rd b">不收</span>；"网关验签时间戳必须毫秒"这条结论<span class="gr b">收</span></p></div>
+    <div class="card c glow"><h3 class="cy">怎么存——五道门，道道有人守</h3>
+      <ul>
+        <li><b>门① 值不值得</b>：见左</li>
+        <li><b>门② 格式齐不齐</b>：必须写清"现象 / 原因 / 正确做法"三段，缺一段打回；卡里出现密码密钥直接拦下</li>
+        <li><b>门③ 是不是流水账</b>：写着"阶段收尾实测""全部通过"这类字眼 → 劝退，请去日报</li>
+        <li><b>门④ 是不是重复</b>：与库里已有的卡高度相似 → 拒收："去补充那张卡，别再存一张"——例子里：已有《支付网关签名报错》，这次是<b>补充根因</b>而非另开新卡</li>
+        <li><b>门⑤ 规矩类必须人审</b>：团队规范、业务规则只能进"待审区"，人点头才生效</li>
+      </ul></div>
+  </div>
+  <div class="card p glow" style="margin-top:14px"><p style="font-size:15px;text-align:center">
+    存的过程一气呵成：<span class="pu b">编号 → 写卡 → 存档（自动记录谁写的、何时）→ 更新索引</span>，不会出现半张卡；
+    新卡一律从"待验证"起步——<span class="pu b">刚写的不算真理，用过才算</span></p></div>
+  <div class="foot"><span>XINHUO // 薪火 knowbase</span><span>06 / 14</span></div>
+</section>
+
+<!-- 7 怎么更新的 -->
+<section class="slide">
+  <div class="hud">XINHUO://UPDATE.HOW</div>
+  <h2>经验怎么更新？——<span class="em">接棒，而不是覆盖</span></h2>
+  <p class="sub" style="margin-bottom:14px;font-size:15.5px">例子继续：网关升级了，《验签时间戳用毫秒》过时了——库里的老经验怎么处理？</p>
+  <div class="grow grid" style="grid-template-columns:1fr 1fr 1fr">
+    <div class="card c glow"><h3 class="cy">缺了就补原卡</h3>
+      <p>发现已有经验不完整，<b>直接改那张卡</b>（例：补充"沙箱环境豁免"）——谁改的、改了什么，全程有记录。</p></div>
+    <div class="card c glow"><h3 class="cy">过时就接棒</h3>
+      <p>新经验《升级后改用秒 + 签名版本号》接棒时，旧卡<b>自动标"已过时"但不删除</b>——历史都在，接错了随时退回。</p></div>
+    <div class="card c glow"><h3 class="cy">矛盾不裁判</h3>
+      <p>两条经验打架？系统只给双方贴"互相矛盾"标记、排座次时靠边站——<b>由人裁决</b>，绝不自动选边。</p></div>
+  </div>
+  <div class="card r glow" style="margin-top:14px"><p style="font-size:15px">
+    <b class="rd">防污染三条铁律</b>：① 改内容<b>不能自己给自己发"已验证"标签</b>——可信度只由真实使用说了算　② 正式规矩 AI 改不了，只能人改　③ 每次修改都留历史版本，随时退回任何一版<br>
+    <b class="pu" style="display:inline-block;margin-top:8px">淘汰路径</b>：有人反馈"不管用了" → 全员立刻看到"已过时" → 确认后归档退休，<span class="pu b">永远不再出现</span></p></div>
+  <div class="foot"><span>XINHUO // 薪火 knowbase</span><span>07 / 14</span></div>
+</section>
+
+<!-- 6 用了什么技术 -->
+<section class="slide">
+  <div class="hud">XINHUO://TECH.WHAT</div>
+  <h2>里面用了什么？——<span class="em">四样"家常菜"</span></h2>
+  <div class="grow grid" style="grid-template-columns:1fr 1fr">
+    <div class="card c glow"><h3><span class="cy">经验卡</span> = Markdown 文本</h3>
+      <p>双击就能打开看，人读得懂、改得了——<b>不是黑盒数据库</b>。</p></div>
+    <div class="card c glow"><h3><span class="cy">版本记录</span> = git</h3>
+      <p>每次修改都留历史，改坏了随时退回去——文档的<b>"后悔药"</b>。</p></div>
+    <div class="card c glow"><h3><span class="cy">快速索引</span> = SQLite</h3>
+      <p><b>一个文件就是个小数据库</b>，不用安装任何数据库软件，拷走就能搬。</p></div>
+    <div class="card c glow"><h3><span class="cy">通用插座</span> = MCP</h3>
+      <p>AI 助手行业的通用接口标准——<b>各家 AI 都能直接插</b>，不用为每家单独开发。</p></div>
+  </div>
+  <div class="card g glow" style="margin-top:16px"><p style="font-size:15.5px;text-align:center">
+    全部跑在<span class="b">自己电脑 / 内网</span>里，不依赖任何外部服务，数据不出门</p></div>
+  <div class="foot"><span>XINHUO // 薪火 knowbase</span><span>08 / 14</span></div>
+</section>
+
+<!-- 7 为什么选这些技术 -->
+<section class="slide">
+  <div class="hud">XINHUO://TECH.WHY</div>
+  <h2>为什么选这几样？——<span class="em">四个"没选 XX"的原因</span></h2>
+  <div class="grow card c">
+    <table>
+      <tr><th style="width:22%">问题</th><th style="width:33%">我们的选择</th><th>为什么</th></tr>
+      <tr><td>记忆放哪？</td><td>放本地，<span class="rd">不用云端记忆服务</span></td><td class="dim">经验含公司系统信息——<b style="color:var(--txt)">数据不能出内网</b></td></tr>
+      <tr><td>要不要上 AI 平台？</td><td>不上，<span class="gr">一个轻量服务就够</span></td><td class="dim">平台要专门团队运维；我们要"装完就能用，拷走就能搬"</td></tr>
+      <tr><td>小数据库够用吗？</td><td>SQLite <span class="gr">刚刚好</span></td><td class="dim">几万条以内毫秒级；坏了 0.24 秒全量重建</td></tr>
+      <tr><td>各家 AI 怎么接？</td><td>走 <span class="gr">MCP 标准</span></td><td class="dim">不为每个 AI 单独开发，贴段配置就能接入</td></tr>
+    </table>
+  </div>
+  <div class="card p glow" style="margin-top:16px"><p style="font-size:16px;text-align:center">
+    选型标准只有一条：<span class="em b" style="background:none;color:var(--purple)">内网能跑、零运维、坏了能重建</span></p></div>
+  <div class="foot"><span>XINHUO // 薪火 knowbase</span><span>09 / 14</span></div>
+</section>
+
+<!-- 8 AI 与人的分工 -->
+<section class="slide">
+  <div class="hud">XINHUO://TRUST</div>
+  <h2>放心用的关键：<span class="em">AI 能做什么、不能做什么</span></h2>
+  <div class="grow grid" style="grid-template-columns:1fr 1fr">
+    <div class="card g glow"><h3 class="gr">AI 可以</h3>
+      <ul>
+        <li>记经验（踩过的坑、排查结论）</li>
+        <li>查经验（干活前自动带上相关经验）</li>
+        <li>反馈"有用 / 没用"</li>
+        <li>对团队规范<b>提建议</b></li>
+      </ul></div>
+    <div class="card r glow"><h3 class="rd">AI 不可以</h3>
+      <ul>
+        <li>改公司规范——建议只能进"待审区"，<b>人批准才生效</b></li>
+        <li>给自己发"已验证"标签——可信度只由真实使用说了算</li>
+        <li>把数据发到库以外的地方</li>
+      </ul></div>
+  </div>
+  <div class="card c glow" style="margin-top:16px"><p style="font-size:16px;text-align:center">
+    <span class="cy b">AI 贡献事实，人守规矩门。</span>每条经验带作者和时间，改过什么全程可查、可回滚</p></div>
+  <div class="foot"><span>XINHUO // 薪火 knowbase</span><span>10 / 14</span></div>
+</section>
+
+<!-- 9 日常怎么操作 -->
+<section class="slide">
+  <div class="hud">XINHUO://DAILY</div>
+  <h2>日常怎么用：<span class="em">AI 六个动作，人四把钥匙</span></h2>
+  <div class="grow grid" style="grid-template-columns:1.25fr 1fr">
+    <div class="card c">
       <table>
-        <tr><th>时机</th><th>Agent 动作</th></tr>
-        <tr><td>任务开始，涉及具体系统/报错</td><td><b>memory_search</b> 检索历史经验</td></tr>
-        <tr><td>命中后</td><td><b>memory_read</b> 读全文再动手</td></tr>
-        <tr><td>任务结束，产生踩坑/决策/流程</td><td><b>memory_save</b> 沉淀入库</td></tr>
-        <tr><td>发现已有记忆需补充</td><td><b>memory_update</b> 修正</td></tr>
-        <tr><td>按记忆行动后</td><td><b>memory_feedback</b> 回填有效/失效</td></tr>
-        <tr><td>汇报 / 运营</td><td><b>memory_stats</b> 数量与漏斗</td></tr>
+        <tr><th style="width:17%">时机</th><th style="width:38%">AI 的动作</th><th>干什么</th></tr>
+        <tr><td>开工</td><td class="mono cy">memory_search</td><td class="dim">把相关经验递上来</td></tr>
+        <tr><td>命中</td><td class="mono cy">memory_read</td><td class="dim">读经验全文</td></tr>
+        <tr><td>干完</td><td class="mono cy">memory_save</td><td class="dim">写新经验卡</td></tr>
+        <tr><td>补充</td><td class="mono cy">memory_update</td><td class="dim">修正已有经验</td></tr>
+        <tr><td>用完</td><td class="mono cy">memory_feedback</td><td class="dim">说"有用 / 没用 / 过时了"</td></tr>
+        <tr><td>汇报</td><td class="mono cy">memory_stats</td><td class="dim">库里有什么、用了多少</td></tr>
       </table>
     </div>
-    <div style="display:flex;flex-direction:column;gap:16px">
-      <div class="card" style="flex:1">
-        <h3>人的治理（CLI）</h3>
-        <ul>
-          <li><span class="kbd">verify</span> 确认经验有效</li>
-          <li><span class="kbd">promote</span> 审批 staging 提案</li>
-          <li><span class="kbd">stats</span> 看沉淀与命中漏斗</li>
-        </ul>
-      </div>
-      <div class="card" style="flex:1">
-        <h3>自动闭环（hooks）</h3>
-        <ul>
-          <li>任务前：自动检索<b style="color:var(--txt)">不经模型自觉</b></li>
-          <li>任务后：漏存会被追问一次</li>
-        </ul>
-      </div>
-    </div>
+    <div class="card c"><h3 class="cy">人的四把钥匙（可选）</h3>
+      <ul>
+        <li><span class="key">verify</span> 盖章"这条有效"</li>
+        <li><span class="key">promote</span> 批准新规范生效</li>
+        <li><span class="key">revise</span> 修改正式规矩</li>
+        <li><span class="key">archive</span> 让旧经验退休</li>
+      </ul>
+      <p class="lbl" style="margin-top:8px">另有 doctor（给库做体检）、dashboard（生成管理看板）</p></div>
   </div>
-  <div class="foot"><span>薪火 knowbase</span><span>05 / 12</span></div>
+  <div class="card p" style="margin-top:16px"><p style="font-size:15px;text-align:center">
+    AI 的每个动作都有记录，<span class="pu b">人保留最终决定权</span></p></div>
+  <div class="foot"><span>XINHUO // 薪火 knowbase</span><span>11 / 14</span></div>
 </section>
 
-<!-- 6 场景① 排障避坑 -->
+<!-- 10 已经跑起来了 -->
 <section class="slide">
-  <div class="kicker">应用场景 · 05</div>
-  <h2>场景① 排障避坑：<span class="em">一次踩坑，全员免疫</span></h2>
+  <div class="hud">XINHUO://NOW</div>
+  <h2>不是设想，<span class="em">已经跑起来了</span></h2>
   <div class="grow">
-    <div class="grid" style="grid-template-columns:1fr 1fr">
-      <div class="card" style="border-color:rgba(248,113,113,.4)">
-        <h3 class="bad">过去：VPN 客户端 macOS 死锁</h3>
-        <ul>
-          <li>反复重启、重登，多轮搜索无果</li>
-          <li>结论散落在某个人的脑子里</li>
-          <li>下一个遇到的人（或 Agent）原样再来一遍</li>
-        </ul>
-      </div>
-      <div class="card" style="border-color:rgba(74,222,128,.4)">
-        <h3 class="good">现在：一条经验，跨工具生效</h3>
-        <ul>
-          <li>现象 / 原因 / 正确做法 / 验证命令结构化入库</li>
-          <li>Claude Code 存一条 → ZCode、Trae 检索即中</li>
-          <li>客户端升级导致失效？一条 feedback 全员标记过时</li>
-        </ul>
-      </div>
+    <div class="grid" style="grid-template-columns:repeat(4,1fr)">
+      <div class="card c glow"><div class="num">3</div><p style="margin-top:6px"><span class="b">个 AI 工具在用</span><br>Claude Code / ZCode / Trae</p></div>
+      <div class="card c glow"><div class="num">41</div><p style="margin-top:6px"><span class="b">条有效经验</span><br>另有 10 条已退休</p></div>
+      <div class="card c glow"><div class="num">65</div><p style="margin-top:6px"><span class="b">次修改全程可查</span><br>谁改的、改了什么</p></div>
+      <div class="card c glow"><div class="num">93</div><p style="margin-top:6px"><span class="b">项自动测试护航</span><br>改坏任何一处都会被拦下</p></div>
     </div>
-    <div class="grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:18px">
-      <div class="card"><h3>同类已入库实战</h3><p>Docker 拉镜像直连超时 → 镜像加速；多仓库项目根目录 git 报错 → 子仓库纪律；HAR 分析 304 压缩误判 → 只看 200 响应。</p></div>
-      <div class="card"><h3>任务前自动检索</h3><p>你说"内网连不上"，钩子自动把 VPN 那条经验注入上下文——<b style="color:var(--txt)">不需要你想起去搜索</b>。</p></div>
-      <div class="card"><h3>经验会进化</h3><p>客户端升级后经验过时？一条 <span class="kbd">outdated</span> 反馈，全员立刻看到"已过时"标记，不再被旧答案误导。</p></div>
+    <div class="card g glow" style="margin-top:16px">
+      <div class="lbl">同样的 14 个真实提问，改造前后找得到答案的比例</div>
+      <div class="lbl" style="margin-top:8px">改造前：一半找得到</div>
+      <div class="bar"><i style="width:50%"></i></div>
+      <div class="lbl" style="margin-top:8px">改造后：六分之五找得到</div>
+      <div class="bar g"><i style="width:86%"></i></div>
+      <p class="lbl" style="margin-top:8px">同类问题排查：小时级 → 分钟级 ｜ 搜索快到无感：眨眼 100 毫秒，它 2.3 毫秒搜完 ｜ 口径：真实库实测，450 次取样</p>
     </div>
+    <div class="card p" style="margin-top:14px"><p style="font-size:15px;text-align:center">
+      预估 2 人周的工程，AI 主导 <span class="pu b">1 个工作日</span>建成——这本身就是最好的示范</p></div>
   </div>
-  <div class="foot"><span>薪火 knowbase</span><span>06 / 12</span></div>
+  <div class="foot"><span>XINHUO // 薪火 knowbase</span><span>12 / 14</span></div>
 </section>
 
-<!-- 7 场景② 标准沉淀 -->
+<!-- 11 五分钟加入 -->
 <section class="slide">
-  <div class="kicker">应用场景 · 06</div>
-  <h2>场景② 标准沉淀：<span class="em">规范长在工具里，而不是文件夹里</span></h2>
-  <div class="grow">
-    <div class="card" style="margin-bottom:18px">
-      <h3>真实案例已在发生：<span class="kbd">S-2026-0001</span> AI 编程工具接入规范</h3>
-      <p>工具矩阵、两级验收、统一指针块，路由/可观测/发布门禁/测试/文档五类标准摘要——
-      由 AI 会话按规范自动写入标准库，多次修订<b style="color:var(--txt)">全程 git 审计</b>；
-      Agent 写标准只能进 <span class="kbd">staging/</span> 提案区，人工审过才生效——
-      <b style="color:var(--fire2)">AI 贡献事实，人守规范门。</b></p>
-    </div>
-    <div class="grid" style="grid-template-columns:1fr 1fr 1fr">
-      <div class="card"><h3>对管理者</h3><p>规范发下去不再"石沉大海"：Agent 干活前自动带上最新标准，违规写法在生成时就被纠正。</p></div>
-      <div class="card"><h3>对执行者</h3><p>不用背规范文档：写代码时标准就在上下文里；标准改了，下一次会话自动生效。</p></div>
-      <div class="card"><h3>对审计</h3><p>每条记忆带来源（哪个工具、哪个会话）、时间线、修订历史——<b style="color:var(--txt)">经验可追溯、可回滚</b>。</p></div>
-    </div>
-  </div>
-  <div class="foot"><span>薪火 knowbase</span><span>07 / 12</span></div>
-</section>
-
-<!-- 8 场景③ 多项目规模化 -->
-<section class="slide">
-  <div class="kicker">应用场景 · 07</div>
-  <h2>场景③ 多项目规模化：<span class="em">项目越多，越要"先问对库"</span></h2>
-  <div class="grow">
-    <div class="grid" style="grid-template-columns:1fr 1fr">
-      <div class="card">
-        <h3>压力测试：20 项目 × 340 条记忆</h3>
-        <div style="margin-top:10px">
-          <div class="lbl">单次检索耗时（毫秒级，千条无压力）</div>
-          <div class="bar teal"><i style="width:8%"></i></div>
-          <p style="font-size:13px;margin-top:4px">实测 1.1 ms / 次</p>
-        </div>
-        <div style="margin-top:14px">
-          <div class="lbl">带项目标签（scope）检索精准率</div>
-          <div class="bar"><i style="width:100%"></i></div>
-          <p style="font-size:13px;margin-top:4px">20 个项目逐一验证：20 / 20 全部命中本项目</p>
-        </div>
-        <p style="margin-top:14px">项目目录自动感知：在哪个项目里干活，就优先查哪个项目的经验；跨项目通用经验始终可见。</p>
-      </div>
-      <div class="card">
-        <h3>为什么不会"越攒越乱"</h3>
-        <ul>
-          <li>写入必过 lint：结构、必填小节、密钥拦截</li>
-          <li>标题查重：相似经验提示合并而非重复入库</li>
-          <li>生命周期：单次经验 → 多次验证 → 过时淘汰</li>
-          <li>季度人工"蒸馏"：高频验证经验升格进部门知识库</li>
-        </ul>
-        <p style="margin-top:10px">信息熵防护栏：<b style="color:var(--txt)">热记忆层（机器高频写）与冷知识层（人工策展）严格分层。</b></p>
-      </div>
-    </div>
-  </div>
-  <div class="foot"><span>薪火 knowbase</span><span>08 / 12</span></div>
-</section>
-
-<!-- 9 使用方式总结：怎么开始 -->
-<section class="slide">
-  <div class="kicker">使用的方式 · 08</div>
-  <h2>接入只要<span class="em">五分钟</span>：Windows / macOS 都支持</h2>
+  <div class="hud">XINHUO://JOIN</div>
+  <h2>加入只要<span class="em">五分钟</span></h2>
   <div class="grow">
     <div class="flow">
-      <div class="node"><b>① 拿代码</b><p>GitHub 私有仓<br>或内网 GitLab 共享仓<br>git clone 即可</p></div>
-      <div class="arr">→</div>
-      <div class="node"><b>② 安装初始化</b><p>uv pip install -e .<br>knowbase init（幂等）<br>Windows / macOS 同构</p></div>
-      <div class="arr">→</div>
-      <div class="node"><b>③ 注册 Agent</b><p>Claude Code / ZCode / Trae<br>配置片段 README 现成可抄<br>起名"工具-姓名"便于审计</p></div>
-      <div class="arr">→</div>
-      <div class="node"><b>④ 直接继承</b><p>clone 共享记忆库<br>reindex 一下<br>部门踩坑遗产全部到手</p></div>
+      <div class="node"><b class="cy">① 拿代码</b><p>从内网 GitLab 克隆</p></div>
+      <div class="arr">➤</div>
+      <div class="node"><b class="cy">② 一条命令安装</b><p>安装 + 初始化，自动配好</p></div>
+      <div class="arr">➤</div>
+      <div class="node"><b class="cy">③ 贴段配置</b><p>把 README 里的配置贴进你的 AI 工具</p></div>
+      <div class="arr">➤</div>
+      <div class="node"><b class="cy">④ 继承全部经验</b><p>连接部门共享库，所有踩坑遗产到手</p></div>
     </div>
-    <div class="card" style="margin-top:20px">
-      <h3>安全边界（对内网环境友好）</h3>
-      <p>纯本地运行、无任何外呼；记忆库推送有白名单校验，只认内网 GitLab，配错公网地址直接拒绝；
-      标准与偏好由人最终把关；每条记忆带来源会话，全程可回滚。</p>
-    </div>
+    <div class="card g glow" style="margin-top:18px"><p style="font-size:15.5px;text-align:center">
+      安全承诺：纯内网运行 ｜ 推送白名单（<span class="b">配错外网地址直接拒绝</span>）｜ 全程可回滚</p></div>
   </div>
-  <div class="foot"><span>薪火 knowbase</span><span>09 / 12</span></div>
-</section>
-
-<!-- 10 实际成果 -->
-<section class="slide">
-  <div class="kicker">实际的成果 · 09</div>
-  <h2>成果：不是 Demo，是<span class="em">已运行的基建</span></h2>
-  <div class="grow grid" style="grid-template-columns:1fr 1fr 1fr 1fr">
-    <div class="card"><div class="num">3</div><p style="margin-top:6px"><b style="color:var(--txt)">个 AI 工具已接入</b><br>Claude Code / ZCode / Trae<br>跨工具命中闭环已验证</p></div>
-    <div class="card"><div class="num">22+</div><p style="margin-top:6px"><b style="color:var(--txt)">次真实提交</b><br>含《AI 编程工具接入规范》<br>等标准被持续修订沉淀</p></div>
-    <div class="card"><div class="num">43</div><p style="margin-top:6px"><b style="color:var(--txt)">项自动化断言</b><br>端到端 30 + 钩子 13<br>检索基线 8/8 红线常绿</p></div>
-    <div class="card"><div class="num">2</div><p style="margin-top:6px"><b style="color:var(--txt)">套仓库就绪</b><br>GitHub 私有源码仓<br>内网 GitLab 团队共享记忆仓</p></div>
-  </div>
-  <div class="card" style="margin-top:18px">
-    <p style="font-size:16px;color:var(--txt)">传统方式预估约 <b style="color:var(--fire2)">2 人周</b> 的工程量（方案评审 → MVP → 三工具接线 → Windows 兼容 → 团队共享仓），
-    由 AI 主导实现压缩至 <b style="color:var(--fire2)">1 个工作日</b>——人做方案决策与治理规则，这本身就是"AI First 开发"的一次实践。</p>
-  </div>
-  <div class="foot"><span>薪火 knowbase</span><span>10 / 12</span></div>
-</section>
-
-<!-- 11 提效依据 -->
-<section class="slide">
-  <div class="kicker">提效的依据 · 10</div>
-  <h2>提效依据：<span class="em">已验证</span>与<span class="em">预估</span>分开说</h2>
-  <div class="grow grid" style="grid-template-columns:1fr 1fr">
-    <div class="card" style="border-color:rgba(74,222,128,.4)">
-      <h3 class="good">已验证（今天现场可复现）</h3>
-      <ul>
-        <li>跨工具命中：一个工具存的坑，另两个工具秒级查到（现场演示）</li>
-        <li>检索性能：340 条 20 项目库实测 1.1ms/次，规模再大十倍仍是毫秒级</li>
-        <li>带项目标签检索精准率 20/20，杜绝"别的项目的答案"</li>
-        <li>任务前自动检索、任务后漏存追问——共 13 项钩子断言守护</li>
-        <li>22+ 次真实提交：标准沉淀已在自然发生</li>
-      </ul>
-    </div>
-    <div class="card" style="border-color:rgba(251,191,36,.4)">
-      <h3 class="warn">预估（基于真实案例复盘，持续用数据校准）</h3>
-      <ul>
-        <li>同类问题二次排查：<b style="color:var(--txt)">小时级 → 分钟级</b>（按 VPN 死锁案例复盘估算）</li>
-        <li>新人/新 Agent 上手：项目"暗知识"查询不再依赖"问对老员工"</li>
-        <li>标准执行：规范自动在上下文，减少"发过的规范没人看"的返工</li>
-        <li>口径：30 分钟分享内含现场演示，欢迎现场出题验证</li>
-      </ul>
-      <div class="bar" style="margin-top:14px"><i style="width:88%"></i></div>
-      <div class="lbl" style="margin-top:6px">运营指标已在自动采集：沉淀数 / 检索数 / 命中数 / 有效率，季度评选有据可查</div>
-    </div>
-  </div>
-  <div class="foot"><span>薪火 knowbase</span><span>11 / 12</span></div>
+  <div class="foot"><span>XINHUO // 薪火 knowbase</span><span>13 / 14</span></div>
 </section>
 
 <!-- 12 结尾 -->
 <section class="slide">
   <div class="grow" style="align-items:flex-start">
-    <div class="kicker">一起让它生长</div>
-    <h1 style="font-size:48px">一个人的坑，<br><span style="color:var(--fire2)">所有 Agent 的经验。</span></h1>
-    <div class="grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:38px;width:100%">
-      <div class="card"><h3 class="fire" style="color:var(--fire2)">今天就可以做</h3><p>按 README 五分钟接入你的 Trae / ZCode， clone 团队记忆库继承全部经验。</p></div>
-      <div class="card"><h3 class="fire" style="color:var(--fire2)">遇到问题提场景</h3><p>你的每个坑都值得入库——现场提出，我们当场沉淀为第一条公共经验。</p></div>
-      <div class="card"><h3 class="fire" style="color:var(--fire2)">下一站</h3><p>8 工具全接入 · 本地语义检索 · 热经验蒸馏进部门知识库（路线图已备）。</p></div>
+    <div class="hud">XINHUO://NEXT</div>
+    <h1 style="font-size:48px">一个人的坑，<br><span class="em">所有 AI 的经验。</span></h1>
+    <div class="grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:34px;width:100%">
+      <div class="card c glow"><h3 class="cy">今天就可以做</h3><p>五分钟接入你的 AI 工具，继承部门全部经验</p></div>
+      <div class="card c glow"><h3 class="cy">现场出题</h3><p>你手头的疑难问题，当场入库验证给你看</p></div>
+      <div class="card c glow"><h3 class="cy">下一站</h3><p>更聪明的语义搜索 · 多人多地同时写 · 高频经验定期编入部门知识库</p></div>
     </div>
-    <div class="sub" style="margin-top:34px">谢谢 —— 欢迎现场出题，我们用真实库回答。</div>
+    <div class="sub" style="margin-top:32px">谢谢 —— 欢迎现场出题，我们用真实库回答。</div>
   </div>
-  <div class="foot"><span>薪火 knowbase · wjqc/knowbase（GitHub 私有）+ 内网 GitLab 共享记忆仓</span><span>12 / 12</span></div>
+  <div class="foot"><span>XINHUO // 薪火 knowbase · 内网 GitLab 共享记忆仓</span><span>14 / 14</span></div>
 </section>
 
 <div class="nav">
   <button onclick="go(-1)">‹</button>
-  <span id="pg">1 / 12</span>
+  <span id="pg" class="mono">1 / 14</span>
   <button onclick="go(1)">›</button>
 </div>
 <script>
