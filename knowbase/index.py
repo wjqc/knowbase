@@ -389,8 +389,12 @@ def build_index_md(repo: Path, cfg: dict | None = None) -> Path:
     counts = {"by_type": {}, "total": 0, "staging": 0}
     groups: dict[str, list[str]] = {}
     staging_lines: list[str] = []
+    archived = 0
 
     for meta, _body, path in store.iter_all(repo, include_staging=True):
+        if meta.get("status") == "archived":
+            archived += 1
+            continue  # 速览不列归档条目（检索同样已排除）
         counts["total"] += 1
         counts["by_type"][meta.get("type", "?")] = counts["by_type"].get(meta.get("type", "?"), 0) + 1
         r = conn.execute("SELECT hit_count FROM meta WHERE id=?", (meta["id"],)).fetchone()
@@ -416,7 +420,8 @@ def build_index_md(repo: Path, cfg: dict | None = None) -> Path:
     lines = [
         "# knowbase 记忆索引（薪火 · 自动生成，勿手改）",
         "",
-        f"> 共 {counts['total']} 条（{type_summary}），staging 提案 {counts['staging']} 条。"
+        f"> 共 {counts['total']} 条（{type_summary}），staging 提案 {counts['staging']} 条"
+        f"{'，已归档 ' + str(archived) + ' 条（不列出）' if archived else ''}。"
         f"生成时间 {datetime.now().isoformat(timespec='seconds')}。",
         "> 本文件仅作速览（orientation）。检索一律走 memory_search，不要整读本文件。",
         "",

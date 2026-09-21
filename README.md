@@ -104,16 +104,39 @@ Claude Code（`~/.claude/settings.json`）与 ZCode（`~/.zcode/cli/config.json`
 `"verified"` 时任务前自动注入只取已验证经验（once 的新经验仍可被主动 search 检索到），
 默认 `"verified"`；已有配置显式 `"any"` 会保留兼容行为。MCP 主动检索不受置信度开关影响，但默认排除 staging/stale。
 
-## 人工治理（CLI）
+## 命令速查（全部 15 个）
 
-```bash
-.venv/bin/python -m knowbase verify P-2026-0001   # 人工确认有效（once→verified / stale 复活）
-.venv/bin/python -m knowbase promote S-2026-0001  # 激活 staging 里的标准/偏好提案
-.venv/bin/python -m knowbase revise S-2026-0001 --body-file revised.md  # 人工修订正式规则
-.venv/bin/python -m knowbase archive P-2026-0001  # 归档
-.venv/bin/python -m knowbase stats                # 数量/漏斗/TOP
-.venv/bin/python -m knowbase reindex              # 索引坏了就重建
-```
+未把虚拟环境加入 PATH 时，将 `knowbase` 替换为 `.venv/bin/python -m knowbase`。
+
+**治理（仅人工，Agent 无对应通道）**
+
+| 命令 | 用途 |
+|---|---|
+| `knowbase verify <id>` | 人工确认有效（once→verified / stale 复活） |
+| `knowbase promote <id>` | 激活 staging 提案（标准/偏好/业务规则生效） |
+| `knowbase revise <id> --body-file <文件> [--title]` | 人工修订已生效的标准/偏好/业务规则 |
+| `knowbase archive <id>` | 归档退役（检索与速览不再出现） |
+
+**运维与观测**
+
+| 命令 | 用途 |
+|---|---|
+| `knowbase init [--import-from <目录> --scope <名> --type <类>]` | 初始化/补全（幂等），可顺带存量导入 |
+| `knowbase import <目录> --type <类> --scope <名> [--staging]` | 16 种格式批量导入（细则见下文） |
+| `knowbase reindex` | 全量重建索引与 INDEX.md（markdown 唯一真相，坏了就重建） |
+| `knowbase stats` | 数量分布 / 使用漏斗 / TOP |
+| `knowbase list [type]` | 列出记忆（含 staging 标注） |
+| `knowbase history [--limit N]` | 最近搜索命中记录（JSON） |
+| `knowbase dashboard [--output <文件>] [--open]` | 生成 HTML 治理看板（静态快照，重跑即刷新） |
+| `knowbase doctor [--json]` | 健康检查：索引一致性 / 同步 / Git / 解析器 |
+| `knowbase alerts [--dry-run]` | 输出异常状态，供调度器通知 |
+
+**服务与接入**
+
+| 命令 | 用途 |
+|---|---|
+| `knowbase serve` | 启动 MCP 服务（stdio，供各 Agent 配置） |
+| `knowbase hook <session-start\|user-prompt\|stop> [--style claude\|zcode]` | Agent 钩子入口（接线见上文 hooks 节） |
 
 ## 已知边界（诚实版）
 
@@ -122,17 +145,7 @@ Claude Code（`~/.claude/settings.json`）与 ZCode（`~/.zcode/cli/config.json`
 - 记忆库含内部系统经验，**只推内网 GitLab，永不推公网**。
 
 
-## 初始化导入、检索记录与治理看板
-
-```bash
-knowbase init --import-from /path/to/project-docs --scope 项目名 --type workflow
-knowbase history --limit 100
-knowbase dashboard --open
-# 指定输出位置
-knowbase dashboard --output /path/to/dashboard.html
-```
-
-未把虚拟环境加入 PATH 时，将 `knowbase` 替换为 `.venv/bin/python -m knowbase`。
+## 导入、检索记录与治理看板（行为细则）
 
 - `init --import-from` 要求明确 scope（通用资料填 global），全部进入 staging；先 `promote ID` 人审激活，再 `verify ID` 确认有效。普通 init 仍为空库初始化，不扫描外部目录。
 - 导入保留解析正文、源文件绝对路径和 SHA-256；按来源路径、scope、类型幂等。支持 Markdown/TXT/PDF/DOCX/XLSX/PPTX/HTML/图片 OCR/代码/日志；源内容变化时提示复核，不自动覆盖。按项目分别导入，不把混合项目目录全部归为 global。

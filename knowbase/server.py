@@ -232,7 +232,9 @@ def read_impl(id: str):
     conn.close()
     head = (f"[{meta['id']}] {meta.get('title','')}"
             f" ｜ {meta.get('confidence')}·{meta.get('status')}"
-            f" ｜ scope={meta.get('scope')} ｜ 使用后请 memory_feedback 回填结果\n\n")
+            f" ｜ scope={meta.get('scope')}"
+            f" ｜ 采纳/验证后请回填 memory_feedback(id, helpful/not_helpful/outdated/incorrect)"
+            f"——晋升与淘汰只认反馈\n\n")
     return head + body
 
 
@@ -267,6 +269,7 @@ def search_impl(query: str, type: str | None = None, scope: str | None = None,
             f" ｜ score={r['score']} ｜ channels={','.join(r.get('channels', []))}"
             f"\n  摘要：{r['snippet'][:80]}\n  详情：memory_read(\"{r['id']}\")"
         )
+    lines.append("按命中条目行动后，请 memory_feedback 回填结果（反馈驱动 once→verified 晋升与 active→stale 淘汰）。")
     if sync_warn:
         lines.append(f"同步告警：{sync_warn}")
     return "\n".join(lines)

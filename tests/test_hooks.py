@@ -79,6 +79,24 @@ tr2.write_text("\n".join([
 ]), encoding="utf-8")
 check("stop 已沉淀放行", hooks.stop_event("sess-B", str(tr2)) == "")
 
+# 5b. 读取过记忆但未回填 → 阻断提醒反馈
+tr2b = TMP / "transcript2b.jsonl"
+tr2b.write_text(json.dumps({"type": "assistant", "message": {"content": [
+    {"type": "tool_use", "name": "memory_read", "input": {}}]}}), encoding="utf-8")
+out_fb = hooks.stop_event("sess-D", str(tr2b))
+rf = json.loads(out_fb)
+check("stop 读后未回填阻断", rf["decision"] == "block" and "memory_feedback" in rf["reason"], out_fb[:120])
+
+# 5c. 读后已回填 → 放行
+tr2c = TMP / "transcript2c.jsonl"
+tr2c.write_text("\n".join([
+    json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "memory_read", "input": {}}]}}),
+    json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "memory_feedback", "input": {}}]}}),
+]), encoding="utf-8")
+check("stop 已回填放行", hooks.stop_event("sess-E", str(tr2c)) == "")
+
 # 6. 无实质操作 → 不阻断
 tr3 = TMP / "transcript3.jsonl"
 tr3.write_text(json.dumps({"type": "assistant", "message": {"content": [

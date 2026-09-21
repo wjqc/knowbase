@@ -180,4 +180,15 @@ check("正反馈因子区间 1.25", abs(_feedback_factor({"helpful_count": 3, "u
 r = save_impl("pitfall", "纯中文标题的踩坑记录样本", PITFALL_BODY, tags=["中文标签"])
 check("写作规范 warn 不阻断", r.startswith("已保存 P-") and "写作规范建议" in r, r)
 
+# 23. 任务日志特征 warn：结果数字/收尾实测给建议但不阻断
+r = save_impl("workflow", "Phase 3 收尾实测记录样本",
+              "## 步骤\n跑全量测试并记录结果。\n\n## 产出\n合计 208/208 通过。\n")
+check("任务日志特征 warn", r.startswith("已保存 W-") and "任务执行记录" in r, r)
+
+# 24. read/search 回填强提示（feedback 闭环）
+r = read_impl(pid)
+check("read 回填强提示", "memory_feedback" in r and "晋升" in r, r[:140])
+r = search_impl("镜像仓库切换")
+check("search 回填提示", "memory_feedback" in r, r[-160:])
+
 print(f"\n全部 {PASS} 项断言通过 ✅  仓库：{rp}")

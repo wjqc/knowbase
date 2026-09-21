@@ -42,6 +42,14 @@ SECRET_RE = re.compile(
 )
 ID_RE = re.compile(r"^[A-Z]{1,2}-\d{4}-\d{4}$")
 
+# 任务执行日志特征（warn 级）：结果数字/阶段收尾属于过程产物，应放 progress/docs 而非记忆库
+LOG_SIGNALS: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r"\d+\s*/\s*\d+\s*(通过|passed)", re.I), "通过率数字"),
+    (re.compile(r"\bHR@\d|\bMRR\b\s*[=＝]|P\d{1,2}\s*=\s*\d+(\.\d+)?\s*(ms|毫秒)", re.I), "评测指标"),
+    (re.compile(r"(提升到|涨到|达到|命中率?)[^。\n]{0,8}\d+(\.\d+)?\s*%"), "百分比结果"),
+    (re.compile(r"收尾实测|Phase\s*\S{1,6}\s*收尾"), "阶段收尾记录"),
+)
+
 
 class LintError(Exception):
     def __init__(self, errors: list[str]):
@@ -185,6 +193,14 @@ def lint_warnings(meta: dict, body: str) -> list[str]:
         warns.append("标题与标签均无英文/字母关键词，跨语言检索易漏检，建议补技术名词")
     if not tags_cjk:
         warns.append("标签无中文关键词，建议补一个中文通俗说法")
+    for pat, label in LOG_SIGNALS:
+        hit = pat.search(title) or pat.search(body or "")
+        if hit:
+            warns.append(
+                f"疑似任务执行记录（{label}）：结果数字/阶段收尾属于过程产物，"
+                "建议放 progress.md 或 docs；只提炼\"下次还会踩/还会用\"的结论再入库"
+            )
+            break
     return warns
 
 

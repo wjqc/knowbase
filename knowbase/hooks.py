@@ -15,7 +15,9 @@ from . import config, index, store
 
 MIN_PROMPT_LEN = 6
 MAX_HITS = 3
-MEMORY_TOOLS = ("memory_save", "memory_update", "memory_feedback")
+MEMORY_WRITE_TOOLS = ("memory_save", "memory_update", "memory_feedback")
+MEMORY_READ_TOOLS = ("memory_read",)
+FEEDBACK_TOOL = "memory_feedback"
 WORK_TOOLS = ("Edit", "Write", "NotebookEdit", "Bash")
 
 
@@ -25,8 +27,11 @@ def session_start() -> str:
     return (
         "[knowbase 经验库] 本会话任务规则：\n"
         "1. 任务涉及具体项目/系统/报错/环境配置 → 先 memory_search（用 ≥3 字技术词，如\"EasyConnect 死锁\"）；\n"
-        "2. 任务结束：产生了踩坑/决策/固化流程/用户约束 → memory_save（提示相似时改用 memory_update）；\n"
-        "3. 按某条记忆行动后 → memory_feedback 回填 helpful/not_helpful/outdated/incorrect；\n"
+        "2. 任务结束先过可复用过滤：已修复的一次性 bug、repo/git/docs 能回答的事实、"
+        "一次性的评测/测试结果数字 → 不入库（放 progress/docs）；"
+        "剩下的\"下次还会踩/还会用\"→ memory_save（提示相似时改用 memory_update）；\n"
+        "3. 按记忆行动或验证后 → 必须回填 memory_feedback（helpful/not_helpful/outdated/incorrect）；"
+        "once→verified 晋升与 active→stale 淘汰只认反馈，不回填状态机不转；\n"
         "4. stale/once 状态的记忆采信前先在当前环境验证。"
     )
 
@@ -91,21 +96,27 @@ def user_prompt(prompt: str) -> str:
     return "\n".join(lines)
 
 
-# ---------- 3. 会话结束：漏存再判断（每次会话最多阻断一次） ----------
+# ---------- 3. 会话结束：漏存再判断 / 读后未回填提醒（每次会话最多阻断一次） ----------
 
-def _transcript_stats(path: str) -> tuple[int, int]:
-    """扫描会话 transcript：返回 (记忆工具调用次数, 实质文件/命令操作次数)。"""
-    memory_ops = work_ops = 0
+def _transcript_stats(path: str) -> dict:
+    """扫描会话 transcript：返回各类工具操作计数（记忆类为 0/1 标志，work_ops 为次数）。"""
+    stats = {"memory_write": 0, "memory_read": 0, "feedback": 0, "work_ops": 0}
     try:
         with open(path, encoding="utf-8", errors="ignore") as f:
             for line in f:
-                if not memory_ops and any(f'"{t}"' in line for t in MEMORY_TOOLS):
-                    memory_ops += 1
-                if '"tool_use"' in line and any(f'"{t}"' in line for t in WORK_TOOLS):
-                    work_ops += 1
+                if '"tool_use"' not in line:
+                    continue
+                if any(f'"{t}"' in line for t in MEMORY_WRITE_TOOLS):
+                    stats["memory_write"] = 1
+                if any(f'"{t}"' in line for t in MEMORY_READ_TOOLS):
+                    stats["memory_read"] = 1
+                if f'"{FEEDBACK_TOOL}"' in line:
+                    stats["feedback"] = 1
+                if any(f'"{t}"' in line for t in WORK_TOOLS):
+                    stats["work_ops"] += 1
     except OSError:
         pass
-    return memory_ops, work_ops
+    return stats
 
 
 def _flag_path(session_id: str) -> Path:
@@ -114,12 +125,30 @@ def _flag_path(session_id: str) -> Path:
 
 
 def stop_event(session_id: str, transcript_path: str) -> str:
-    """有实质操作但未沉淀 → 返回阻断 JSON（每会话限一次）；否则返回空串。"""
+    """漏存（有操作无沉淀）或读后未回填 → 返回阻断 JSON（每会话限一次）；否则返回空串。"""
     cfg = config.load_config()
     if not cfg.get("hooks", {}).get("enabled", True):
         return ""
-    memory_ops, work_ops = _transcript_stats(transcript_path)
-    if memory_ops or not work_ops:
+    t = _transcript_stats(transcript_path)
+    if t["work_ops"] and not t["memory_write"]:
+        reason = (
+            "[knowbase] 本次会话有代码/文件操作但未沉淀经验。先过可复用过滤"
+            "（已修复的一次性 bug、repo/git/docs 能回答的事实、一次性结果数字不入库），"
+            "若仍有值得复用的踩坑/决策/固化流程/用户约束，先 memory_search 查重，"
+            "再 memory_save 保存（提示相似则 memory_update）；"
+            "确认没有可复用经验，则直接回复“无可沉淀经验”结束。"
+            "本提醒每次会话最多出现一次。"
+        )
+    elif t["memory_read"] and not t["feedback"]:
+        reason = (
+            "[knowbase] 本次会话读取过记忆但未回填使用反馈。"
+            "请对实际参考/采纳的条目调用 "
+            "memory_feedback(id, helpful/not_helpful/outdated/incorrect)——"
+            "once→verified 晋升与 active→stale 淘汰只认反馈，缺反馈的记忆会永远停在低置信状态。"
+            "若读过的条目均未采纳，直接回复“未采纳，无需回填”结束。"
+            "本提醒每次会话最多出现一次。"
+        )
+    else:
         return ""
     flag = _flag_path(session_id)
     if flag.exists():
@@ -128,16 +157,7 @@ def stop_event(session_id: str, transcript_path: str) -> str:
         flag.write_text("1", encoding="utf-8")
     except OSError:
         pass
-    return json.dumps({
-        "decision": "block",
-        "reason": (
-            "[knowbase] 本次会话有代码/文件操作但未沉淀经验。请判断："
-            "若有值得复用的踩坑/决策/固化流程/用户约束，先 memory_search 查重，"
-            "再 memory_save 保存（提示相似则 memory_update）；"
-            "确认没有可复用经验，则直接回复“无可沉淀经验”结束。"
-            "本提醒每次会话最多出现一次。"
-        ),
-    }, ensure_ascii=False)
+    return json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False)
 
 
 # ---------- stdin/stdout 包装层 ----------

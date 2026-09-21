@@ -1,17 +1,21 @@
 """薪火 CLI：显式、幂等、可观察的初始化与人工治理操作。
 
-用法：
-  knowbase init                  初始化/补全配置与仓库（幂等，绝不破坏已有数据）
-  knowbase reindex               全量重建 SQLite 索引与 INDEX.md
-  knowbase verify <id>           人工确认有效（once→verified / stale 复活）
-  knowbase archive <id>          人工归档
-  knowbase promote <id>          人工激活 staging 提案（git mv 到正式目录）
-  knowbase revise <id>           人工修订已生效的标准/偏好/业务规则
-  knowbase list [type]           列出记忆
-  knowbase stats                 统计
-  knowbase doctor                单库健康检查（memory.db/FTS/Git/治理）
-  knowbase alerts                输出单库异常状态，供调度器通知
-  knowbase serve                 启动 MCP 服务（stdio，供各 Agent 配置调用）
+用法（与 argparse 一致，共 15 个命令）：
+  knowbase init [--import-from 目录 --scope 名 --type 类]  初始化/补全（幂等），可顺带存量导入
+  knowbase import <目录> [--type 类 --scope 名 --staging]  批量导入 Markdown/PDF/Office/HTML/图片/代码/日志
+  knowbase reindex                                        全量重建 SQLite 索引与 INDEX.md
+  knowbase verify <id>                                    人工确认有效（once→verified / stale 复活）
+  knowbase archive <id>                                   人工归档
+  knowbase promote <id>                                   人工激活 staging 提案（git mv 到正式目录）
+  knowbase revise <id> --body-file <文件>                 人工修订已生效的标准/偏好/业务规则
+  knowbase list [type]                                    列出记忆
+  knowbase stats                                          统计
+  knowbase history [--limit N]                            查看搜索命中记录 JSON
+  knowbase dashboard [--output 文件] [--open]             生成本地 HTML 知识治理看板
+  knowbase doctor [--json]                                单库健康检查（memory.db/FTS/Git/治理）
+  knowbase alerts [--dry-run]                             输出单库异常状态，供调度器通知
+  knowbase hook <event> [--style claude|zcode]            Agent hook 入口（session-start/user-prompt/stop）
+  knowbase serve                                          启动 MCP 服务（stdio，供各 Agent 配置调用）
 """
 
 import argparse
