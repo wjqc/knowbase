@@ -25,7 +25,7 @@ PREFIX = {"pitfall": "P", "standard": "S", "decision": "D", "workflow": "W", "pr
 ALL_DIRS = ("standards", "pitfalls", "decisions", "workflows", "preferences", "references", "bizrules", "staging")
 DIR_TYPE = {v: k for k, v in TYPE_DIR.items()}
 
-# 各类型必填小节（body 的 ## 标题需包含这些词）
+# 各类型必填小节（body 的 ## 标题需包含这些词）——仅适用于未打 card-v2 标记的存量卡
 REQUIRED_SECTIONS = {
     "pitfall": ["现象", "原因", "正确做法"],
     "standard": ["规则", "理由"],
@@ -34,6 +34,17 @@ REQUIRED_SECTIONS = {
     "preference": ["规则"],
     "bizrule": ["规则"],
 }
+
+# 统一知识卡 schema（2026-09-21 起）：八项小节强制 + 内容质量校验。
+# 存量卡不带 schema 标记，沿用各自旧规则；迁移时补标记即升级。
+CARD_V2_SCHEMA = "card-v2"
+CARD_SECTIONS = ("结论", "解决的问题", "适用条件", "不适用条件",
+                 "可执行动作", "关键证据", "验证情况", "未知与待确认")
+
+# 八项结构内容质量：出现标题不算通过（vague 条件 / 纯引用证据 / 空洞验证都要拦）
+_VAGUE_CONDITION_RE = re.compile(r"视情况而定|根据实际情况|具体情况具体分析|按需处理")
+_REF_ONLY_RE = re.compile(r"^(?:参见|参考|详见|见[:：\s])")
+_TEST_PASS_ONLY_RE = re.compile(r"^(?:测试通过|已测试|测试全部通过|自测通过|无)$")
 RELATION_TYPES = ("related", "supersedes", "contradicts", "derived_from")
 SOURCE_RE = re.compile(r"^agent:[\w.\-]+:[\w.\-]+$|^human:.+$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -41,6 +52,74 @@ SECRET_RE = re.compile(
     r"(?i)(password|passwd|secret|api[_-]?key|token)\s*[=:]\s*['\"]?[^\s'\"]{6,}"
 )
 ID_RE = re.compile(r"^[A-Z]{1,2}-\d{4}-\d{4}$")
+
+# 经验卡是共享资产，不能依赖作者机器上的文件。代码定位允许使用仓库相对路径；
+# 文档引用仅允许指向 knowbase 仓库内实际存在的相对路径。
+_MACHINE_PATH_RE = re.compile(
+    r"(?<![\w.-])(?:~[/\\]|/(?:Users|home)/[^\s`'\"<>]+|[A-Za-z]:\\+Users\\+[^\s`'\"<>]+)"
+)
+_DOC_EXT = r"(?:md|markdown|txt|pdf|docx?|xlsx?|pptx?|html?|rtf)"
+_BACKTICK_DOC_RE = re.compile(rf"`([^`\n]+\.{_DOC_EXT}(?:#[^`\n]+)?)`", re.I)
+_LINK_DOC_RE = re.compile(rf"\]\(([^)\n]+\.{_DOC_EXT}(?:#[^)\n]+)?)\)", re.I)
+_PLAIN_DOC_RE = re.compile(
+    rf"(?<![\w:/.-])((?:\.\.?/)?(?:[\w\u4e00-\u9fff.-]+[/\\])+"
+    rf"[\w\u4e00-\u9fff.-]+\.{_DOC_EXT})(?=$|[\s)`'\"，。；：,;:])",
+    re.I,
+)
+_CODE_REF_RE = re.compile(r"^code:[A-Za-z0-9_.-]+/(?!/)(?!.*(?:^|/)\.\.(?:/|$)).+")
+
+
+def _all_text(meta: dict, body: str) -> str:
+    """收集会写进共享 Markdown 的字符串字段，供引用边界校验。"""
+    values = [body or ""]
+
+    def visit(value):
+        if isinstance(value, str):
+            values.append(value)
+        elif isinstance(value, dict):
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                visit(item)
+
+    visit(meta)
+    return "\n".join(values)
+
+
+def reference_errors(meta: dict, body: str, repo: Path | None = None) -> list[str]:
+    """校验共享经验卡的文件引用边界。"""
+    text = _all_text(meta, body)
+    errs = []
+    machine_paths = sorted(set(m.group(0).rstrip(".,;:，。；：") for m in _MACHINE_PATH_RE.finditer(text)))
+    if machine_paths:
+        sample = "、".join(machine_paths[:3])
+        errs.append(
+            f"禁止保存本机路径（{sample}）。文档内容须写入卡片或放在 knowbase 仓库内；"
+            "代码证据请写“项目/仓库标识 + 仓库相对路径”"
+        )
+    doc_refs = []
+    for pattern in (_BACKTICK_DOC_RE, _LINK_DOC_RE, _PLAIN_DOC_RE):
+        doc_refs.extend(m.group(1) for m in pattern.finditer(text))
+    for value in doc_refs:
+        raw = value.replace("\\", "/").strip()
+        if _CODE_REF_RE.match(raw):
+            continue
+        raw = raw.split("#", 1)[0]
+        if raw.startswith("../") or "/../" in raw:
+            errs.append(f"文档引用越出 knowbase 仓库: {raw}")
+            continue
+        if repo is not None:
+            candidate = (Path(repo) / raw.removeprefix("./")).resolve()
+            root = Path(repo).resolve()
+            if root not in candidate.parents and candidate != root:
+                errs.append(f"文档引用越出 knowbase 仓库: {raw}")
+            elif not candidate.is_file():
+                errs.append(
+                    f"文档引用不在 knowbase 仓库内: {raw}。请把关键内容写入卡片正文，"
+                    "或先将文档纳入 knowbase 后再用仓库相对路径引用"
+                )
+    return list(dict.fromkeys(errs))
 
 # 任务执行日志特征（warn 级）：结果数字/阶段收尾属于过程产物，应放 progress/docs 而非记忆库
 LOG_SIGNALS: tuple[tuple[re.Pattern, str], ...] = (
@@ -144,9 +223,60 @@ def find_similar(repo: Path, title: str, threshold: float = 0.82):
     return best
 
 
+# ---------- 统一知识卡（card-v2）八项结构校验 ----------
+
+def _sections(body: str) -> dict[str, str]:
+    """## 小节名 → 小节正文（到下一个任意级别标题前，strip 后返回）。"""
+    out: dict[str, list[str]] = {}
+    cur = None
+    for line in (body or "").splitlines():
+        m = re.match(r"^#{1,4}\s*(.+)$", line)
+        if m:
+            cur = m.group(1).strip()
+            out.setdefault(cur, [])
+        elif cur is not None:
+            out[cur].append(line)
+    return {k: "\n".join(v).strip() for k, v in out.items()}
+
+
+def _card_section_text(secs: dict[str, str], name: str) -> str | None:
+    """按包含匹配取小节正文；小节不存在返回 None（与旧 REQUIRED_SECTIONS 匹配口径一致）。"""
+    for key, text in secs.items():
+        if name in key:
+            return text
+    return None
+
+
+def card_v2_errors(body: str) -> list[str]:
+    """八项小节强制 + 内容质量。仅出现标题不算通过。"""
+    errs = []
+    secs = _sections(body)
+    texts = {}
+    for sec in CARD_SECTIONS:
+        text = _card_section_text(secs, sec)
+        if text is None:
+            errs.append(f"缺少必填小节: {sec}")
+            continue
+        if not text:
+            errs.append(f"小节「{sec}」仅有标题无内容")
+        texts[sec] = text
+    cond = texts.get("适用条件", "")
+    if cond and _VAGUE_CONDITION_RE.search(cond):
+        errs.append("适用条件含“视情况而定/根据实际情况”类表述，不可判断；须写可判定的条件（环境/版本/触发现象）")
+    evidence = texts.get("关键证据", "")
+    if evidence:
+        lines = [re.sub(r"^[-*\d.\s]+", "", l).strip() for l in evidence.splitlines() if l.strip()]
+        if lines and all(_REF_ONLY_RE.match(l) for l in lines):
+            errs.append("关键证据不能只写“参见/参考某文档”；须摘录事实、命令输出或代码定位（code:<项目>/<相对路径>）")
+    verified = texts.get("验证情况", "")
+    if verified and _TEST_PASS_ONLY_RE.match(verified):
+        errs.append("“测试通过”不构成验证记录；须含时间、环境、方法与结果")
+    return errs
+
+
 # ---------- lint ----------
 
-def lint(meta: dict, body: str) -> list[str]:
+def lint(meta: dict, body: str, repo: Path | None = None) -> list[str]:
     errs = []
     t = meta.get("type")
     if t not in TYPES:
@@ -171,13 +301,17 @@ def lint(meta: dict, body: str) -> list[str]:
             if not (isinstance(r, dict) and r.get("id") and r.get("type") in RELATION_TYPES):
                 errs.append(f"relations 项须含 id 与合法 type {RELATION_TYPES}: {r}")
     heads = re.findall(r"^#{1,4}\s*(.+)$", body or "", re.M)
-    for sec in REQUIRED_SECTIONS.get(t, []):
-        if not any(sec in h for h in heads):
-            errs.append(f"缺少必填小节: {sec}")
+    if meta.get("schema") == CARD_V2_SCHEMA:
+        errs.extend(card_v2_errors(body))
+    else:
+        for sec in REQUIRED_SECTIONS.get(t, []):
+            if not any(sec in h for h in heads):
+                errs.append(f"缺少必填小节: {sec}")
     if t == "bizrule" and not str(meta.get("provenance", "")).strip():
         errs.append("业务规则必须带出处 provenance（PRD 编号/条款/业务方确认记录），无出处的规则不入库")
     if SECRET_RE.search(body or ""):
         errs.append("body 疑似包含明文密钥(password/token 等)，请脱敏后再存")
+    errs.extend(reference_errors(meta, body, repo))
     return errs
 
 
@@ -210,6 +344,7 @@ def new_meta(dtype: str, title: str, scope: str, tags: list, source: str,
     today = date.today().isoformat()
     return {
         "id": "",
+        "schema": CARD_V2_SCHEMA,
         "type": dtype,
         "title": title.strip(),
         "scope": scope,

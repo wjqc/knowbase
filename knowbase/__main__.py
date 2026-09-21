@@ -1,8 +1,8 @@
 """薪火 CLI：显式、幂等、可观察的初始化与人工治理操作。
 
 用法（与 argparse 一致，共 15 个命令）：
-  knowbase init [--import-from 目录 --scope 名 --type 类]  初始化/补全（幂等），可顺带存量导入
-  knowbase import <目录> [--type 类 --scope 名 --staging]  批量导入 Markdown/PDF/Office/HTML/图片/代码/日志
+  knowbase init [--import-from 目录 --scope 名]          初始化/补全（幂等），可顺带导入 source
+  knowbase import <目录> --scope 名                       批量导入为 source artifact（不产生知识卡、不进默认检索）
   knowbase reindex                                        全量重建 SQLite 索引与 INDEX.md
   knowbase verify <id>                                    人工确认有效（once→verified / stale 复活）
   knowbase archive <id>                                   人工归档
@@ -16,6 +16,9 @@
   knowbase alerts [--dry-run]                             输出单库异常状态，供调度器通知
   knowbase hook <event> [--style claude|zcode]            Agent hook 入口（session-start/user-prompt/stop）
   knowbase serve                                          启动 MCP 服务（stdio，供各 Agent 配置调用）
+
+原始材料与可复用知识分层（2026-09-21）：import 只产 source（sources/objects + manifests，
+保真、按内容哈希去重、不进默认检索）；可复用知识由 memory_save 按八项小节结构提炼。
 """
 
 import argparse
@@ -25,10 +28,10 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 
-from . import config, gitops, index, lifecycle, store
+from . import config, gitops, index, lifecycle, sources, store
 from .locking import RepoLock
 
-GITIGNORE = "memory.db\nmemory.db-wal\nmemory.db-shm\n.lock\n*.log\n"
+GITIGNORE = "memory.db\nmemory.db-wal\nmemory.db-shm\n.lock\n*.log\n.idea/\n.vscode/\n.DS_Store\n"
 
 REPO_README = """# 薪火（knowbase）经验记忆库
 
@@ -204,7 +207,7 @@ def cmd_revise(mid: str, body_file: str, title: str | None = None) -> int:
         if title is not None:
             meta["title"] = title.strip()
         meta["updated"] = date.today().isoformat()
-        errs = store.lint(meta, new_body)
+        errs = store.lint(meta, new_body, rp)
         if errs:
             print("错误：lint 未通过，未修改。\n- " + "\n- ".join(errs))
             return 1
@@ -237,8 +240,11 @@ def cmd_list(dtype: str | None) -> int:
 
 
 def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: str) -> int:
-    """批量解析支持的文档格式并导入为 once 级记忆。"""
-    import re as _re
+    """批量导入原始材料为 Source Artifact（P0，2026-09-21）。
+
+    只写 sources/（objects 文本快照 + manifests 元数据），不生成知识卡、不进入默认检索。
+    --type/--staging 仅为命令兼容保留，一律忽略；可复用知识由 memory_save 按八项小节结构提炼。
+    """
     src_dir = Path(directory).expanduser()
     if not src_dir.is_dir():
         print(f"错误：目录不存在 {src_dir}")
@@ -258,15 +264,13 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
     if not files:
         print("目录中未找到支持的文档文件")
         return 1
+    print("导入只生成 source artifact（--type/--staging 已忽略）：原始材料保真留存，不产生知识卡、不进入默认检索。")
     imported = skipped = 0
     written_paths: list[Path] = []
-    effective_staging = staging or dtype in ("standard", "preference", "bizrule")
     with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
         conn = index.connect(rp)
-        existing = {(m.get("import_path"), m.get("scope"), m.get("type")): m
-                    for m, _, _ in store.iter_all(rp, include_staging=True)}
         for f in files:
-            import hashlib
+            import re as _re
             if f.suffix.lower() == ".md":
                 body = f.read_text(encoding="utf-8").strip()
                 parsed_title = ""
@@ -284,51 +288,44 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
                     skipped += 1
                     print(f"  跳过（解析失败: {exc}）：{f.name}")
                     continue
-            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
-            prior = existing.get((str(f.resolve()), scope, dtype))
-            if prior:
+            if not body:
                 skipped += 1
-                reason = "已导入" if prior.get("import_sha256") == digest else "源文已变化，请复核并更新已有条目"
-                print(f"  跳过（{reason} [{prior['id']}]）：{f.name}")
                 continue
             if store.SECRET_RE.search(body):
                 skipped += 1
                 print(f"  跳过（疑似明文凭据）：{f.name}")
                 continue
-            if not body:
-                skipped += 1
-                continue
             m = _re.search(r"^#\s+(.+)$", body, _re.M)
             title = (m.group(1).strip() if m else parsed_title or f.stem)[:80]
-            meta = store.new_meta(dtype, title, scope,
-                                  ["import", src_dir.name, f.suffix.lower().lstrip(".")], source)
-            meta["import_path"] = str(f.resolve())
-            meta["import_sha256"] = digest
-            if dtype == "bizrule":
-                meta["provenance"] = f"待补出处（导入自 {src_dir.name}/{f.name}）"
-            meta["id"] = store.alloc_id(rp, dtype)
-            target = rp / ("staging" if effective_staging else store.TYPE_DIR[dtype]) / f"{meta['id']}.md"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(store.render(meta, body), encoding="utf-8")
-            written_paths.append(target)
-            index.upsert(conn, meta, body, target, effective_staging)
+            sid, digest, created = sources.import_source(
+                rp, body, title=title, scope=scope, fmt=f.suffix.lower().lstrip("."),
+                parser_version="markdown-direct" if f.suffix.lower() == ".md" else "parsers-v1",
+                imported_by=source, kind=sources.kind_for(f.suffix),
+                source_modified_at=datetime.fromtimestamp(f.stat().st_mtime).isoformat(timespec="seconds"),
+            )
+            if not created:
+                skipped += 1
+                print(f"  跳过（内容重复，已有 {sid}）：{f.name}")
+                continue
             index.record_source_state(
                 conn, str(f.resolve()), digest,
                 datetime.fromtimestamp(f.stat().st_mtime).isoformat(timespec="seconds"),
             )
+            written_paths.append(rp / sources.OBJECTS_DIR / f"{digest}.md")
+            written_paths.append(rp / sources.MANIFESTS_DIR / f"{sid}.yaml")
             imported += 1
-            print(f"  {meta['id']}  {title[:44]}")
+            print(f"  {sid}  {title[:44]}")
         if imported:
-            index.record_usage(conn, "import", detail=f"{imported} from {src_dir.name}")
+            index.record_usage(conn, "import", detail=f"{imported} source artifacts from {src_dir.name}")
         conn.close()
-        index.build_index_md(rp, cfg)
         git_warn = gitops.commit_paths(
-            rp, f"import({dtype}): {imported} 条 ← {src_dir.name}（scope={scope}，{'staging' if effective_staging else '直接入库'}）",
-            written_paths + [rp / "INDEX.md"],
+            rp, f"import(source): {imported} artifacts ← {src_dir.name}（scope={scope}，不产生知识卡）",
+            written_paths,
         ) if imported and cfg["git"].get("auto_commit", True) else None
     push_warn = None if git_warn or not imported or not cfg["git"].get("auto_push") else \
         gitops.schedule_push(rp, cfg["git"])
-    print(f"完成：导入 {imported}，跳过 {skipped}（重复、空文件或被拦截）")
+    print(f"完成：导入 {imported} 个 source artifact（sources/objects + sources/manifests），跳过 {skipped}（重复、空文件或被拦截）。")
+    print("原始材料不进入默认检索；提炼可复用结论请用 memory_save 按八项小节结构保存。")
     if git_warn:
         print(f"⚠ {git_warn}")
     if push_warn:
@@ -413,9 +410,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="knowbase", description="薪火：跨 Agent 经验记忆库")
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_init = sub.add_parser("init", help="初始化/补全（幂等）")
-    p_init.add_argument("--import-from", help="现存 markdown 目录，导入 staging 待审")
+    p_init.add_argument("--import-from", help="现存文档目录，导入为 source artifact（不产生知识卡）")
     p_init.add_argument("--scope", help="明确项目范围；通用资料用 global")
-    p_init.add_argument("--type", choices=store.TYPES, default="workflow")
+    p_init.add_argument("--type", choices=store.TYPES, default="workflow",
+                        help="（已废弃，兼容保留：导入一律生成 source）")
     p_dash = sub.add_parser("dashboard", help="生成本地 HTML 知识治理看板")
     p_dash.add_argument("--output", default="knowbase-dashboard.html")
     p_dash.add_argument("--open", action="store_true")
@@ -443,12 +441,14 @@ def main(argv=None):
     p_hook = sub.add_parser("hook", help="Agent hook 入口")
     p_hook.add_argument("event", choices=["session-start", "user-prompt", "stop"])
     p_hook.add_argument("--style", choices=["claude", "zcode"], default="claude")
-    p_imp = sub.add_parser("import", help="批量导入 Markdown/PDF/Office/HTML/图片/代码/日志")
+    p_imp = sub.add_parser("import", help="批量导入为 source artifact（不产生知识卡、不进默认检索）")
     p_imp.add_argument("directory")
-    p_imp.add_argument("--type", choices=store.TYPES, default="pitfall")
+    p_imp.add_argument("--type", choices=store.TYPES, default="pitfall",
+                       help="（已废弃，兼容保留：导入一律生成 source）")
     p_imp.add_argument("--scope", default="global")
     p_imp.add_argument("--source", default="human:import")
-    p_imp.add_argument("--staging", action="store_true", help="导入到 staging 待人审")
+    p_imp.add_argument("--staging", action="store_true",
+                       help="（已废弃，兼容保留：导入一律生成 source）")
     sub.add_parser("serve", help="启动 MCP 服务（stdio）")
     args = parser.parse_args(argv)
 

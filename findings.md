@@ -1,4 +1,12 @@
 # Findings
+- 2026-09-21：用户明确纠正共享边界：knowbase 经验卡不得依赖 knowbase 仓库外文档；代码证据可以使用项目/仓库相对路径。把 `/Users/...` 改成 `~/...` 仍是外部路径，不解决问题。
+- 当前未提交改动在 `store.to_portable`、`save_impl`、`update_impl`、`cmd_import` 中把家目录绝对路径机械改成 `~/`，且把 `import_path` 写入共享 Markdown；需要反向替换为拒绝/规范化策略。
+- 导入正文已完整复制进卡片，因此共享 Markdown 不需要保留外部 `import_path`。本机 `source_state` 可继续保存绝对源路径，供本机导入/同步诊断使用，但不能作为共享卡片内容或检索答案依赖。
+- 真实库已机械迁移 18 个 `import_path`，明确的 `~/work/...` 代码指针已改为 `code:<项目>/<相对路径>`；重建后 52 条可索引。
+- 强校验扫描仍识别出 16 张旧卡含本机路径或仓外文档名。这些内容混有运行目标路径、项目内文档名和来源索引，无法在不改变语义的前提下批量删除；保留为显式存量债务，未来更新时 lint 会阻止继续带入。
+- 通用知识入库的核心不是给 raw import 补字段，而是分离 Source Artifact 与 Knowledge Card：source 只作证据、不进入默认检索；card 必须原子、自足、带适用/不适用条件、动作、证据、验证环境和未知项。
+- `scope` 只能做粗粒度隔离，不能承担适用性判断。检索必须先做结构化 applicability gate，再对通过的卡片排序；否则 global 卡与同项目卡仍可能污染上下文。
+- 现有 `reference` 整篇导入应迁移为 source snapshot；从中提炼出多张 staging 卡，经 lint、证据覆盖、冲突检查和人工审核后才 active。迁移完成前旧 R 卡不应进入默认检索。
 - search 可返回 staging/stale；hook AND 路径没有过滤 staging，OR 路径只需一个词命中。
 - reindex 删除数据库，也删除 usage/feedback 日志及 hit_count。
 - import 仅标题相似去重，没有来源文件哈希；init 只检测知识目录。
@@ -356,4 +364,3 @@ fi
 - 回归测试 `tests/test_gitops_timeout.py`：假 git 父进程 sleep + 孙进程持有管道 sleep 60，断言超时后 <15s 快速失败且孙进程被清掉
 
 **预防**：任何"外部命令 + timeout"的代码都先问一句：超时路径杀的是进程还是进程树？跨平台子进程一律 `stdin=DEVNULL`。`subprocess.run(timeout=)` 的超时语义是"发起 kill 后等输出流关闭"，不是"保证返回"。
-

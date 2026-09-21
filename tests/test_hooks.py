@@ -32,7 +32,13 @@ def check(name, cond, detail=""):
     print(f"✓ {name}")
 
 
-BODY = "## 现象\n现象描述测试。\n## 原因\n原因描述测试。\n## 正确做法\n做法描述测试。\n"
+BODY = ("## 结论\nEasyConnect 7.6.7 在 macOS 26.1 上启动即 Rosetta 死锁。\n\n"
+        "## 解决的问题\n避免把启动死锁误判为系统故障反复重装。\n\n"
+        "## 适用条件\n- macOS 26.1 arm64\n- EasyConnect 7.6.7\n\n"
+        "## 不适用条件\n- Linux 客户端\n\n## 可执行动作\n1. 升级客户端\n2. netstat 验证路由\n\n"
+        "## 关键证据\nnetstat -rn | grep ^172 无路由表项。\n\n"
+        "## 验证情况\n2026-09-21 macOS 实机复现修复确认。\n\n"
+        "## 未知与待确认\nWindows 平台未验证。\n")
 
 # 准备：初始化 + 存一条记忆
 cli.main(["init"])

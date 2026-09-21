@@ -275,6 +275,8 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
     eligible = []
     for r in conn.execute("SELECT * FROM meta WHERE status != 'archived'"):
         m = _row_meta(r)
+        if m["type"] == "reference":
+            continue  # 原始材料（reference）退出默认检索；显式 type=reference 亦不返回（P0 止血）
         if not include_inactive and (m["staging"] or m["status"] != "active"):
             continue
         if mtype and m["type"] != mtype:
@@ -390,11 +392,15 @@ def build_index_md(repo: Path, cfg: dict | None = None) -> Path:
     groups: dict[str, list[str]] = {}
     staging_lines: list[str] = []
     archived = 0
+    references = 0
 
     for meta, _body, path in store.iter_all(repo, include_staging=True):
         if meta.get("status") == "archived":
             archived += 1
             continue  # 速览不列归档条目（检索同样已排除）
+        if meta.get("type") == "reference":
+            references += 1
+            continue  # 原始材料退出速览与默认检索，待 P3 迁移为 source
         counts["total"] += 1
         counts["by_type"][meta.get("type", "?")] = counts["by_type"].get(meta.get("type", "?"), 0) + 1
         r = conn.execute("SELECT hit_count FROM meta WHERE id=?", (meta["id"],)).fetchone()
@@ -421,7 +427,8 @@ def build_index_md(repo: Path, cfg: dict | None = None) -> Path:
         "# knowbase 记忆索引（薪火 · 自动生成，勿手改）",
         "",
         f"> 共 {counts['total']} 条（{type_summary}），staging 提案 {counts['staging']} 条"
-        f"{'，已归档 ' + str(archived) + ' 条（不列出）' if archived else ''}。"
+        f"{'，已归档 ' + str(archived) + ' 条（不列出）' if archived else ''}"
+        f"{'，references ' + str(references) + ' 条（原始材料，已退出默认检索待迁移）' if references else ''}。"
         f"生成时间 {datetime.now().isoformat(timespec='seconds')}。",
         "> 本文件仅作速览（orientation）。检索一律走 memory_search，不要整读本文件。",
         "",

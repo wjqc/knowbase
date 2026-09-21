@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from knowbase import config, gitops, hooks
+from knowbase import config, gitops, hooks, sources
 from knowbase.__main__ import cmd_import, cmd_init, cmd_promote, cmd_revise
 from knowbase.locking import RepoLock
 from knowbase.server import save_impl, search_impl, update_impl
@@ -19,7 +19,7 @@ def isolated_repo(tmp_path: Path, monkeypatch):
         "knowledge_path": "",
         "git": {"auto_commit": True, "auto_push": False, "auto_pull": False},
     })
-    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     monkeypatch.setattr(config, "CONFIG_PATH", cfg_path)
     monkeypatch.setenv("KNOWBASE_REPO_PATH", str(repo))
     monkeypatch.setenv("KNOWBASE_AGENT_NAME", "pytest-agent")
@@ -27,23 +27,28 @@ def isolated_repo(tmp_path: Path, monkeypatch):
     return repo, cfg_path
 
 
+STANDARD_CARD = (
+    "## 结论\n必须审核。\n\n"
+    "## 解决的问题\n防止越权。\n\n"
+    "## 适用条件\n- 正式规则发布\n\n## 不适用条件\n- staging 提案\n\n"
+    "## 可执行动作\n提交审核单后发布。\n\n"
+    "## 关键证据\n治理规范条目。\n\n"
+    "## 验证情况\n2026-09-21 治理评审确认。\n\n"
+    "## 未知与待确认\n暂无。\n"
+)
+
+
 def test_human_source_parameter_cannot_bypass_staging(isolated_repo):
     repo, _ = isolated_repo
-    result = save_impl(
-        "standard", "不可伪造的人工标准",
-        "## 规则\n必须审核。\n\n## 理由\n防止越权。",
-        source="human:forged",
-    )
+    result = save_impl("standard", "不可伪造的人工标准", STANDARD_CARD,
+                       source="human:forged")
     mid = result.split()[1]
     assert (repo / "staging" / f"{mid}.md").exists()
     assert not (repo / "standards" / f"{mid}.md").exists()
 
 
 def test_agent_cannot_update_active_governed_record(isolated_repo):
-    result = save_impl(
-        "standard", "正式规则禁止 Agent 修改",
-        "## 规则\n必须审核。\n\n## 理由\n防止越权。",
-    )
+    result = save_impl("standard", "正式规则禁止 Agent 修改", STANDARD_CARD)
     mid = result.split()[1]
     assert cmd_promote(mid) == 0
     denied = update_impl(mid, body="## 规则\n已被篡改。\n\n## 理由\n无。")
@@ -52,25 +57,23 @@ def test_agent_cannot_update_active_governed_record(isolated_repo):
 
 
 def test_trusted_cli_can_revise_active_governed_record(isolated_repo, tmp_path):
-    result = save_impl(
-        "standard", "人工修订正式标准",
-        "## 规则\n旧规则。\n\n## 理由\n旧理由。",
-    )
+    result = save_impl("standard", "人工修订正式标准", STANDARD_CARD)
     mid = result.split()[1]
     assert cmd_promote(mid) == 0
     body_file = tmp_path / "revision.md"
-    body_file.write_text("## 规则\n新规则。\n\n## 理由\n人工确认。", encoding="utf-8")
+    body_file.write_text(STANDARD_CARD.replace("必须审核。", "必须复核并双签。"), encoding="utf-8")
     assert cmd_revise(mid, str(body_file)) == 0
-    assert "新规则" in (isolated_repo[0] / "standards" / f"{mid}.md").read_text(encoding="utf-8")
+    assert "必须复核并双签。" in (isolated_repo[0] / "standards" / f"{mid}.md").read_text(encoding="utf-8")
 
 
-def test_imported_governed_content_is_always_staged(isolated_repo, tmp_path):
+def test_import_creates_source_instead_of_governed_cards(isolated_repo, tmp_path):
     repo, _ = isolated_repo
     source = tmp_path / "standards-source"
     source.mkdir()
     (source / "rule.md").write_text("# 导入标准\n\n## 规则\n先审核。\n\n## 理由\n防越权。", encoding="utf-8")
     assert cmd_import(str(source), "standard", "demo", False, "human:import") == 0
-    assert list((repo / "staging").glob("S-*.md"))
+    assert list((repo / sources.MANIFESTS_DIR).glob("SRC-*.yaml"))
+    assert not list((repo / "staging").glob("S-*.md"))
     assert not list((repo / "standards").glob("S-*.md"))
 
 
@@ -78,7 +81,11 @@ def test_save_commits_index_and_leaves_clean_worktree(isolated_repo):
     repo, _ = isolated_repo
     result = save_impl(
         "pitfall", "事务顺序验证",
-        "## 现象\n索引脏。\n\n## 原因\n提交过早。\n\n## 正确做法\n最后提交。",
+        "## 结论\n索引脏即提交过早。\n\n## 解决的问题\n保证 Markdown 与索引一致后再入 Git。\n\n"
+        "## 适用条件\n- auto_commit 开启\n\n## 不适用条件\n- 只读操作\n\n"
+        "## 可执行动作\n按 同步索引→INDEX→commit 顺序执行。\n\n"
+        "## 关键证据\n脏索引事故复盘。\n\n## 验证情况\n2026-09-21 测试环境确认。\n\n"
+        "## 未知与待确认\n暂无。\n",
     )
     assert result.startswith("已保存")
     status = subprocess.run(
@@ -105,7 +112,11 @@ def test_push_is_only_scheduled_after_repo_lock_is_released(isolated_repo, monke
                         lambda *_a, **_k: pytest.fail("write path must not perform network push"))
     result = save_impl(
         "pitfall", "推送不持有仓库锁",
-        "## 现象\n写入阻塞。\n\n## 原因\npush 在锁内。\n\n## 正确做法\n释放锁后推送。",
+        "## 结论\npush 必须在仓库锁外执行。\n\n## 解决的问题\n避免网络耗时阻塞同仓写入。\n\n"
+        "## 适用条件\n- auto_push 开启\n\n## 不适用条件\n- 本地单机\n\n"
+        "## 可执行动作\n写锁释放后再调度 push。\n\n"
+        "## 关键证据\n锁内 push 超时事故记录。\n\n"
+        "## 验证情况\n2026-09-21 测试环境确认。\n\n## 未知与待确认\n暂无。\n",
     )
     assert result.startswith("已保存")
     assert called == [True]

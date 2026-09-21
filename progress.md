@@ -1,4 +1,17 @@
 # Progress
+
+## 2026-09-21 经验卡引用边界
+- 已读取现有计划、knowbase 设计/治理知识和历史实现摘要。
+- 已定位路径改写误区及 save/update/import/revise 四类写入口。
+- 正在实现强校验、导入元数据收紧、存量扫描迁移与回归测试。
+- 首轮针对性 pytest 18/18 通过；脚本式 import 回归发现完整 lint 误伤原文导入，已收窄为 reference_errors 专项校验。
+- 已迁移真实库：删除 18 张 R 卡外部 `import_path`，把明确的 `~/work` 代码指针改成 `code:` 形式，并重建 52 条索引；未 push、未修改 `~/knowledge`。
+- 存量审计剩余 16 张卡需要语义提炼，未做高风险机械删除。
+- 最终验证：标准 pytest 102/102；脚本回归 e2e 35/35、import 12/12、hooks 15/15，governance 与 retrieval 回归通过；两个仓库 `git diff --check` 均通过。
+
+## 2026-09-21 通用可复用知识入库方案
+- 已依据当前 `TYPES/REQUIRED_SECTIONS`、`cmd_import`、`source_state`、`memory_save/update/search` 形成双层存储与晋升方案。
+- 本轮只输出方案，没有继续修改实现、知识卡或 `~/knowledge`。
 已完成源码与设计文档检查。计划保留现有命令兼容性，新增显式 init 导入参数和 dashboard。
 完成 CLI/init/import/search/hooks/dashboard；e2e 30、hooks 13、import 12、治理回归通过；检索必须命中 8/8，同义盲区 0/4。diff --check 通过。真实库 HTML 已生成；浏览器策略禁止本地 file 页面，未做替代绕行。
 知识库只提交本次独立增补文件，保留其他未提交内容。
@@ -687,3 +700,7 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 基线确认：完整 `pytest -q` 在收集 `tests/test_hooks.py` 时因模块级 `sys.exit(1)` 触发 INTERNALERROR，最终 0 tests；逐脚本 E2E/import/retrieval 仍通过。真实库 51 条 parity 正常、sync=ok，但 `INDEX.md` 持续 dirty。需修复权限伪造、写事务/push、同步锁与动态分支、Hook/MCP 路径和 pytest/CI。
 
 完成：MCP source 不再能声明 human，三类治理知识强制 staging，正式规则的 Agent update 被拒并新增可信人工 `knowbase revise`；import 同样强制治理类型 staging。写事务改为文件/SQLite/INDEX 完成后仅提交本事务路径，网络 push 改为 sync_state pending，不再发生在写请求；TTL 同步在 RepoLock 内 fetch/merge/reindex，动态解析 remote/当前分支，实时校验实际 URL，并在锁外处理本地 ahead push。Hook 与 MCP 统一走 index.search；项目上下文无法解析 scope 时明确拒绝。脚本回归由 pytest 子进程包装并新增 GitHub Actions。验证：针对性 11 项、标准全套 93 项通过，wheel 构建、compileall、diff check 和禁止模式扫描通过；真实库 51/51/51/51 parity 正常。环境边界：tesseract 未安装；真实库 INDEX.md 为本轮开始前已有用户侧 dirty 状态，本轮未修改该数据仓库文件。
+
+## 2026-09-21 source/card 分层 P0 止血
+
+按定稿方案落地 P0：新建 `knowbase/sources.py`（sources/objects sha256 内容寻址快照 + manifests/SRC-*.yaml 元数据，同内容跨路径去重，绝对路径只留本机 source_state）；`knowbase import` 重写为只产 source artifact，不再生成任何知识卡（--type/--staging 保留兼容、输出明示废弃）；`memory_save` 拒绝 reference 类型并引导走 import 或八项小节结构；`index.search` 全链路排除 reference（Hook 自动注入同路径生效），INDEX.md 速览移出 R 卡仅头部计数；新卡 frontmatter 打 `schema: card-v2`，八项小节（结论/解决的问题/适用条件/不适用条件/可执行动作/关键证据/验证情况/未知与待确认）强制且内容质量拦截（空洞条件/纯引用证据/"测试通过"式验证/空小节），存量卡不带标记沿用旧规则不迁移；hooks 会话提示、stop 阻断提示与 MCP instructions 补八项引导。测试：新增 test_source_layer.py 15 项，重写 import/governance/bizrule/e2e/hooks/reference_boundaries/production_fixes（import 产 source、治理链改走 standard 提案卡、全部 body 八项化、e2e 增加 v2 卡更新强制八项与 reference 拒存断言）。验证：pytest 117/117 通过（含脚本回归 e2e/import/hooks/governance/bizrule 与真实库 retrieval must 8/8 无回退）。文档：ADR-0002、README 命令表与行为细则更新。边界：MCP 服务进程需重启才加载新代码；存量 18 张 R 卡退出检索但未转 source（P3）；knowledge_extract/review/applicability gate 属 P1/P2 未实现。

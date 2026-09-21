@@ -1,7 +1,7 @@
 """端到端测试：直接调用 server impl 函数，模拟两个 Agent 的完整闭环。
 
 运行：.venv/bin/python tests/test_e2e.py
-覆盖：H1 沉淀（save/lint/staging/查重）、H2 检索（FTS/LIKE 回退/跨工具）、
+覆盖：H1 沉淀（save/lint/staging/查重/八项结构）、H2 检索（FTS/LIKE 回退/跨工具）、
 H3 反馈闭环（跨工具晋升/stale 化/supersedes）、并发锁、幂等 init。
 """
 
@@ -33,15 +33,19 @@ def check(name, cond, detail=""):
     print(f"✓ {name}")
 
 
-PITFALL_BODY = """## 现象
-测试现象描述，某某功能启动即失败。
+def card(conclusion, problem, applies, excludes, action, evidence,
+         verified="2026-09-21 macOS 26.1 实机验证。", unknown="Windows 平台行为未验证。"):
+    return (f"## 结论\n{conclusion}\n\n## 解决的问题\n{problem}\n\n## 适用条件\n{applies}\n\n"
+            f"## 不适用条件\n{excludes}\n\n## 可执行动作\n{action}\n\n## 关键证据\n{evidence}\n\n"
+            f"## 验证情况\n{verified}\n\n## 未知与待确认\n{unknown}\n")
 
-## 原因
-版本与环境的转译冲突导致。
 
-## 正确做法
-升级组件版本；用 netstat 验证路由。
-"""
+PITFALL_BODY = card(
+    "EasyConnect 7.6.7 与 macOS 26.1 Rosetta 转译冲突导致启动即死锁。",
+    "避免把启动死锁误判为系统故障而反复重装。",
+    "- macOS 26.1 arm64\n- EasyConnect 7.6.7", "- Linux 客户端\n- 已升级 8.x",
+    "1. 升级客户端版本\n2. 用 netstat 验证路由",
+    "netstat -rn | grep ^172 无路由表项，升级后恢复。")
 
 # 0. 幂等 init：跑两次
 check("init 第1次", cli.main(["init"]) == 0)
@@ -56,7 +60,7 @@ r = save_impl("pitfall", "EasyConnect 7.6.7 在 macOS 上启动即死锁", PITFA
 check("save pitfall", r.startswith("已保存 P-"), r)
 pid = r.split()[1]
 
-# 2. lint：缺小节
+# 2. lint：缺八项小节
 r = save_impl("pitfall", "缺小节的坑", "只有一段描述没有小节。")
 check("lint 缺小节拦截", r.startswith("错误：lint") and "缺少必填小节" in r, r)
 
@@ -69,15 +73,23 @@ r = save_impl("pitfall", "EasyConnect 7.6.7 在 macOS 上启动即死锁!", PITF
 check("查重拦截", "已存在高度相似" in r and pid in r, r)
 
 # 5. standard 由 Agent 保存 → staging
-r = save_impl("standard", "接口发布门禁标准", "## 规则\n接口上线必须过验收环境回归。\n## 理由\n保障交付质量。\n")
+r = save_impl("standard", "接口发布门禁标准", card(
+    "接口上线必须过验收环境回归。", "防止未回归接口直上生产引发事故。",
+    "- 对外 API 发布", "- 内部实验脚本", "发布前在验收环境跑全量回归。",
+    "发布检查单第 3 项要求回归记录。"))
 check("standard 落 staging", "staging" in r and "S-2026" in r, r)
 
 # 6. preference 无论 source 入参如何都必须 staging；人工通过 CLI promote
 os.environ["KNOWBASE_AGENT_NAME"] = "claude-code"
-r = save_impl("preference", "输出必须中文", "## 规则\n对用户输出一律中文。\n")
+r = save_impl("preference", "输出必须中文", card(
+    "对用户输出一律使用中文。", "避免中英混杂造成沟通歧义。",
+    "- 面向用户的回复", "- 代码注释与技术文档", "输出前自查语言一致性。",
+    "团队沟通规范第 1 条。"))
 check("preference(Agent) 落 staging", "staging" in r, r)
-r = save_impl("preference", "绝不自动提交知识库", "## 规则\n知识库变更不自动 commit。\n",
-              source="human:文剑")
+r = save_impl("preference", "绝不自动提交知识库", card(
+    "知识库变更不自动 commit。", "保留人工审计窗口。",
+    "- 共享记忆库写入", "- 个人笔记库", "写入后等待人工确认。",
+    "历史误提交事故复盘记录。"), source="human:文剑")
 check("preference human source 不可绕过 staging", "staging" in r, r)
 
 # 7. 检索：FTS5 命中 + 排序字段
@@ -128,9 +140,14 @@ row = conn.execute("SELECT status FROM meta WHERE id=?", (pid,)).fetchone()
 conn.close()
 check("supersedes 同步索引状态", row[0] == "stale", str(row))
 
-# 14. update 修改内容
-r = update_impl(new_pid, body=PITFALL_BODY + "\n补充：升级后需重启网卡服务。\n")
+# 14. update 修改内容（v2 卡更新仍强制八项结构）
+r = update_impl(new_pid, body=PITFALL_BODY.replace("Windows 平台行为未验证。",
+                                                   "Windows 平台行为未验证；8.x 安装包校验流程另见验收记录。"))
 check("update 内容", "已更新" in r, r)
+
+# 14b. v2 卡更新成旧三段式 → 拦截
+r = update_impl(new_pid, body="## 现象\n旧结构。\n\n## 原因\n旧。\n\n## 正确做法\n旧。\n")
+check("v2 卡更新强制八项", r.startswith("错误：lint") and "缺少必填小节" in r, r)
 
 # 15. promote：staging 提案激活
 sid = [f.name[:-3] for f in (rp / "staging").glob("S-*.md")][0]
@@ -156,8 +173,10 @@ mods = [("网关超时重试", "网络"), ("镜像仓库切换", "存储"), ("�
         ("会话持久化", "状态"), ("灰度发布门禁", "发布")]
 ids = set()
 for i, (t, dom) in enumerate(mods):
-    r = save_impl("decision", f"{dom}模块{t}的技术决策",
-                  f"## 背景\n{dom}压测中发现{t}问题。\n## 决策\n采用方案{chr(65+i)}。\n")
+    r = save_impl("decision", f"{dom}模块{t}的技术决策", card(
+        f"{dom}压测后{t}采用方案{chr(65+i)}。", f"解决{dom}在{t}上的性能瓶颈。",
+        f"- {dom}模块\n- 高并发场景", "- 低流量场景", f"1. 按方案{chr(65+i)}改造\n2. 压测回归",
+        f"{dom}压测报告对比数据。"))
     ids.add(r.split()[1])
 check("并发 id 唯一", len(ids) == 5, str(ids))
 
@@ -181,8 +200,11 @@ r = save_impl("pitfall", "纯中文标题的踩坑记录样本", PITFALL_BODY, t
 check("写作规范 warn 不阻断", r.startswith("已保存 P-") and "写作规范建议" in r, r)
 
 # 23. 任务日志特征 warn：结果数字/收尾实测给建议但不阻断
-r = save_impl("workflow", "Phase 3 收尾实测记录样本",
-              "## 步骤\n跑全量测试并记录结果。\n\n## 产出\n合计 208/208 通过。\n")
+r = save_impl("workflow", "Phase 3 收尾实测记录样本", card(
+    "跑全量测试并记录结果的收尾流程。", "沉淀阶段收尾的操作顺序。",
+    "- 阶段收尾", "- 测试仍在跑", "1. 跑全量测试\n2. 汇总产出",
+    "历史收尾记录：合计 208/208 通过。",
+    verified="2026-09-21 本机执行确认。", unknown="回归范围边界未定。"))
 check("任务日志特征 warn", r.startswith("已保存 W-") and "任务执行记录" in r, r)
 
 # 24. read/search 回填强提示（feedback 闭环）
@@ -190,5 +212,21 @@ r = read_impl(pid)
 check("read 回填强提示", "memory_feedback" in r and "晋升" in r, r[:140])
 r = search_impl("镜像仓库切换")
 check("search 回填提示", "memory_feedback" in r, r[-160:])
+
+# 25. 本机路径拒绝入库；代码证据使用项目相对路径
+r = save_impl("pitfall", "家目录路径可移植性样例", card(
+    "经验卡禁止保存本机家目录路径。", "避免共享卡在他人机器上失效。",
+    "- 所有类型经验卡", "- 临时草稿", "参照 /Users/someone/knowledge/x.md 排查。",
+    "路径失效导致复用失败的案例。"), tags=["path", "portable"])
+check("本机路径硬拒绝", r.startswith("错误：lint") and "禁止保存本机路径" in r, r)
+r = save_impl("pitfall", "代码相对路径可共享样例", card(
+    "代码证据统一用项目相对路径。", "保证跨机器可定位。",
+    "- 代码类证据", "- 文档引用", "检查 `code:demo/src/service.py:42`。",
+    "调用栈指向该行。"), tags=["path", "portable"])
+check("代码相对路径可保存", r.startswith("已保存 P-"), r)
+
+# 26. reference 类型不可保存（source/card 分层）
+r = save_impl("reference", "整篇架构文档直存", PITFALL_BODY)
+check("reference 拒绝保存", r.startswith("错误：") and "knowbase import" in r, r)
 
 print(f"\n全部 {PASS} 项断言通过 ✅  仓库：{rp}")

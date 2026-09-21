@@ -1,4 +1,4 @@
-"""bizrule 类型测试：provenance 硬校验 / 提案制 / import 强制 staging。
+"""bizrule 类型测试：provenance 硬校验 / 提案制 / import 只产 source。
 
 运行：.venv/bin/python tests/test_bizrule.py
 """
@@ -13,7 +13,7 @@ os.environ["KNOWBASE_CONFIG"] = str(TMP / "nc.json")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from knowbase import __main__ as cli  # noqa: E402
-from knowbase import config, store  # noqa: E402
+from knowbase import config, sources, store  # noqa: E402
 from knowbase.server import save_impl, search_impl  # noqa: E402
 
 PASS = 0
@@ -25,10 +25,16 @@ def check(name, cond, detail=""):
 
 cli.main(["init"])
 os.environ["KNOWBASE_AGENT_NAME"] = "claude-code"
-BODY = "## 规则\n欠费停机用户不可发起新业务受理。\n## 例外\nVIP 欠费 ≤50 元可透支。\n## 出处\nPRD-2026-031 §4.2。\n"
+BODY = ("## 结论\n欠费停机用户不可发起新业务受理，VIP 欠费 ≤50 元可透支。\n\n"
+        "## 解决的问题\n统一受理口径，避免一线违规开通。\n\n"
+        "## 适用条件\n- 欠费停机状态用户\n- 发起新业务受理\n\n## 不适用条件\n- VIP 欠费 ≤50 元透支额度内\n\n"
+        "## 可执行动作\n1. 查询用户欠费状态\n2. 命中欠费停机即拒绝受理\n\n"
+        "## 关键证据\nPRD-2026-031 §4.2 受理规则条目。\n\n"
+        "## 验证情况\n2026-09-21 业务方按 PRD 条目确认生效。\n\n"
+        "## 未知与待确认\n携号转网用户口径未定。\n")
 
 # 1. 无出处 → lint 拦截
-r = save_impl("bizrule", "欠费停机不可受理", "## 规则\n欠费停机用户不可受理。\n")
+r = save_impl("bizrule", "欠费停机不可受理", BODY)
 check("无 provenance 拦截", "provenance" in r, r)
 
 # 2. Agent 带出处保存 → 强制 staging
@@ -49,16 +55,18 @@ check("人工 promote bizrule", cli.main(["promote", bid]) == 0)
 r = search_impl("欠费停机 受理", scope="cmi")
 check("业务规则可检索", bid in r, r[:120])
 
-# 5. import 强制 staging + 出处占位
+# 5. import 原始规则文档 → 只产 source artifact（不产 staging 卡，规则提炼走 memory_save）
 SRC = TMP / "规则文档"; SRC.mkdir()
 (SRC / "透支受理规则.md").write_text("# 透支受理规则\n\n金卡用户欠费 100 元内可透支受理。\n", encoding="utf-8")
 import io, contextlib
 buf = io.StringIO()
+staging_before = len(list((config.repo_path() / "staging").glob("B-*.md")))
 with contextlib.redirect_stdout(buf):
     cli.main(["import", str(SRC), "--type", "bizrule", "--scope", "cmi"])
-stg = list((config.repo_path() / "staging").glob("B-*.md"))
-check("import bizrule 强制 staging", (config.repo_path() / "staging" / "B-2026-0003.md").exists(), str([f.name for f in stg]))
-meta, _, _ = store.load(config.repo_path(), "B-2026-0003")
-check("出处占位待补", "待补出处" in meta.get("provenance", ""), str(meta.get("provenance")))
+mfs = list(sources.iter_manifests(config.repo_path()))
+staging_after = len(list((config.repo_path() / "staging").glob("B-*.md")))
+check("import bizrule 只产 source", len(mfs) == 1 and staging_after == staging_before,
+      f"manifests={[m['id'] for m in mfs]} staging {staging_before}->{staging_after}")
+check("source 内容不进检索", "未命中" in search_impl("金卡用户欠费 100 元内", scope="cmi"))
 
 print(f"\n全部 {PASS} 项断言通过 ✅  {TMP}")

@@ -17,7 +17,9 @@ mcp = FastMCP(
     instructions=(
         "薪火：跨 Agent 共享的经验记忆库。"
         "任务开始涉及具体项目/系统/报错时先 memory_search；"
-        "任务结束产生踩坑/决策/流程/约束时 memory_save；"
+        "任务结束产生踩坑/决策/流程/约束时 memory_save（正文须含八项小节：结论/解决的问题/"
+        "适用条件/不适用条件/可执行动作/关键证据/验证情况/未知与待确认）；"
+        "整篇文档等原始材料不入 memory_save，走 CLI knowbase import 导入为 source；"
         "按记忆行动后如实 memory_feedback。"
     ),
 )
@@ -102,6 +104,11 @@ def save_impl(type: str, title: str, body: str, tags: list | None = None,
         return err
     if type not in store.TYPES:
         return f"错误：type 须为 {store.TYPES}"
+    if type == "reference":
+        return ("错误：reference 已不是可发布知识类型（原始材料与可复用知识已分层）。"
+                "整篇文档/日志/代码请用 CLI `knowbase import <目录> --scope <项目>` 导入为 source artifact"
+                "（保真、不进默认检索）；从中提炼的可复用结论请改用 pitfall/decision/workflow 等类型，"
+                "并按八项小节结构撰写：结论/解决的问题/适用条件/不适用条件/可执行动作/关键证据/验证情况/未知与待确认。")
     if not title.strip() or not body.strip():
         return "错误：title 与 body 必填"
     # MCP 入参不具备身份权威：source 只可作为普通 agent 来源，不能声明 human。
@@ -117,7 +124,7 @@ def save_impl(type: str, title: str, body: str, tags: list | None = None,
         meta["rule_status"] = rule_status
     meta["id"] = "(待分配)"
 
-    errs = store.lint(meta, body)
+    errs = store.lint(meta, body, rp)
     if errs:
         return "错误：lint 未通过，未保存。\n- " + "\n- ".join(errs)
     warns = store.lint_warnings(meta, body)
@@ -190,7 +197,7 @@ def update_impl(id: str, body: str | None = None, title: str | None = None,
         if evidence is not None:
             meta["evidence"] = evidence
         new_body = body if body is not None else old_body
-        errs = store.lint(meta, new_body)
+        errs = store.lint(meta, new_body, rp)
         if errs:
             return "错误：lint 未通过，未修改。\n- " + "\n- ".join(errs)
         path.write_text(store.render(meta, new_body), encoding="utf-8")
@@ -235,6 +242,9 @@ def read_impl(id: str):
             f" ｜ scope={meta.get('scope')}"
             f" ｜ 采纳/验证后请回填 memory_feedback(id, helpful/not_helpful/outdated/incorrect)"
             f"——晋升与淘汰只认反馈\n\n")
+    if meta.get("type") == "reference":
+        head = ("[knowbase] 该条为 reference 原始材料卡（已退出默认检索，待迁移为 source）："
+                "内容未经知识化提炼，采信前须自行验证。\n\n" + head)
     return head + body
 
 
@@ -243,6 +253,9 @@ def search_impl(query: str, type: str | None = None, scope: str | None = None,
     rp, err = _repo()
     if err:
         return err
+    if type == "reference":
+        return ("错误：reference（原始材料卡）已退出默认检索。存量 R 卡可 memory_read(id) 单条查看；"
+                "新原始材料请用 CLI `knowbase import <目录> --scope <项目>` 导入为 source artifact。")
     _updated, sync_warn = gitops.sync_before_read(rp, _cfg())
     conn = index.connect(rp)
     if scope is None:
