@@ -8,6 +8,7 @@
 - structured `code_refs` 已实现并通过 pytest 126/126 及 e2e/import/bizrule/governance/hooks/retrieval 脚本回归。
 - ZCode `SaveWorkflow` 已保存 global 工作流 `/Users/qc/.zcode/workflows/bizrule-mining.dwf.ts`，动态 demo run id 为 `dwfrun-462b48bc-a8c0-4618-91d4-925f4a872c7b`。
 - 真实记忆库已本地落入 staging 卡 `B-2026-0001`（无 push），等待人工审核。
+- demo 工作流完成：3 条候选全部落库 B-2026-0002/0003/0004（起草员经 memory_update 补齐结构化 code_refs；旧会话 MCP 不认 code_refs 入参时自动降级正文 code: 行，降级路径实测有效）。反查验证：搜 `card_v2_errors` 命中 B-2026-0004，搜 `save_impl server.py` 命中全部相关卡。`~/knowbase` 9 个提交与 `~/knowledge` 增补文档均仅本地提交，未 push。
 
 ## 2026-09-21 经验卡引用边界
 - 已读取现有计划、knowbase 设计/治理知识和历史实现摘要。

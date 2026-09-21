@@ -52,8 +52,8 @@
 34. 实现 store/server/index/hooks 的 structured `code_refs`（完成）
 35. 补 README 与 ADR-0002，定义并全局保存 `bizrule-mining` 工作流（完成）
 36. 运行定向、全量与脚本回归（完成：pytest 126/126，六组脚本回归通过）
-37. 用 knowbase 自身执行 demo 挖掘，将真实 bizrule 卡落入 staging 供审核（进行中：已手动落 B-2026-0001，动态工作流运行中）
-38. 同步 `/Users/qc/knowledge` 知识文档，分别提交 knowledge 与 knowbase，不 push（进行中）
+37. 用 knowbase 自身执行 demo 挖掘，将真实 bizrule 卡落入 staging 供审核（完成：入口 save_impl，3 条候选全部落库 B-2026-0002/0003/0004，含结构化 code_refs 与 provenance 占位，反查验证命中；连同此前手动落的 B-2026-0001 共 4 张待人审）
+38. 同步 `/Users/qc/knowledge` 知识文档，分别提交 knowledge 与 knowbase，不 push（完成：增补文档 `通用/05-智能助手/knowbase-业务规则代码定位code_refs-2026-09-21.md`；两仓本地提交，均未 push）
 
 ## 通用可复用知识入库方案（2026-09-21）
 
