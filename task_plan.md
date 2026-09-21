@@ -45,6 +45,16 @@
 |---|---:|---|
 | `tests/test_import.py` 导入 0 条，原预期 3 条 | 1 | import 只执行引用边界校验，不套用新建卡片的完整必填小节 lint，保留“原文导入后提炼”语义 |
 
+## 结构化 code_refs 与 bizrule-mining（2026-09-21）
+
+32. 读取项目指令、knowbase 知识与当前实现（完成）
+33. 先补 `tests/test_code_refs.py` 失败用例，覆盖 lint/save/search/read/update/旧卡兼容（完成）
+34. 实现 store/server/index/hooks 的 structured `code_refs`（完成）
+35. 补 README 与 ADR-0002，定义并全局保存 `bizrule-mining` 工作流（完成）
+36. 运行定向、全量与脚本回归（完成：pytest 126/126，六组脚本回归通过）
+37. 用 knowbase 自身执行 demo 挖掘，将真实 bizrule 卡落入 staging 供审核（进行中：已手动落 B-2026-0001，动态工作流运行中）
+38. 同步 `/Users/qc/knowledge` 知识文档，分别提交 knowledge 与 knowbase，不 push（进行中）
+
 ## 通用可复用知识入库方案（2026-09-21）
 
 22. 复核当前类型、导入、检索与 source_state 边界（完成）

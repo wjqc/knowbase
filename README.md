@@ -86,6 +86,29 @@ Claude Code（`~/.claude/settings.json`）与 ZCode（`~/.zcode/cli/config.json`
 5. 标准/偏好类保存会自动进 staging 待人审，属正常治理，勿绕过；
 6. body 里禁止明文密钥；经验卡禁止本机路径和仓外文档引用。文档结论必须正文自足或使用 knowbase 仓内相对路径；代码证据写成 `code:<项目>/<仓库相对路径>`（可带行号，lint 会拦违规写入）。**整篇文档等原始材料不入 memory_save**，走 `knowbase import` 导入为 source（见下节）。
 
+### 结构化代码定位 `code_refs`
+
+`memory_save` / `memory_update` 支持在所有卡类型上携带 `code_refs`（业务规则卡最常用）：
+
+```yaml
+code_refs:
+  - repo: order-center
+    path: svc/order/OrderServiceImpl.java
+    symbol: OrderServiceImpl#changeCard
+    lines: 120-180
+    note: 实名校验入口
+```
+
+| 字段 | 要求 |
+|---|---|
+| `repo` | 必填，仓库/项目标识，只允许 `[A-Za-z0-9_.-]+` |
+| `path` | 必填，仓库相对路径；禁止绝对路径、`..` 穿越和反斜杠 |
+| `symbol` | 可选，函数名或 `类#方法` |
+| `lines` | 可选，单行或闭区间，如 `120` / `120-180` |
+| `note` | 可选，简短说明该位置的业务意义 |
+
+索引会把每项拍平为 `code:<repo>/<path>[#symbol][:lines]` 追加到现有 FTS 与向量文本，因此可按类名、方法名或路径片段反查规则；不增数据库列。正文出现旧式 `code:` 定位而 frontmatter 未填 `code_refs` 时，lint 仅告警、不阻断存量卡。
+
 ## 原始材料入库（source）与知识提炼（2026-09-21 起）
 
 原始材料与可复用知识已彻底分层（ADR-0002）：**source 负责保真，card 负责复用**。

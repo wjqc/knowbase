@@ -26,7 +26,7 @@
 ### 分期路线
 
 - **P0（本次）**：检索/速览排除 reference；import 只产 source；save 拒绝 reference；八项结构强制；接口兼容保留。
-- **P1**：knowledge_extract（source→candidate）、staging 审核（approve/merge/reject）、结构化 code_refs、source→card 派生关系。
+- **P1**：knowledge_extract（source→candidate）、staging 审核（approve/merge/reject）、**结构化 code_refs 已落地（2026-09-21）**、source→card 派生关系。
 - **P2**：applicability/exclusions schema、检索前适用性门（先判断能不能用，再算排第几）、版本漂移触发复验。
 - **P3**：存量 18 张 R 卡转 source、分批提炼、人工审核后归档旧卡。
 

@@ -1,5 +1,14 @@
 # Progress
 
+## 2026-09-21 structured code_refs + bizrule-mining
+
+- 已启用 `planning-with-files` 与 `backend-testing`；当前先做指令、知识、现状盘点。
+- 工作区起始状态干净：`main...origin/main`。
+- 当前工具列表未提供 codegraph MCP，后续按用户要求降级为 `rg` + 源码阅读。
+- structured `code_refs` 已实现并通过 pytest 126/126 及 e2e/import/bizrule/governance/hooks/retrieval 脚本回归。
+- ZCode `SaveWorkflow` 已保存 global 工作流 `/Users/qc/.zcode/workflows/bizrule-mining.dwf.ts`，动态 demo run id 为 `dwfrun-462b48bc-a8c0-4618-91d4-925f4a872c7b`。
+- 真实记忆库已本地落入 staging 卡 `B-2026-0001`（无 push），等待人工审核。
+
 ## 2026-09-21 经验卡引用边界
 - 已读取现有计划、knowbase 设计/治理知识和历史实现摘要。
 - 已定位路径改写误区及 save/update/import/revise 四类写入口。

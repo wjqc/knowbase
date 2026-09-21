@@ -1,4 +1,6 @@
 # Findings
+- 2026-09-21 新任务边界：`code_refs` 只拍平进现有 FTS body/向量文本，不增数据库列、不改检索排序；`bizrule-mining` 是 global 动态工作流，demo 卡只进 staging。
+- 工作区开始时无未提交改动；当前会话无 codegraph MCP 可用，需使用 `rg` + read 降级。
 - 2026-09-21：用户明确纠正共享边界：knowbase 经验卡不得依赖 knowbase 仓库外文档；代码证据可以使用项目/仓库相对路径。把 `/Users/...` 改成 `~/...` 仍是外部路径，不解决问题。
 - 当前未提交改动在 `store.to_portable`、`save_impl`、`update_impl`、`cmd_import` 中把家目录绝对路径机械改成 `~/`，且把 `import_path` 写入共享 Markdown；需要反向替换为拒绝/规范化策略。
 - 导入正文已完整复制进卡片，因此共享 Markdown 不需要保留外部 `import_path`。本机 `source_state` 可继续保存绝对源路径，供本机导入/同步诊断使用，但不能作为共享卡片内容或检索答案依赖。

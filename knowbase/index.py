@@ -57,13 +57,30 @@ def connect(repo: Path) -> sqlite3.Connection:
 
 # ---------- 写入与重建 ----------
 
+def _code_refs_text(meta: dict) -> str:
+    lines = []
+    for ref in meta.get("code_refs") or []:
+        if not isinstance(ref, dict) or not ref.get("repo") or not ref.get("path"):
+            continue
+        value = f"code:{ref['repo']}/{ref['path']}"
+        if ref.get("symbol"):
+            value += f"#{ref['symbol']}"
+        if ref.get("lines") is not None:
+            value += f":{ref['lines']}"
+        lines.append(value)
+    return "\n".join(lines)
+
 def upsert(conn: sqlite3.Connection, meta: dict, body: str, path: Path, staging: bool = False, commit: bool = True):
+    indexed_body = body
+    code_text = _code_refs_text(meta)
+    if code_text:
+        indexed_body = f"{body.rstrip()}\n{code_text}\n"
     conn.execute("DELETE FROM mem_fts WHERE id=?", (meta["id"],))
     conn.execute(
         "INSERT INTO mem_fts(id, title, tags, body) VALUES(?,?,?,?)",
-        (meta["id"], meta.get("title", ""), " ".join(meta.get("tags", [])), body),
+        (meta["id"], meta.get("title", ""), " ".join(meta.get("tags", [])), indexed_body),
     )
-    vector_text = f"{meta.get('title', '')} {' '.join(meta.get('tags', []))} {body}"
+    vector_text = f"{meta.get('title', '')} {' '.join(meta.get('tags', []))} {indexed_body}"
     content_hash = hashlib.sha256(vector_text.encode("utf-8")).hexdigest()
     model = config.load_config().get("index", {}).get("vector_model", "char-ngram-v1")
     conn.execute(

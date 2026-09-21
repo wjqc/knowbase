@@ -19,6 +19,7 @@ mcp = FastMCP(
         "任务开始涉及具体项目/系统/报错时先 memory_search；"
         "任务结束产生踩坑/决策/流程/约束时 memory_save（正文须含八项小节：结论/解决的问题/"
         "适用条件/不适用条件/可执行动作/关键证据/验证情况/未知与待确认）；"
+        "业务规则的代码定位写入结构化 code_refs；"
         "整篇文档等原始材料不入 memory_save，走 CLI knowbase import 导入为 source；"
         "按记忆行动后如实 memory_feedback。"
     ),
@@ -98,7 +99,7 @@ def save_impl(type: str, title: str, body: str, tags: list | None = None,
               scope: str = "global", relations: list | None = None,
               evidence: list | None = None, source: str | None = None,
               provenance: str | None = None, domain: str | None = None,
-              rule_status: str | None = None):
+              rule_status: str | None = None, code_refs: list | None = None):
     rp, err = _repo()
     if err:
         return err
@@ -115,7 +116,7 @@ def save_impl(type: str, title: str, body: str, tags: list | None = None,
     if source and source.lower().startswith("human:"):
         source = None
     src = source or f"agent:{config.agent_name()}:adhoc"
-    meta = store.new_meta(type, title, scope, tags or [], src, relations, evidence)
+    meta = store.new_meta(type, title, scope, tags or [], src, relations, evidence, code_refs)
     if provenance:
         meta["provenance"] = provenance
     if domain:
@@ -159,7 +160,8 @@ def save_impl(type: str, title: str, body: str, tags: list | None = None,
                         f"memory({mid}): {meta['title']} [{src}]", modified)
     pw = _push_after_write(rp, cfg, gw)
 
-    where = "staging（提案待人工审核：git mv 到 preferences/ 或 standards/ 后生效）" if staging else str(path)
+    where = (f"staging（提案待人工审核：人工 `knowbase promote {mid}` "
+             f"后移入 {store.TYPE_DIR[type]}/ 生效）") if staging else str(path)
     out = [f"已保存 {mid} → {where}"]
     out += notes
     if warns:
@@ -174,7 +176,7 @@ def save_impl(type: str, title: str, body: str, tags: list | None = None,
 
 def update_impl(id: str, body: str | None = None, title: str | None = None,
                 tags: list | None = None, relations: list | None = None,
-                evidence: list | None = None):
+                evidence: list | None = None, code_refs: list | None = None):
     rp, err = _repo()
     if err:
         return err
@@ -196,6 +198,8 @@ def update_impl(id: str, body: str | None = None, title: str | None = None,
             meta["relations"] = relations
         if evidence is not None:
             meta["evidence"] = evidence
+        if code_refs is not None:
+            meta["code_refs"] = code_refs
         new_body = body if body is not None else old_body
         errs = store.lint(meta, new_body, rp)
         if errs:
@@ -242,6 +246,16 @@ def read_impl(id: str):
             f" ｜ scope={meta.get('scope')}"
             f" ｜ 采纳/验证后请回填 memory_feedback(id, helpful/not_helpful/outdated/incorrect)"
             f"——晋升与淘汰只认反馈\n\n")
+    refs = []
+    for ref in meta.get("code_refs") or []:
+        location = f"{ref.get('repo', '')} {ref.get('path', '')}"
+        if ref.get("symbol"):
+            location += f"#{ref['symbol']}"
+        if ref.get("lines") is not None:
+            location += f":{ref['lines']}"
+        refs.append(location)
+    if refs:
+        head += "代码位置: " + "；".join(refs) + "\n\n"
     if meta.get("type") == "reference":
         head = ("[knowbase] 该条为 reference 原始材料卡（已退出默认检索，待迁移为 source）："
                 "内容未经知识化提炼，采信前须自行验证。\n\n" + head)

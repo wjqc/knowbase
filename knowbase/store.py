@@ -67,6 +67,8 @@ _PLAIN_DOC_RE = re.compile(
     re.I,
 )
 _CODE_REF_RE = re.compile(r"^code:[A-Za-z0-9_.-]+/(?!/)(?!.*(?:^|/)\.\.(?:/|$)).+")
+_CODE_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_CODE_LINES_RE = re.compile(r"^\d+(?:-\d+)?$")
 
 
 def _all_text(meta: dict, body: str) -> str:
@@ -120,6 +122,40 @@ def reference_errors(meta: dict, body: str, repo: Path | None = None) -> list[st
                     "或先将文档纳入 knowbase 后再用仓库相对路径引用"
                 )
     return list(dict.fromkeys(errs))
+
+
+def code_refs_errors(meta: dict) -> list[str]:
+    """Validate structured repository-relative code locations in frontmatter."""
+    refs = meta.get("code_refs")
+    if refs is None:
+        return []
+    if not isinstance(refs, list):
+        return ["code_refs 必须是列表"]
+    errs = []
+    for pos, ref in enumerate(refs, 1):
+        prefix = f"code_refs[{pos}]"
+        if not isinstance(ref, dict):
+            errs.append(f"{prefix} 必须是对象")
+            continue
+        repo = ref.get("repo")
+        path = ref.get("path")
+        if not isinstance(repo, str) or not repo.strip():
+            errs.append(f"{prefix}.repo 必填")
+        elif not _CODE_REPO_RE.fullmatch(repo):
+            errs.append(f"{prefix}.repo 只允许 [A-Za-z0-9_.-]+: {repo}")
+        if not isinstance(path, str) or not path.strip():
+            errs.append(f"{prefix}.path 必填")
+        else:
+            if path.startswith("/"):
+                errs.append(f"{prefix}.path 必须是仓库相对路径: {path}")
+            if "\\" in path:
+                errs.append(f"{prefix}.path 必须统一使用正斜杠: {path}")
+            if ".." in path.split("/"):
+                errs.append(f"{prefix}.path 禁止 .. 路径穿越: {path}")
+        lines = ref.get("lines")
+        if lines is not None and not _CODE_LINES_RE.fullmatch(str(lines)):
+            errs.append(f"{prefix}.lines 格式须为行号或范围（如 120 或 120-180）: {lines}")
+    return errs
 
 # 任务执行日志特征（warn 级）：结果数字/阶段收尾属于过程产物，应放 progress/docs 而非记忆库
 LOG_SIGNALS: tuple[tuple[re.Pattern, str], ...] = (
@@ -311,6 +347,7 @@ def lint(meta: dict, body: str, repo: Path | None = None) -> list[str]:
         errs.append("业务规则必须带出处 provenance（PRD 编号/条款/业务方确认记录），无出处的规则不入库")
     if SECRET_RE.search(body or ""):
         errs.append("body 疑似包含明文密钥(password/token 等)，请脱敏后再存")
+    errs.extend(code_refs_errors(meta))
     errs.extend(reference_errors(meta, body, repo))
     return errs
 
@@ -327,6 +364,8 @@ def lint_warnings(meta: dict, body: str) -> list[str]:
         warns.append("标题与标签均无英文/字母关键词，跨语言检索易漏检，建议补技术名词")
     if not tags_cjk:
         warns.append("标签无中文关键词，建议补一个中文通俗说法")
+    if re.search(r"(?<![\w.-])code:[A-Za-z0-9_.-]+/", body or "") and not meta.get("code_refs"):
+        warns.append("正文含 code: 代码定位，建议同步写入 frontmatter code_refs 字段")
     for pat, label in LOG_SIGNALS:
         hit = pat.search(title) or pat.search(body or "")
         if hit:
@@ -339,7 +378,8 @@ def lint_warnings(meta: dict, body: str) -> list[str]:
 
 
 def new_meta(dtype: str, title: str, scope: str, tags: list, source: str,
-             relations: list | None = None, evidence: list | None = None) -> dict:
+             relations: list | None = None, evidence: list | None = None,
+             code_refs: list | None = None) -> dict:
     """新建记忆的 frontmatter。confidence/status 由服务端定，调用方不可指定。"""
     today = date.today().isoformat()
     return {
@@ -351,6 +391,7 @@ def new_meta(dtype: str, title: str, scope: str, tags: list, source: str,
         "tags": tags or [],
         "source": source,
         "evidence": evidence or [],
+        "code_refs": code_refs or [],
         "confidence": "once",
         "status": "active",
         "last_verified": "",

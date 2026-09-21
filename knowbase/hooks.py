@@ -31,6 +31,7 @@ def session_start() -> str:
         "一次性的评测/测试结果数字 → 不入库（放 progress/docs）；"
         "剩下的\"下次还会踩/还会用\"→ memory_save（提示相似时改用 memory_update）。"
         "新卡正文须含八项小节：结论/解决的问题/适用条件/不适用条件/可执行动作/关键证据/验证情况/未知与待确认；"
+        "业务规则的代码定位写入 code_refs 字段；"
         "整篇文档等原始材料不入 memory_save，走 CLI knowbase import 导入为 source；\n"
         "3. 按记忆行动或验证后 → 必须回填 memory_feedback（helpful/not_helpful/outdated/incorrect）；"
         "once→verified 晋升与 active→stale 淘汰只认反馈，不回填状态机不转；\n"
