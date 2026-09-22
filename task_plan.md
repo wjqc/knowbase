@@ -78,3 +78,11 @@
 | `index.search('%')` 意外命中新八项测试卡 | 1 | 非检索缺陷：卡正文含"10%"字面百分号被 instr 命中；改测试数据为"灰度小流量" |
 | FTS5 虚拟表上 instr(lower(col),'%') 行为与普通表不一致的疑点 | 1 | 复现后确认根因是正文真含 '%' 字符，instr 字面匹配本身正确；无需改检索代码 |
 | import 断言"staging 无 B 卡"失败 | 1 | staging 本就有前序步骤保存的提案卡；断言改为 import 前后 staging 数量不变 |
+
+## 多人 Git 同步假冲突修复（2026-09-22）
+
+39. 复核 auto_pull/auto_push/push/sync_before_read 与真实仓库状态（完成）
+40. 先补多人并发回归：无内容冲突自动 rebase、真冲突安全 abort、push 抢先有限重试（完成）
+41. 实现同步收敛并更新 README/同步设计说明（完成）
+42. 运行定向、全量与真实临时远端并发验证（完成：定向 15/15、全量 130/130、compileall 与 diff-check 通过）
+43. 同步独立知识文档并提交必要变更（完成：knowledge commit 92187b1；保留其他既有未跟踪内容）

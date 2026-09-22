@@ -366,3 +366,10 @@ fi
 - 回归测试 `tests/test_gitops_timeout.py`：假 git 父进程 sleep + 孙进程持有管道 sleep 60，断言超时后 <15s 快速失败且孙进程被清掉
 
 **预防**：任何"外部命令 + timeout"的代码都先问一句：超时路径杀的是进程还是进程树？跨平台子进程一律 `stdin=DEVNULL`。`subprocess.run(timeout=)` 的超时语义是"发起 kill 后等输出流关闭"，不是"保证返回"。
+# 2026-09-22 多人 Git 同步假冲突
+
+- `sync_before_read` 当前只处理远端单边领先（ff-only）和本地单边领先（push）；一旦双方各有提交，即使改不同文件，也直接返回“本地与远端已分叉，需要人工处理”。
+- `push` 当前只执行一次普通 push；远端在本地 commit 后抢先推进时会 non-fast-forward，未 fetch/rebase/retry。
+- `schedule_push` 只写 `sync_state=pending`，并不执行推送；因此“auto_push 开启”与 README 所写“释放锁后推送”不一致。
+- 正确收敛语义：干净工作区下 fetch → 判断拓扑 → diverged 时 `rebase remote/branch`；rebase 成功再 push；真正内容冲突时 `rebase --abort`，恢复调用前 HEAD/工作区并报告冲突文件；push race 做有界重试。
+- 远程网络失败与内容冲突必须区分：fetch timeout 只说明远端检查失败，不能称为 Git 内容冲突。

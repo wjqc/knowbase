@@ -56,7 +56,7 @@ def _post_save(rp, cfg, meta, body, path, staging, commit_msg, modified=()):
 
 
 def _push_after_write(rp, cfg, git_warn):
-    """兼容旧调用名：只排队，不在 MCP 写请求中执行网络 push。"""
+    """本地写锁释放后执行自动收敛与 push；网络失败不回滚本地提交。"""
     if git_warn or not cfg["git"].get("auto_push"):
         return None
     return gitops.schedule_push(rp, cfg["git"])

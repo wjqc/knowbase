@@ -223,3 +223,169 @@ def test_sync_pushes_local_ahead_branch_after_releasing_lock(isolated_repo, monk
     changed, warning = gitops.sync_before_read(repo, cfg)
     assert (changed, warning) == (False, None)
     assert pushed == [True]
+
+
+def test_sync_rebases_diverged_branch_when_changes_do_not_overlap(isolated_repo, monkeypatch):
+    repo, _ = isolated_repo
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "file:///tmp/remote.git"],
+                   check=True)
+    calls = []
+    pushed = []
+
+    def fake_run(_target, *args, **_kwargs):
+        calls.append(args)
+        if args[:3] == ("remote", "get-url", "origin"):
+            return "file:///tmp/remote.git"
+        if args[:4] == ("symbolic-ref", "--quiet", "--short", "HEAD"):
+            return "trunk"
+        if args[:2] == ("status", "--porcelain") or args[:3] == ("fetch", "origin", "trunk"):
+            return ""
+        if args[:2] == ("rev-parse", "HEAD"):
+            return "local"
+        if args[:2] == ("rev-parse", "origin/trunk"):
+            return "remote"
+        if args[:2] == ("merge-base", "--is-ancestor"):
+            raise RuntimeError("not ancestor")
+        if args[:2] == ("rebase", "origin/trunk"):
+            return ""
+        raise AssertionError(args)
+
+    monkeypatch.setattr(gitops, "_run", fake_run)
+    monkeypatch.setattr("knowbase.index.rebuild", lambda _repo: None)
+    monkeypatch.setattr(gitops, "push", lambda *_a, **_k: pushed.append(True))
+    cfg = config.load_config()
+    cfg["git"]["auto_pull"] = True
+    cfg["git"]["allowed_remote_prefixes"] = ["file://"]
+
+    changed, warning = gitops.sync_before_read(repo, cfg)
+
+    assert (changed, warning) == (True, None)
+    assert ("rebase", "origin/trunk") in calls
+    assert pushed == [True]
+
+
+def test_sync_aborts_rebase_and_reports_only_real_content_conflicts(isolated_repo, monkeypatch):
+    repo, _ = isolated_repo
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "file:///tmp/remote.git"],
+                   check=True)
+    calls = []
+
+    def fake_run(_target, *args, **_kwargs):
+        calls.append(args)
+        if args[:3] == ("remote", "get-url", "origin"):
+            return "file:///tmp/remote.git"
+        if args[:4] == ("symbolic-ref", "--quiet", "--short", "HEAD"):
+            return "trunk"
+        if args[:2] == ("status", "--porcelain") or args[:3] == ("fetch", "origin", "trunk"):
+            return ""
+        if args[:2] == ("rev-parse", "HEAD"):
+            return "local"
+        if args[:2] == ("rev-parse", "origin/trunk"):
+            return "remote"
+        if args[:2] == ("merge-base", "--is-ancestor"):
+            raise RuntimeError("not ancestor")
+        if args[:2] == ("rebase", "origin/trunk"):
+            raise RuntimeError("CONFLICT (content): Merge conflict in memories/P-1.md")
+        if args[:3] == ("diff", "--name-only", "--diff-filter=U"):
+            return "memories/P-1.md"
+        if args[:2] == ("rebase", "--abort"):
+            return ""
+        raise AssertionError(args)
+
+    monkeypatch.setattr(gitops, "_run", fake_run)
+    monkeypatch.setattr(gitops, "push", lambda *_a, **_k: pytest.fail("conflict must not push"))
+    cfg = config.load_config()
+    cfg["git"]["auto_pull"] = True
+    cfg["git"]["allowed_remote_prefixes"] = ["file://"]
+
+    changed, warning = gitops.sync_before_read(repo, cfg)
+
+    assert changed is False
+    assert "内容冲突" in warning
+    assert "memories/P-1.md" in warning
+    assert ("rebase", "--abort") in calls
+
+
+def test_push_fetches_rebases_and_retries_when_remote_moves_first(isolated_repo, monkeypatch):
+    repo, _ = isolated_repo
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "file:///tmp/remote.git"],
+                   check=True)
+    calls = []
+    push_attempts = 0
+
+    def fake_run(_target, *args, **_kwargs):
+        nonlocal push_attempts
+        calls.append(args)
+        if args[:3] == ("remote", "get-url", "origin"):
+            return "file:///tmp/remote.git"
+        if args[:4] == ("symbolic-ref", "--quiet", "--short", "HEAD"):
+            return "trunk"
+        if args[:2] == ("status", "--porcelain") or args[:3] == ("fetch", "origin", "trunk"):
+            return ""
+        if args[:2] == ("rev-parse", "HEAD"):
+            return "local"
+        if args[:2] == ("rev-parse", "origin/trunk"):
+            return "remote"
+        if args[:2] == ("merge-base", "--is-ancestor"):
+            raise RuntimeError("diverged")
+        if args[:2] == ("rebase", "origin/trunk"):
+            return ""
+        if args[:2] == ("push", "-u"):
+            push_attempts += 1
+            if push_attempts == 1:
+                raise RuntimeError("rejected (non-fast-forward)")
+            return ""
+        raise AssertionError(args)
+
+    monkeypatch.setattr(gitops, "_run", fake_run)
+    monkeypatch.setattr(gitops, "_record_sync", lambda *_a, **_k: None)
+
+    warning = gitops.push(repo, "file:///tmp/remote.git", ["file://"])
+
+    assert warning is None
+    assert push_attempts == 2
+    assert calls.count(("fetch", "origin", "trunk")) == 2
+
+
+def test_real_two_clones_push_non_overlapping_commits_without_manual_merge(
+        isolated_repo, tmp_path, monkeypatch):
+    _repo, _ = isolated_repo
+    remote = tmp_path / "remote.git"
+    alice = tmp_path / "alice"
+    bob = tmp_path / "bob"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    subprocess.run(["git", "clone", str(remote), str(alice)], check=True, capture_output=True)
+    for clone, name in ((alice, "Alice"),):
+        subprocess.run(["git", "-C", str(clone), "config", "user.name", name], check=True)
+        subprocess.run(["git", "-C", str(clone), "config", "user.email", f"{name.lower()}@test"], check=True)
+    (alice / "base.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(alice), "add", "base.md"], check=True)
+    subprocess.run(["git", "-C", str(alice), "commit", "-m", "base"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(alice), "branch", "-M", "main"], check=True)
+    subprocess.run(["git", "-C", str(alice), "push", "-u", "origin", "main"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "--git-dir", str(remote), "symbolic-ref", "HEAD", "refs/heads/main"],
+                   check=True)
+    subprocess.run(["git", "clone", str(remote), str(bob)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(bob), "config", "user.name", "Bob"], check=True)
+    subprocess.run(["git", "-C", str(bob), "config", "user.email", "bob@test"], check=True)
+
+    (alice / "alice.md").write_text("alice\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(alice), "add", "alice.md"], check=True)
+    subprocess.run(["git", "-C", str(alice), "commit", "-m", "alice"], check=True,
+                   capture_output=True)
+    (bob / "bob.md").write_text("bob\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(bob), "add", "bob.md"], check=True)
+    subprocess.run(["git", "-C", str(bob), "commit", "-m", "bob"], check=True,
+                   capture_output=True)
+    subprocess.run(["git", "-C", str(bob), "push", "origin", "main"], check=True,
+                   capture_output=True)
+    monkeypatch.setattr(gitops, "_record_sync", lambda *_a, **_k: None)
+
+    warning = gitops.push(alice, "", [])
+
+    assert warning is None
+    subprocess.run(["git", "-C", str(bob), "pull", "--ff-only"], check=True,
+                   capture_output=True)
+    assert (bob / "alice.md").read_text(encoding="utf-8") == "alice\n"
+    assert (bob / "bob.md").read_text(encoding="utf-8") == "bob\n"

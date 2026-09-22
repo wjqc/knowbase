@@ -18,6 +18,10 @@ _LAST_FETCH_MONO: dict[str, float] = {}
 _IS_WINDOWS = os.name == "nt"
 
 
+class GitSyncConflict(RuntimeError):
+    """远端提交无法自动重放时的真实内容冲突。"""
+
+
 def _kill_tree(proc: subprocess.Popen) -> None:
     """强杀 git 及其全部子孙进程。
 
@@ -128,21 +132,103 @@ def _remote_target(repo: Path, git_cfg: dict) -> tuple[str, str, str]:
     return remote, branch, actual_url
 
 
+def _rebase_onto(repo: Path, remote_ref: str) -> None:
+    """把本地提交重放到远端；失败必须 abort，不能留下半截 rebase。"""
+    try:
+        _run(repo, "rebase", remote_ref, timeout=15)
+    except Exception as exc:
+        try:
+            conflicted = _run(repo, "diff", "--name-only", "--diff-filter=U", timeout=3)
+        except Exception:
+            conflicted = ""
+        try:
+            _run(repo, "rebase", "--abort", timeout=5)
+        except Exception:
+            pass
+        files = "、".join(line for line in conflicted.splitlines() if line.strip())
+        detail = f"：{files}" if files else ""
+        raise GitSyncConflict(f"检测到真实内容冲突{detail}；已取消 rebase 并保留本地提交") from exc
+
+
+def _is_ancestor(repo: Path, older: str, newer: str) -> bool:
+    try:
+        _run(repo, "merge-base", "--is-ancestor", older, newer, timeout=3)
+        return True
+    except Exception:
+        return False
+
+
+def _has_user_changes(porcelain: str) -> bool:
+    """RepoLock 自己创建的 `.lock` 不算用户工作区修改。"""
+    for line in porcelain.splitlines():
+        path = line[3:].strip() if len(line) >= 4 else line.strip()
+        if path not in {".lock", "./.lock"}:
+            return True
+    return False
+
+
+def _is_push_race(exc: Exception) -> bool:
+    """只有远端抢先推进才值得 fetch/rebase 重试；认证/网络错误立即返回。"""
+    message = str(exc).lower()
+    return any(marker in message for marker in (
+        "non-fast-forward", "fetch first", "failed to push some refs", "[rejected]",
+    ))
+
+
+def _integrate_remote(repo: Path, remote: str, branch: str) -> tuple[bool, bool]:
+    """收敛到远端最新提交，返回 (本地 HEAD 是否变化, 是否需要 push)。"""
+    remote_ref = f"{remote}/{branch}"
+    local = _run(repo, "rev-parse", "HEAD", timeout=3)
+    remote_rev = _run(repo, "rev-parse", remote_ref, timeout=3)
+    if local == remote_rev:
+        return False, False
+    if _is_ancestor(repo, local, remote_rev):
+        _run(repo, "merge", "--ff-only", remote_ref, timeout=10)
+        return True, False
+    if _is_ancestor(repo, remote_rev, local):
+        return False, True
+    _rebase_onto(repo, remote_ref)
+    return True, True
+
+
 def push(repo: Path, remote_url: str, allowed_prefixes: list[str]) -> str | None:
+    remote = "origin"
+    branch = "unknown"
     try:
         cfg = app_config.load_config()
-        remote, branch, actual_url = _remote_target(repo, cfg.get("git", {}))
+        gcfg = cfg.get("git", {})
+        remote, branch, actual_url = _remote_target(repo, gcfg)
         if allowed_prefixes and not any(actual_url.startswith(p) for p in allowed_prefixes):
             return f"已拒绝推送: 实际 remote {actual_url} 不在白名单 {allowed_prefixes} 内"
         if remote_url and remote_url != actual_url:
             return f"已拒绝推送: 配置 remote.url 与实际 {remote} URL 不一致"
-        _run(repo, "push", "-u", remote, f"HEAD:{branch}", timeout=20)
+        retries = max(1, int(gcfg.get("push_retries", 3)))
+        last_error = None
+        for attempt in range(retries):
+            # 网络 IO 不持有 RepoLock；只在可能改 HEAD 的 integrate 阶段阻塞本机写入。
+            _run(repo, "fetch", remote, branch, timeout=20)
+            with RepoLock(repo, float(cfg.get("lock_timeout", 10.0))):
+                dirty = _run(repo, "status", "--porcelain", timeout=3)
+                if _has_user_changes(dirty):
+                    raise RuntimeError("工作区存在未提交修改，未自动 rebase/push")
+                _integrate_remote(repo, remote, branch)
+            try:
+                _run(repo, "push", "-u", remote, f"HEAD:{branch}", timeout=20)
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                if not _is_push_race(exc) or attempt + 1 == retries:
+                    raise
+        if last_error is not None:
+            raise last_error
         _record_sync(repo, remote, branch, "ok", push=True)
         return None
+    except GitSyncConflict as exc:
+        _record_sync(repo, remote, branch, "conflict", error=str(exc), fetch=True)
+        return f"同步冲突(本地提交已保留): {exc}"
     except Exception as e:
         try:
-            cfg = app_config.load_config()
-            remote, branch, _ = _remote_target(repo, cfg.get("git", {}))
             _record_sync(repo, remote, branch, "error", error=str(e), push=True)
         except Exception:
             pass
@@ -150,19 +236,9 @@ def push(repo: Path, remote_url: str, allowed_prefixes: list[str]) -> str | None
 
 
 def schedule_push(repo: Path, git_cfg: dict) -> str | None:
-    """写路径只记录待推送状态，绝不执行网络 IO。"""
-    try:
-        remote, branch, actual_url = _remote_target(repo, git_cfg)
-        prefixes = git_cfg.get("allowed_remote_prefixes", [])
-        if prefixes and not any(actual_url.startswith(p) for p in prefixes):
-            return f"已拒绝排队推送: 实际 remote {actual_url} 不在白名单 {prefixes} 内"
-        declared_url = str((git_cfg.get("remote", {}) or {}).get("url") or "")
-        if declared_url and declared_url != actual_url:
-            return f"已拒绝排队推送: 配置 remote.url 与实际 {remote} URL 不一致"
-        _record_sync(repo, remote, branch, "pending")
-        return None
-    except Exception as exc:
-        return f"排队推送失败(本地提交已完成): {exc}"
+    """兼容旧调用名：写锁释放后立即执行可收敛的 push。"""
+    declared_url = str((git_cfg.get("remote", {}) or {}).get("url") or "")
+    return push(repo, declared_url, git_cfg.get("allowed_remote_prefixes", []))
 
 
 def _record_sync(repo: Path, remote: str, branch: str, status: str, error: str = "",
@@ -187,7 +263,7 @@ def _record_sync(repo: Path, remote: str, branch: str, status: str, error: str =
 
 
 def sync_before_read(repo: Path, cfg: dict) -> tuple[bool, str | None]:
-    """TTL 到期时安全 fetch/ff-only；返回 (是否更新, 告警)。"""
+    """TTL 到期时安全 fetch/ff/rebase；返回 (是否更新, 告警)。"""
     import time
     gcfg = cfg.get("git", {})
     if not gcfg.get("auto_pull", True) or not is_repo(repo):
@@ -210,38 +286,31 @@ def sync_before_read(repo: Path, cfg: dict) -> tuple[bool, str | None]:
                 raise RuntimeError(f"实际 remote {actual_url} 不在白名单")
             dirty = _run(repo, "status", "--porcelain", timeout=3)
             _run(repo, "fetch", remote_name, branch, timeout=10)
-            local = _run(repo, "rev-parse", "HEAD", timeout=3)
-            remote_rev = _run(repo, "rev-parse", f"{remote_name}/{branch}", timeout=3)
-            if local == remote_rev:
-                _record_sync(repo, remote_name, branch, "ok", fetch=True)
-                return False, None
-            if dirty:
+            if _has_user_changes(dirty):
+                local = _run(repo, "rev-parse", "HEAD", timeout=3)
+                remote_rev = _run(repo, "rev-parse", f"{remote_name}/{branch}", timeout=3)
+                if local == remote_rev:
+                    _record_sync(repo, remote_name, branch, "ok", fetch=True)
+                    return False, None
                 warning = "远端有更新，但本地工作区非干净状态；保留 last-known-good，未自动合并"
                 _record_sync(repo, remote_name, branch, "blocked", error=warning, fetch=True)
                 return False, warning
-            try:
-                _run(repo, "merge-base", "--is-ancestor", local, remote_rev, timeout=3)
-                remote_ahead = True
-            except Exception:
-                remote_ahead = False
-            try:
-                _run(repo, "merge-base", "--is-ancestor", remote_rev, local, timeout=3)
-                local_ahead = True
-            except Exception:
-                local_ahead = False
-            if remote_ahead:
-                _run(repo, "merge", "--ff-only", f"{remote_name}/{branch}", timeout=10)
+            changed, push_needed = _integrate_remote(repo, remote_name, branch)
+            if not changed and not push_needed:
+                _record_sync(repo, remote_name, branch, "ok", fetch=True)
+                return False, None
+            if changed:
                 from . import index
                 index.rebuild(repo)
-                _record_sync(repo, remote_name, branch, "ok", fetch=True)
                 updated = True
-            elif local_ahead:
+            if push_needed:
                 _record_sync(repo, remote_name, branch, "pending", fetch=True)
-                push_needed = True
             else:
-                warning = "本地与远端已分叉；保留 last-known-good，需要人工处理"
-                _record_sync(repo, remote_name, branch, "conflict", error=warning, fetch=True)
-                return False, warning
+                _record_sync(repo, remote_name, branch, "ok", fetch=True)
+    except GitSyncConflict as exc:
+        warning = str(exc)
+        _record_sync(repo, remote_name, branch or "unknown", "conflict", error=warning, fetch=True)
+        return False, warning
     except Exception as exc:
         warning = f"远程同步检查失败，继续使用 last-known-good: {exc}"
         _record_sync(repo, remote_name, branch or "unknown", "error", error=warning, fetch=True)
@@ -249,5 +318,5 @@ def sync_before_read(repo: Path, cfg: dict) -> tuple[bool, str | None]:
     if push_needed:
         warning = push(repo, str((gcfg.get("remote", {}) or {}).get("url") or ""),
                        gcfg.get("allowed_remote_prefixes", []))
-        return False, warning
+        return updated, warning
     return updated, None

@@ -20,6 +20,7 @@ DEFAULTS = {
         "auto_push": False,
         "auto_pull": True,
         "pull_ttl_seconds": 60,
+        "push_retries": 3,
         "remote": {"name": "origin", "url": "", "branch": ""},
         "allowed_remote_prefixes": ["http://10.21.20.112/", "http://10.21.20.112:18084/"],
     },

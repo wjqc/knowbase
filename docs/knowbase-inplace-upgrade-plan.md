@@ -124,6 +124,8 @@ confidence × freshness × feedback 排序
 - commit/push 必须有超时。
 - push 失败记录状态并返回明确警告，不能返回 `undefined`。
 - 本地 INDEX/SQLite/Markdown 完成并提交后释放 RepoLock，再执行远程 push。
+- push 前 fetch；双方均有新提交时自动 rebase，成功后推送；push 被其他客户端抢先时最多重试 `git.push_retries` 次（默认 3）。
+- rebase 只在工作区干净时执行；真实内容冲突必须 `rebase --abort`，保留本地提交并列出冲突文件，禁止把普通分叉或网络超时表述为内容冲突。
 
 ### 7.2 检索前更新
 
@@ -131,7 +133,7 @@ confidence × freshness × feedback 排序
 - fetch/merge/reindex 全程持 RepoLock，remote 名称和分支从配置/当前 Git 分支解析，不写死 origin/main。
 - 仅在工作区安全且可以 fast-forward 时自动更新。
 - 更新成功后对变化文件增量 reindex；初期允许全量 reindex。
-- 冲突、dirty worktree、认证失败均保留 last-known-good，并在 doctor 中展示。
+- 真实内容冲突、dirty worktree、认证失败均保留 last-known-good，并在 doctor 中展示；可自动重放的普通分叉不再要求人工处理。
 
 ## 8. doctor 与 alerts
 

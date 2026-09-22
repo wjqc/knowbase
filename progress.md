@@ -714,3 +714,14 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 ## 2026-09-21 source/card 分层 P0 止血
 
 按定稿方案落地 P0：新建 `knowbase/sources.py`（sources/objects sha256 内容寻址快照 + manifests/SRC-*.yaml 元数据，同内容跨路径去重，绝对路径只留本机 source_state）；`knowbase import` 重写为只产 source artifact，不再生成任何知识卡（--type/--staging 保留兼容、输出明示废弃）；`memory_save` 拒绝 reference 类型并引导走 import 或八项小节结构；`index.search` 全链路排除 reference（Hook 自动注入同路径生效），INDEX.md 速览移出 R 卡仅头部计数；新卡 frontmatter 打 `schema: card-v2`，八项小节（结论/解决的问题/适用条件/不适用条件/可执行动作/关键证据/验证情况/未知与待确认）强制且内容质量拦截（空洞条件/纯引用证据/"测试通过"式验证/空小节），存量卡不带标记沿用旧规则不迁移；hooks 会话提示、stop 阻断提示与 MCP instructions 补八项引导。测试：新增 test_source_layer.py 15 项，重写 import/governance/bizrule/e2e/hooks/reference_boundaries/production_fixes（import 产 source、治理链改走 standard 提案卡、全部 body 八项化、e2e 增加 v2 卡更新强制八项与 reference 拒存断言）。验证：pytest 117/117 通过（含脚本回归 e2e/import/hooks/governance/bizrule 与真实库 retrieval must 8/8 无回退）。文档：ADR-0002、README 命令表与行为细则更新。边界：MCP 服务进程需重启才加载新代码；存量 18 张 R 卡退出检索但未转 source（P3）；knowledge_extract/review/applicability gate 属 P1/P2 未实现。
+# 2026-09-22 多人同步修复
+
+- 已读取全局/项目规则、相关 knowbase 知识、当前 Git 同步实现和测试。
+- 已确认代码仓库 `main` 比 `origin/main` 领先 2 个既有提交，工作区开始时干净；真实数据仓库 `/Users/qc/knowbase` 与远端一致。
+- 已定位根因：分叉一律人工处理 + 单次 push + schedule_push 仅记 pending。
+- 下一步：先补失败测试，再实现自动 rebase/冲突 abort/抢先重试。
+- 已新增 3 个单元回归和 1 个真实双克隆集成回归；定向测试 15/15 通过。
+- 已实现 fetch/rebase/push 有限重试、冲突文件报告与 rebase abort；`schedule_push` 现在实际执行同步，而非只记 pending。
+- 已更新 README 和原地升级方案中的多人同步语义。
+- 全量 pytest 130/130、compileall、git diff --check 通过。
+- 独立知识文档已更新并单独提交为 92187b1；未纳入 knowledge 仓库中原有的其他未跟踪内容。
