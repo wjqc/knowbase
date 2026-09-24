@@ -29,6 +29,7 @@ def db_path(repo: Path) -> Path:
 def connect(repo: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path(repo))
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS meta(
       id TEXT PRIMARY KEY, type TEXT, title TEXT, scope TEXT, tags TEXT,
@@ -52,6 +53,9 @@ def connect(repo: Path) -> sqlite3.Connection:
       last_fetch_at TEXT, last_push_at TEXT, status TEXT NOT NULL, error TEXT);
     """)
     conn.commit()
+    # 运行增量迁移（jobs/candidates/sync_attempts 等新表）
+    from . import migrations
+    migrations.apply_all(conn)
     return conn
 
 

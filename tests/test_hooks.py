@@ -44,8 +44,10 @@ BODY = ("## 结论\nEasyConnect 7.6.7 在 macOS 26.1 上启动即 Rosetta 死锁
 cli.main(["init"])
 os.environ["KNOWBASE_AGENT_NAME"] = "claude-code"
 config.CONFIG_PATH.write_text(json.dumps({"hooks": {"inject_min_confidence": "any"}}), encoding="utf-8")
-save_impl("pitfall", "EasyConnect 7.6.7 在 macOS 上启动即死锁", BODY,
+r1 = save_impl("pitfall", "EasyConnect 7.6.7 在 macOS 上启动即死锁", BODY,
           tags=["network", "vpn"], source="agent:claude-code:sess_t1")
+# 提取实际分配的 ID（兼容旧格式 P-2026-0001 和新格式 P-<uuid12>）
+pid = r1.split()[1] if r1.startswith("已保存") else ""
 save_impl("pitfall", "proj07 场景部署异常排查", BODY,
           tags=["部署", "proj07"], scope="proj07", source="agent:claude-code:sess_t1")
 
@@ -55,7 +57,7 @@ check("session-start 注入规则", "memory_search" in text and "memory_feedback
 
 # 2. 自动检索：相关提示词命中
 out = hooks.user_prompt("帮我看看内网 vpn 连不上的问题")
-check("user-prompt 命中注入", "P-2026-0001" in out and "knowbase 自动检索" in out, out[:80])
+check("user-prompt 命中注入", pid in out and "knowbase 自动检索" in out, out[:80])
 
 # 3. 自动检索：无关/过短提示词静默
 check("user-prompt 短输入静默", hooks.user_prompt("你好") == "")
@@ -115,7 +117,7 @@ p = subprocess.run(
     [".venv/bin/python", "-m", "knowbase", "hook", "user-prompt"],
     input=json.dumps({"prompt": "EasyConnect 死锁"}),
     capture_output=True, text=True)
-check("CLI hook 入口", "P-2026-0001" in p.stdout, p.stdout[:80] + p.stderr[:80])
+check("CLI hook 入口", pid in p.stdout, p.stdout[:80] + p.stderr[:80])
 
 # 7b. zcode 风格输出：严格 JSON additionalContext
 import json as _json
@@ -123,7 +125,7 @@ out = subprocess.run(
     [".venv/bin/python", "-m", "knowbase", "hook", "user-prompt", "--style", "zcode"],
     input=_json.dumps({"prompt": "EasyConnect 死锁"}), capture_output=True, text=True).stdout
 parsed = _json.loads(out)
-check("zcode 风格 additionalContext", "additionalContext" in parsed and "P-2026-0001" in parsed["additionalContext"], out[:100])
+check("zcode 风格 additionalContext", "additionalContext" in parsed and pid in parsed["additionalContext"], out[:100])
 
 # 7c. 项目感知：目录名推断 scope → 注入本项目优先且带标注
 proj_dir = TMP / "proj07"; proj_dir.mkdir(exist_ok=True)

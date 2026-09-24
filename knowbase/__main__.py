@@ -28,7 +28,7 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 
-from . import config, gitops, index, lifecycle, sources, store
+from . import config, gitops, index, jobs, lifecycle, sources, store
 from .locking import RepoLock
 
 GITIGNORE = "memory.db\nmemory.db-wal\nmemory.db-shm\n.lock\n*.log\n.idea/\n.vscode/\n.DS_Store\n"
@@ -76,6 +76,10 @@ def cmd_init(import_from=None, scope=None, dtype="workflow") -> int:
     if new_repo:
         import subprocess
         subprocess.run(["git", "-C", str(rp), "init", "-q"], check=True)
+        # 创建 .gitignore：INDEX.md 已退役，不再提交到 Git
+        gitignore = rp / ".gitignore"
+        if not gitignore.exists():
+            gitignore.write_text("# 本地重建的速览索引，不进入共享 Git\nINDEX.md\n", encoding="utf-8")
         url = cfg["git"].get("remote", {}).get("url", "")
         if url:
             prefixes = cfg["git"].get("allowed_remote_prefixes", [])
@@ -92,6 +96,22 @@ def cmd_init(import_from=None, scope=None, dtype="workflow") -> int:
     with RepoLock(rp, 10.0):
         n = index.rebuild(rp)
     print(f"✓ 索引就绪：{n} 条记忆，INDEX.md 已生成")
+
+    # 4.5 崩溃恢复：扫描未入账的 pending intent
+    from . import commit_adapter
+    conn = index.connect(rp)
+    try:
+        recovery = commit_adapter.recover_intents(rp, conn)
+        if recovery["recovered"] > 0 or recovery["failed"] > 0:
+            print(f"✓ 崩溃恢复：{recovery['recovered']} 个 intent 已恢复，"
+                  f"{recovery['failed']} 个需要人工核查")
+            for detail in recovery["details"]:
+                status = detail.get("status", "unknown")
+                reason = detail.get("reason", "")
+                if status == "failed" and reason:
+                    print(f"  - {detail['intent_id']}: {reason}")
+    finally:
+        conn.close()
 
     # 5. knowledge_path 联动检测：存在则提示，不存在绝不创建
     kp = Path(cfg.get("knowledge_path", "")).expanduser() if cfg.get("knowledge_path") else None
@@ -116,8 +136,42 @@ def cmd_reindex() -> int:
     return 0
 
 
-def _human_op(rp, fn, mid, label):
+def _human_op(rp, fn, mid, label, expect_revision: str = ""):
+    """人工操作（verify/archive）的通用流程。
+
+    expect_revision: 可选的 governance_revision CAS 检查。
+    """
+    from .mutations import _compute_governance_revision, REVISION_CONFLICT
+
     cfg = config.load_config()
+
+    # CAS 检查（如果提供了 expect_revision）
+    if expect_revision:
+        conn = index.connect(rp)
+        try:
+            row = conn.execute(
+                "SELECT governance_revision FROM entity_heads WHERE entity_id=?",
+                (mid,),
+            ).fetchone()
+            if row:
+                current_rev = row[0]
+            else:
+                # 没有 entity_heads 记录，从文件计算
+                meta, body, _ = store.load(rp, mid)
+                if meta:
+                    current_rev = _compute_governance_revision(meta)
+                else:
+                    print(f"错误：未找到 {mid}")
+                    return 1
+            if expect_revision != current_rev:
+                print(f"错误：版本冲突（governance_revision 不匹配）。")
+                print(f"  期望: {expect_revision}")
+                print(f"  当前: {current_rev}")
+                print(f"请先 memory_read 获取最新 revision 后重试。")
+                return 1
+        finally:
+            conn.close()
+
     with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
         meta = fn(rp, mid)
         if not meta:
@@ -127,8 +181,9 @@ def _human_op(rp, fn, mid, label):
         conn = index.connect(rp)
         index.upsert(conn, meta2, body, path, path.parent.name == "staging")
         conn.close()
-        index.build_index_md(rp, cfg)
-        git_warn = gitops.commit_paths(rp, f"{label}({mid}): by human", [path, rp / "INDEX.md"]) \
+        index.build_index_md(rp, cfg)  # 本地重建，不提交
+        # INDEX.md 已退役，不再提交到 Git
+        git_warn = gitops.commit_paths(rp, f"{label}({mid}): by human", [path]) \
             if cfg["git"].get("auto_commit", True) else None
     push_warn = None if git_warn or not cfg["git"].get("auto_push") else \
         gitops.schedule_push(rp, cfg["git"])
@@ -140,12 +195,14 @@ def _human_op(rp, fn, mid, label):
     return 0
 
 
-def cmd_verify(mid: str) -> int:
-    return _human_op(config.repo_path(), lifecycle.human_verify, mid, "verify")
+def cmd_verify(mid: str, expect_revision: str = "") -> int:
+    return _human_op(config.repo_path(), lifecycle.human_verify, mid, "verify",
+                     expect_revision=expect_revision)
 
 
-def cmd_archive(mid: str) -> int:
-    return _human_op(config.repo_path(), lifecycle.human_archive, mid, "archive")
+def cmd_archive(mid: str, expect_revision: str = "") -> int:
+    return _human_op(config.repo_path(), lifecycle.human_archive, mid, "archive",
+                     expect_revision=expect_revision)
 
 
 def cmd_promote(mid: str) -> int:
@@ -169,10 +226,11 @@ def cmd_promote(mid: str) -> int:
         conn = index.connect(rp)
         index.upsert(conn, meta, body, target, False)
         conn.close()
-        index.build_index_md(rp, cfg)
+        index.build_index_md(rp, cfg)  # 本地重建，不提交
+        # INDEX.md 已退役，不再提交到 Git
         git_warn = gitops.commit_paths(
             rp, f"promote({mid}): staging → {store.TYPE_DIR[dtype]}（人工审核通过）",
-            [path, target, rp / "INDEX.md"],
+            [path, target],
         ) if cfg["git"].get("auto_commit", True) else None
     push_warn = None if git_warn or not cfg["git"].get("auto_push") else \
         gitops.schedule_push(rp, cfg["git"])
@@ -184,8 +242,14 @@ def cmd_promote(mid: str) -> int:
     return 0
 
 
-def cmd_revise(mid: str, body_file: str, title: str | None = None) -> int:
-    """可信人工 CLI：修订已生效的 standard/preference/bizrule。"""
+def cmd_revise(mid: str, body_file: str, title: str | None = None,
+               expect_revision: str = "") -> int:
+    """可信人工 CLI：修订已生效的 standard/preference/bizrule。
+
+    expect_revision: 可选的 content_revision CAS 检查。
+    """
+    from .mutations import _compute_revision
+
     rp = config.repo_path()
     cfg = config.load_config()
     body_path = Path(body_file).expanduser().resolve()
@@ -193,6 +257,32 @@ def cmd_revise(mid: str, body_file: str, title: str | None = None) -> int:
         print(f"错误：正文文件不存在 {body_path}")
         return 1
     new_body = body_path.read_text(encoding="utf-8")
+
+    # CAS 检查（如果提供了 expect_revision）
+    if expect_revision:
+        meta, old_body, _ = store.load(rp, mid)
+        if not meta:
+            print(f"错误：未找到 {mid}")
+            return 1
+        conn = index.connect(rp)
+        try:
+            row = conn.execute(
+                "SELECT content_revision FROM entity_heads WHERE entity_id=?",
+                (mid,),
+            ).fetchone()
+            if row:
+                current_rev = row[0]
+            else:
+                current_rev = _compute_revision(meta, old_body)
+            if expect_revision != current_rev:
+                print(f"错误：版本冲突（content_revision 不匹配）。")
+                print(f"  期望: {expect_revision}")
+                print(f"  当前: {current_rev}")
+                print(f"请先 memory_read 获取最新 revision 后重试。")
+                return 1
+        finally:
+            conn.close()
+
     with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
         meta, _old_body, path = store.load(rp, mid)
         if not meta:
@@ -215,9 +305,10 @@ def cmd_revise(mid: str, body_file: str, title: str | None = None) -> int:
         conn = index.connect(rp)
         index.upsert(conn, meta, new_body, path, False)
         conn.close()
-        index.build_index_md(rp, cfg)
+        index.build_index_md(rp, cfg)  # 本地重建，不提交
+        # INDEX.md 已退役，不再提交到 Git
         git_warn = gitops.commit_paths(rp, f"revise({mid}): {meta['title']} by human",
-                                       [path, rp / "INDEX.md"]) \
+                                       [path]) \
             if cfg["git"].get("auto_commit", True) else None
     push_warn = None if git_warn or not cfg["git"].get("auto_push") else \
         gitops.schedule_push(rp, cfg["git"])
@@ -239,12 +330,18 @@ def cmd_list(dtype: str | None) -> int:
     return 0
 
 
-def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: str) -> int:
+def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: str,
+               mode: str = "source") -> int:
     """批量导入原始材料为 Source Artifact（P0，2026-09-21）。
 
     只写 sources/（objects 文本快照 + manifests 元数据），不生成知识卡、不进入默认检索。
     --type/--staging 仅为命令兼容保留，一律忽略；可复用知识由 memory_save 按八项小节结构提炼。
+
+    M0.5: 锁外读取解析，锁内复核 hash/归属，避免解析期间文件变化形成错配。
+    M4-4: 新增 --mode extract，入队 extract 任务供提炼，不直接导入为 source。
     """
+    import hashlib
+
     src_dir = Path(directory).expanduser()
     if not src_dir.is_dir():
         print(f"错误：目录不存在 {src_dir}")
@@ -264,44 +361,93 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
     if not files:
         print("目录中未找到支持的文档文件")
         return 1
+
+    # M4-4: extract 模式
+    if mode == "extract":
+        return _cmd_import_extract(files, src_dir, scope, source, rp, cfg)
+
     print("导入只生成 source artifact（--type/--staging 已忽略）：原始材料保真留存，不产生知识卡、不进入默认检索。")
-    imported = skipped = 0
+
+    # === 阶段 1：锁外读取 + 解析（不持有 RepoLock）===
+    parsed_items: list[dict] = []
+    skipped = 0
+    for f in files:
+        import re as _re
+        # 锁外读取原始字节并计算 hash
+        try:
+            raw_bytes = f.read_bytes()
+            raw_hash = hashlib.sha256(raw_bytes).hexdigest()
+            raw_mtime = f.stat().st_mtime
+        except Exception as exc:
+            skipped += 1
+            print(f"  跳过（读取失败: {exc}）：{f.name}")
+            continue
+
+        # 锁外解析
+        if f.suffix.lower() == ".md":
+            body = raw_bytes.decode("utf-8", errors="replace").strip()
+            parsed_title = ""
+        else:
+            try:
+                from .parsers import register_builtin, registry
+                register_builtin()
+                parser = registry().find(f)
+                if parser is None:
+                    raise ValueError(f"无可用解析器: {f.suffix}")
+                parsed = parser.parse(f)
+                body = parsed.text.strip()
+                parsed_title = str(parsed.meta.get("title", ""))
+            except Exception as exc:
+                skipped += 1
+                print(f"  跳过（解析失败: {exc}）：{f.name}")
+                continue
+        if not body:
+            skipped += 1
+            continue
+        if store.SECRET_RE.search(body):
+            skipped += 1
+            print(f"  跳过（疑似明文凭据）：{f.name}")
+            continue
+        m = _re.search(r"^#\s+(.+)$", body, _re.M)
+        title = (m.group(1).strip() if m else parsed_title or f.stem)[:80]
+
+        parsed_items.append({
+            "file": f,
+            "body": body,
+            "title": title,
+            "raw_hash": raw_hash,
+            "raw_mtime": raw_mtime,
+            "fmt": f.suffix.lower().lstrip("."),
+        })
+
+    if not parsed_items:
+        print(f"完成：导入 0 个 source artifact，跳过 {skipped}（重复、空文件或被拦截）。")
+        return 0
+
+    # === 阶段 2：锁内复核 hash + 落库 ===
+    imported = 0
     written_paths: list[Path] = []
     with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
         conn = index.connect(rp)
-        for f in files:
-            import re as _re
-            if f.suffix.lower() == ".md":
-                body = f.read_text(encoding="utf-8").strip()
-                parsed_title = ""
-            else:
-                try:
-                    from .parsers import register_builtin, registry
-                    register_builtin()
-                    parser = registry().find(f)
-                    if parser is None:
-                        raise ValueError(f"无可用解析器: {f.suffix}")
-                    parsed = parser.parse(f)
-                    body = parsed.text.strip()
-                    parsed_title = str(parsed.meta.get("title", ""))
-                except Exception as exc:
+        for item in parsed_items:
+            f = item["file"]
+            # 锁内复核：文件是否在解析期间被修改
+            try:
+                current_mtime = f.stat().st_mtime
+                if current_mtime != item["raw_mtime"]:
                     skipped += 1
-                    print(f"  跳过（解析失败: {exc}）：{f.name}")
+                    print(f"  跳过（解析期间文件已变化）：{f.name}")
                     continue
-            if not body:
+            except Exception:
                 skipped += 1
+                print(f"  跳过（复核失败）：{f.name}")
                 continue
-            if store.SECRET_RE.search(body):
-                skipped += 1
-                print(f"  跳过（疑似明文凭据）：{f.name}")
-                continue
-            m = _re.search(r"^#\s+(.+)$", body, _re.M)
-            title = (m.group(1).strip() if m else parsed_title or f.stem)[:80]
+
             sid, digest, created = sources.import_source(
-                rp, body, title=title, scope=scope, fmt=f.suffix.lower().lstrip("."),
+                rp, item["body"], title=item["title"], scope=scope, fmt=item["fmt"],
                 parser_version="markdown-direct" if f.suffix.lower() == ".md" else "parsers-v1",
                 imported_by=source, kind=sources.kind_for(f.suffix),
-                source_modified_at=datetime.fromtimestamp(f.stat().st_mtime).isoformat(timespec="seconds"),
+                source_modified_at=datetime.fromtimestamp(item["raw_mtime"]).isoformat(timespec="seconds"),
             )
             if not created:
                 skipped += 1
@@ -309,12 +455,12 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
                 continue
             index.record_source_state(
                 conn, str(f.resolve()), digest,
-                datetime.fromtimestamp(f.stat().st_mtime).isoformat(timespec="seconds"),
+                datetime.fromtimestamp(item["raw_mtime"]).isoformat(timespec="seconds"),
             )
             written_paths.append(rp / sources.OBJECTS_DIR / f"{digest}.md")
             written_paths.append(rp / sources.MANIFESTS_DIR / f"{sid}.yaml")
             imported += 1
-            print(f"  {sid}  {title[:44]}")
+            print(f"  {sid}  {item['title'][:44]}")
         if imported:
             index.record_usage(conn, "import", detail=f"{imported} source artifacts from {src_dir.name}")
         conn.close()
@@ -325,11 +471,112 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
     push_warn = None if git_warn or not imported or not cfg["git"].get("auto_push") else \
         gitops.schedule_push(rp, cfg["git"])
     print(f"完成：导入 {imported} 个 source artifact（sources/objects + sources/manifests），跳过 {skipped}（重复、空文件或被拦截）。")
-    print("原始材料不进入默认检索；提炼可复用结论请用 memory_save 按八项小节结构保存。")
+    print("原始材料不进入默认检索；提炼可复用结论请用 memory_save 按八项小节结构提炼。")
     if git_warn:
         print(f"⚠ {git_warn}")
     if push_warn:
         print(f"⚠ {push_warn}")
+    return 0
+
+
+def _cmd_import_extract(files: list[Path], src_dir: Path, scope: str, source: str,
+                        rp: Path, cfg: dict) -> int:
+    """M4-4: extract 模式 — 解析文档并入队 extract 任务供提炼。
+
+    流程：
+    1. 锁外解析文档（使用 parsers.py）
+    2. 锁内入队 extract job（每个文档一个 job）
+    3. 返回 job_id 列表
+    """
+    from . import jobs
+    from .extraction.parsers import parse_document
+
+    print(f"extract 模式：解析 {len(files)} 个文件并入队提炼任务...")
+
+    # 阶段 1：锁外解析
+    parsed_docs: list[dict] = []
+    skipped = 0
+    for f in files:
+        try:
+            doc = parse_document(f)
+            if doc is None or not doc.text.strip():
+                skipped += 1
+                continue
+            # 检查明文凭据
+            if store.SECRET_RE.search(doc.text):
+                skipped += 1
+                print(f"  跳过（疑似明文凭据）：{f.name}")
+                continue
+            parsed_docs.append({
+                "file": f,
+                "doc": doc,
+                "title": doc.meta.get("title", f.stem)[:80],
+            })
+        except Exception as exc:
+            skipped += 1
+            print(f"  跳过（解析失败: {exc}）：{f.name}")
+            continue
+
+    if not parsed_docs:
+        print(f"完成：入队 0 个 extract 任务，跳过 {skipped}。")
+        return 0
+
+    # 阶段 2：锁内入队
+    enqueued = 0
+    job_ids = []
+    with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
+        conn = index.connect(rp)
+        try:
+            for item in parsed_docs:
+                f = item["file"]
+                doc = item["doc"]
+                # 构建 materials
+                materials = {
+                    "source_path": str(f),
+                    "source_format": doc.format,
+                    "title": item["title"],
+                    "text": doc.text[:100000],  # 限制大小
+                    "segments": [
+                        {
+                            "segment_id": seg.segment_id,
+                            "text": seg.text[:4000],
+                            "locator": seg.locator._asdict() if hasattr(seg.locator, '_asdict') else str(seg.locator),
+                            "text_hash": seg.text_hash,
+                        }
+                        for seg in doc.segments
+                    ],
+                    "total_segments": len(doc.segments),
+                }
+                # 幂等键：文件路径 + 内容哈希
+                import hashlib
+                content_hash = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()[:16]
+                idem_key = f"extract:{f}:{content_hash}"
+
+                result = jobs.enqueue(
+                    conn, jobs.KIND_EXTRACT, scope, materials,
+                    idempotency_key=idem_key,
+                )
+                if result["created"]:
+                    # 设置为 awaiting_agent 状态
+                    jobs.set_preparing(conn, result["job_id"])
+                    jobs.set_awaiting(conn, result["job_id"], len(doc.segments))
+                    enqueued += 1
+                    job_ids.append(result["job_id"])
+                    print(f"  {result['job_id']}  {item['title'][:44]}  ({len(doc.segments)} segments)")
+                else:
+                    skipped += 1
+                    print(f"  跳过（重复任务）：{f.name}")
+
+            if enqueued:
+                index.record_usage(conn, "import-extract",
+                                  detail=f"{enqueued} extract jobs from {src_dir.name}")
+        finally:
+            conn.close()
+
+    print(f"完成：入队 {enqueued} 个 extract 任务，跳过 {skipped}。")
+    if job_ids:
+        print(f"任务 ID：{', '.join(job_ids[:5])}{'...' if len(job_ids) > 5 else ''}")
+        print("使用 memory_job_claim 领取任务，memory_job_submit 提交提炼结果。")
     return 0
 
 
@@ -406,6 +653,75 @@ def cmd_alerts(dry_run: bool = False) -> int:
     return cmd_doctor(json_output=False)
 
 
+def cmd_jobs_list(scope: str = "", kind: str = "", state: str = "", limit: int = 50) -> int:
+    """列出任务队列。"""
+    rp = config.repo_path()
+    conn = index.connect(rp)
+    try:
+        items = jobs.list_jobs(conn, scope=scope, kind=kind, state=state, limit=limit)
+        if not items:
+            print("无任务")
+            return 0
+        for item in items:
+            err = f" error={item['error']}" if item["error"] else ""
+            print(f"[{item['job_id']}] {item['kind']} scope={item['scope']} "
+                  f"state={item['state']} attempt={item['attempt']} "
+                  f"cursor={item['cursor']}/{item['total']}{err}")
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_jobs_status(job_id: str) -> int:
+    """查询单个任务状态。"""
+    rp = config.repo_path()
+    conn = index.connect(rp)
+    try:
+        s = jobs.status(conn, job_id)
+        if not s:
+            print(f"未找到任务 {job_id}")
+            return 1
+        print(f"任务 {s['job_id']}（{s['kind']}）")
+        print(f"  scope: {s['scope']}")
+        print(f"  state: {s['state']}")
+        print(f"  attempt: {s['attempt']}/{s['max_attempts']}")
+        print(f"  cursor: {s['cursor']}/{s['total']}")
+        print(f"  retryable: {s['retryable']}")
+        print(f"  error: {s['error'] or '无'}")
+        print(f"  created: {s['created_at']}")
+        print(f"  updated: {s['updated_at']}")
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_jobs_retry(job_id: str) -> int:
+    """重试失败任务。"""
+    rp = config.repo_path()
+    conn = index.connect(rp)
+    try:
+        result = jobs.retry(conn, job_id)
+        if "error" in result:
+            print(f"错误：{result['error']}")
+            return 1
+        print(f"已重置 {job_id} → queued")
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_jobs_expire() -> int:
+    """回收过期租约。"""
+    rp = config.repo_path()
+    conn = index.connect(rp)
+    try:
+        n = jobs.expire_leases(conn)
+        print(f"已回收 {n} 个过期租约")
+    finally:
+        conn.close()
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="knowbase", description="薪火：跨 Agent 经验记忆库")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -422,14 +738,17 @@ def main(argv=None):
     sub.add_parser("reindex", help="全量重建索引")
     p_verify = sub.add_parser("verify", help="人工确认有效")
     p_verify.add_argument("id")
+    p_verify.add_argument("--expect-revision", default="", help="期望的 governance_revision（可选，用于 CAS 检查）")
     p_arch = sub.add_parser("archive", help="人工归档")
     p_arch.add_argument("id")
+    p_arch.add_argument("--expect-revision", default="", help="期望的 governance_revision（可选，用于 CAS 检查）")
     p_pro = sub.add_parser("promote", help="激活 staging 提案")
     p_pro.add_argument("id")
     p_rev = sub.add_parser("revise", help="人工修订已生效的标准/偏好/业务规则")
     p_rev.add_argument("id")
     p_rev.add_argument("--body-file", required=True)
     p_rev.add_argument("--title")
+    p_rev.add_argument("--expect-revision", default="", help="期望的 content_revision（可选，用于 CAS 检查）")
     p_list = sub.add_parser("list", help="列出记忆")
     p_list.add_argument("type", nargs="?", choices=store.TYPES)
     sub.add_parser("stats", help="统计")
@@ -449,7 +768,21 @@ def main(argv=None):
     p_imp.add_argument("--source", default="human:import")
     p_imp.add_argument("--staging", action="store_true",
                        help="（已废弃，兼容保留：导入一律生成 source）")
+    p_imp.add_argument("--mode", choices=["source", "extract"], default="source",
+                       help="导入模式：source=直接导入为 source artifact，extract=入队 extract 任务供提炼")
     sub.add_parser("serve", help="启动 MCP 服务（stdio）")
+    p_jobs = sub.add_parser("jobs", help="任务队列管理")
+    jobs_sub = p_jobs.add_subparsers(dest="jobs_cmd", required=True)
+    p_jobs_list = jobs_sub.add_parser("list", help="列出任务")
+    p_jobs_list.add_argument("--scope", default="")
+    p_jobs_list.add_argument("--kind", default="")
+    p_jobs_list.add_argument("--state", default="")
+    p_jobs_list.add_argument("--limit", type=int, default=50)
+    p_jobs_status = jobs_sub.add_parser("status", help="查询任务状态")
+    p_jobs_status.add_argument("job_id")
+    p_jobs_retry = jobs_sub.add_parser("retry", help="重试失败任务")
+    p_jobs_retry.add_argument("job_id")
+    jobs_sub.add_parser("expire", help="回收过期租约")
     args = parser.parse_args(argv)
 
     if args.cmd == "init":
@@ -472,13 +805,14 @@ def main(argv=None):
     if args.cmd == "reindex":
         return cmd_reindex()
     if args.cmd == "verify":
-        return cmd_verify(args.id)
+        return cmd_verify(args.id, expect_revision=getattr(args, "expect_revision", ""))
     if args.cmd == "archive":
-        return cmd_archive(args.id)
+        return cmd_archive(args.id, expect_revision=getattr(args, "expect_revision", ""))
     if args.cmd == "promote":
         return cmd_promote(args.id)
     if args.cmd == "revise":
-        return cmd_revise(args.id, args.body_file, args.title)
+        return cmd_revise(args.id, args.body_file, args.title,
+                          expect_revision=getattr(args, "expect_revision", ""))
     if args.cmd == "list":
         return cmd_list(args.type)
     if args.cmd == "stats":
@@ -488,7 +822,8 @@ def main(argv=None):
     if args.cmd == "alerts":
         return cmd_alerts(dry_run=args.dry_run)
     if args.cmd == "import":
-        return cmd_import(args.directory, args.type, args.scope, args.staging, args.source)
+        return cmd_import(args.directory, args.type, args.scope, args.staging, args.source,
+                         mode=getattr(args, "mode", "source"))
     if args.cmd == "hook":
         from . import hooks
         {"session-start": hooks.cmd_session_start,
@@ -499,6 +834,16 @@ def main(argv=None):
         from .server import main as serve
         serve()
         return 0
+    if args.cmd == "jobs":
+        if args.jobs_cmd == "list":
+            return cmd_jobs_list(args.scope, args.kind, args.state, args.limit)
+        if args.jobs_cmd == "status":
+            return cmd_jobs_status(args.job_id)
+        if args.jobs_cmd == "retry":
+            return cmd_jobs_retry(args.job_id)
+        if args.jobs_cmd == "expire":
+            return cmd_jobs_expire()
+        return 1
     return 1
 
 

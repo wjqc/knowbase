@@ -41,7 +41,7 @@ check("无 provenance 拦截", "provenance" in r, r)
 r = save_impl("bizrule", "欠费停机用户不可发起新业务受理", BODY,
               tags=["受理", "计费"], scope="cmi", provenance="PRD-2026-031 §4.2",
               domain="cmi-受理", rule_status="effective")
-check("bizrule 落 staging", "staging" in r and "B-2026" in r, r)
+check("bizrule 落 staging", "staging" in r and "B-" in r, r)
 
 # 3. human source 入参不可绕过 staging；人工 CLI promote 后生效
 r = save_impl("bizrule", "VIP 透支受理额度规则", BODY,

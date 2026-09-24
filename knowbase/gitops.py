@@ -2,17 +2,22 @@
 
 推送失败永不阻塞保存（离线可用是本地化工具的底线）；
 远端白名单校验把"永不推公网"从纪律变成代码。
+
+M0.5: 跨进程 TTL 使用 sync_lease 表替代进程内 _LAST_FETCH_MONO；
+sync_attempts 记录每次同步尝试，供观测和诊断。
 """
 
 import os
 import signal
 import subprocess
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import config as app_config
 from .locking import RepoLock
 
+# 进程内缓存保留作为快速路径优化，但跨进程协调以数据库 sync_lease 为准
 _LAST_FETCH_MONO: dict[str, float] = {}
 
 _IS_WINDOWS = os.name == "nt"
@@ -141,12 +146,28 @@ def _rebase_onto(repo: Path, remote_ref: str) -> None:
             conflicted = _run(repo, "diff", "--name-only", "--diff-filter=U", timeout=3)
         except Exception:
             conflicted = ""
+        # 尝试 abort 并验证是否成功
+        abort_failed = False
         try:
             _run(repo, "rebase", "--abort", timeout=5)
+            # 验证 abort 后是否真的退出了 rebase 状态
+            in_rebase = False
+            try:
+                # 检查是否仍在 rebase 状态（.git/rebase-merge 或 .git/rebase-apply 存在）
+                git_dir = Path(_run(repo, "rev-parse", "--git-dir", timeout=2))
+                in_rebase = (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
+            except Exception:
+                pass
+            if in_rebase:
+                abort_failed = True
         except Exception:
-            pass
+            abort_failed = True
         files = "、".join(line for line in conflicted.splitlines() if line.strip())
         detail = f"：{files}" if files else ""
+        if abort_failed:
+            raise GitSyncConflict(
+                f"检测到真实内容冲突{detail}；rebase abort 失败，请手动检查 .git 状态"
+            ) from exc
         raise GitSyncConflict(f"检测到真实内容冲突{detail}；已取消 rebase 并保留本地提交") from exc
 
 
@@ -175,6 +196,24 @@ def _is_push_race(exc: Exception) -> bool:
     ))
 
 
+def _is_auth_error(exc: Exception) -> bool:
+    """认证错误应立即停止，不重试。"""
+    message = str(exc).lower()
+    return any(marker in message for marker in (
+        "authentication", "permission denied", "could not read username",
+        "invalid username or password", "access denied",
+    ))
+
+
+def _is_network_error(exc: Exception) -> bool:
+    """网络错误应指数退避重试。"""
+    message = str(exc).lower()
+    return any(marker in message for marker in (
+        "could not resolve host", "connection refused", "connection timed out",
+        "network is unreachable", "ssl", "tls", "timeout",
+    ))
+
+
 def _integrate_remote(repo: Path, remote: str, branch: str) -> tuple[bool, bool]:
     """收敛到远端最新提交，返回 (本地 HEAD 是否变化, 是否需要 push)。"""
     remote_ref = f"{remote}/{branch}"
@@ -194,6 +233,7 @@ def _integrate_remote(repo: Path, remote: str, branch: str) -> tuple[bool, bool]
 def push(repo: Path, remote_url: str, allowed_prefixes: list[str]) -> str | None:
     remote = "origin"
     branch = "unknown"
+    push_sha = ""  # 记录正在推送的 SHA，用于恢复核对
     try:
         cfg = app_config.load_config()
         gcfg = cfg.get("git", {})
@@ -212,12 +252,23 @@ def push(repo: Path, remote_url: str, allowed_prefixes: list[str]) -> str | None
                 if _has_user_changes(dirty):
                     raise RuntimeError("工作区存在未提交修改，未自动 rebase/push")
                 _integrate_remote(repo, remote, branch)
+            # 记录即将推送的 SHA
+            push_sha = _run(repo, "rev-parse", "HEAD", timeout=3)
             try:
                 _run(repo, "push", "-u", remote, f"HEAD:{branch}", timeout=20)
                 last_error = None
                 break
             except Exception as exc:
                 last_error = exc
+                # 认证错误立即停止，不重试
+                if _is_auth_error(exc):
+                    raise
+                # 网络错误使用指数退避
+                if _is_network_error(exc) and attempt + 1 < retries:
+                    import time
+                    time.sleep(min(30, 2 ** attempt))
+                    continue
+                # 竞态错误（non-fast-forward）走 fetch/rebase 重试
                 if not _is_push_race(exc) or attempt + 1 == retries:
                     raise
         if last_error is not None:
@@ -228,10 +279,22 @@ def push(repo: Path, remote_url: str, allowed_prefixes: list[str]) -> str | None
         _record_sync(repo, remote, branch, "conflict", error=str(exc), fetch=True)
         return f"同步冲突(本地提交已保留): {exc}"
     except Exception as e:
+        error_type = "unknown"
+        if _is_auth_error(e):
+            error_type = "auth"
+        elif _is_network_error(e):
+            error_type = "network"
+        elif _is_push_race(e):
+            error_type = "race"
         try:
-            _record_sync(repo, remote, branch, "error", error=str(e), push=True)
+            _record_sync(repo, remote, branch, "error", 
+                         error=f"[{error_type}] {e}" + (f" (push_sha={push_sha})" if push_sha else ""),
+                         push=True)
         except Exception:
             pass
+        # 网络未知结果明确报告
+        if error_type == "network":
+            return f"push 网络超时(本地已提交，恢复后将核对远端 SHA={push_sha}): {e}"
         return f"push 失败(已忽略，本地已提交): {e}"
 
 
@@ -262,22 +325,142 @@ def _record_sync(repo: Path, remote: str, branch: str, status: str, error: str =
         pass
 
 
+def record_sync_attempt(repo: Path, remote: str, branch: str, target_sha: str,
+                        result: str, duration_ms: int, error: str = "",
+                        confirmed_revision: str = "", pending_push_count: int = 0,
+                        notes: str = "") -> str:
+    """记录一次同步尝试到 sync_attempts 表，返回 attempt_id。
+
+    M0.5: 供观测和诊断使用，doctor 将记录缺失/过期标为 unknown。
+    """
+    try:
+        from . import index
+        conn = index.connect(repo)
+        attempt_id = f"SA-{uuid.uuid4().hex[:12]}"
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        conn.execute(
+            "INSERT INTO sync_attempts(attempt_id,ts,remote,branch,target_sha,result,"
+            "duration_ms,confirmed_revision,pending_push_count,error,notes) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (attempt_id, now, remote, branch, target_sha, result, duration_ms,
+             confirmed_revision, pending_push_count, error, notes),
+        )
+        conn.commit()
+        conn.close()
+        return attempt_id
+    except Exception:
+        return ""
+
+
+def _check_sync_lease(repo: Path, remote: str, branch: str, ttl_seconds: float) -> tuple[bool, str]:
+    """检查跨进程同步租约，返回 (是否可执行, telemetry_warning)。
+
+    使用 sync_lease 表进行跨进程协调，替代纯进程内 _LAST_FETCH_MONO。
+    """
+    try:
+        from . import index
+        conn = index.connect(repo)
+        now = datetime.now(timezone.utc)
+        now_str = now.isoformat(timespec="seconds")
+        expires_str = (now + timedelta(seconds=ttl_seconds)).isoformat(timespec="seconds")
+
+        # 检查现有租约
+        row = conn.execute(
+            "SELECT lease_owner, lease_until FROM sync_lease WHERE repo=? AND remote=? AND branch=?",
+            (str(Path(repo).resolve()), remote, branch),
+        ).fetchone()
+
+        if row:
+            owner, until = row
+            if until and until > now_str:
+                # 租约未过期，其他进程持有
+                conn.close()
+                return False, f"同步租约由 {owner} 持有至 {until}"
+
+        # 获取或更新租约
+        lease_owner = f"pid-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_lease(repo,remote,branch,lease_owner,lease_until,last_attempt) "
+            "VALUES(?,?,?,?,?,?)",
+            (str(Path(repo).resolve()), remote, branch, lease_owner, expires_str, now_str),
+        )
+        conn.commit()
+        conn.close()
+        return True, ""
+    except Exception as e:
+        # 数据库不可用时退化为允许执行，但返回告警
+        return True, f"同步租约检查失败（数据库不可用？）: {e}"
+
+
+def _release_sync_lease(repo: Path, remote: str, branch: str, success: bool):
+    """释放同步租约，更新 last_success 或 next_check_at。"""
+    try:
+        from . import index
+        conn = index.connect(repo)
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if success:
+            conn.execute(
+                "UPDATE sync_lease SET last_success=?, lease_owner='', lease_until='' "
+                "WHERE repo=? AND remote=? AND branch=?",
+                (now, str(Path(repo).resolve()), remote, branch),
+            )
+        else:
+            # 失败时设置下次检查时间（指数退避）
+            row = conn.execute(
+                "SELECT next_check_at FROM sync_lease WHERE repo=? AND remote=? AND branch=?",
+                (str(Path(repo).resolve()), remote, branch),
+            ).fetchone()
+            # 简单实现：清空租约，让下次请求重新竞争
+            conn.execute(
+                "UPDATE sync_lease SET lease_owner='', lease_until='' WHERE repo=? AND remote=? AND branch=?",
+                (str(Path(repo).resolve()), remote, branch),
+            )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def sync_before_read(repo: Path, cfg: dict) -> tuple[bool, str | None]:
-    """TTL 到期时安全 fetch/ff/rebase；返回 (是否更新, 告警)。"""
+    """TTL 到期时安全 fetch/ff/rebase；返回 (是否更新, 告警)。
+
+    M0.5: 使用跨进程 sync_lease 协调，记录 sync_attempts，返回 telemetry_warning。
+    """
     import time
     gcfg = cfg.get("git", {})
     if not gcfg.get("auto_pull", True) or not is_repo(repo):
         return False, None
     key = str(Path(repo).resolve())
     ttl = max(10.0, float(gcfg.get("pull_ttl_seconds", 60)))
+
+    # 进程内快速路径：跳过未过期的
     now_mono = time.monotonic()
     if now_mono - _LAST_FETCH_MONO.get(key, 0.0) < ttl:
         return False, None
-    _LAST_FETCH_MONO[key] = now_mono
+
+    # 跨进程租约检查
     remote_name = str((gcfg.get("remote", {}) or {}).get("name") or "origin")
     branch = str((gcfg.get("remote", {}) or {}).get("branch") or "")
+    try:
+        remote_name_check, branch_check, _ = _remote_target(repo, gcfg)
+        remote_name = remote_name_check
+        branch = branch_check
+    except Exception:
+        pass
+
+    can_sync, lease_warning = _check_sync_lease(repo, remote_name, branch, ttl)
+    if not can_sync:
+        # 其他进程正在同步，跳过本次
+        return False, lease_warning or "同步已由其他进程执行"
+
+    _LAST_FETCH_MONO[key] = now_mono
+    start_time = time.monotonic()
     push_needed = False
     updated = False
+    telemetry_warnings: list[str] = []
+    if lease_warning:
+        telemetry_warnings.append(lease_warning)
+
     try:
         with RepoLock(repo, float(cfg.get("lock_timeout", 10.0))):
             remote_name, branch, actual_url = _remote_target(repo, gcfg)
@@ -285,20 +468,33 @@ def sync_before_read(repo: Path, cfg: dict) -> tuple[bool, str | None]:
             if prefixes and not any(actual_url.startswith(p) for p in prefixes):
                 raise RuntimeError(f"实际 remote {actual_url} 不在白名单")
             dirty = _run(repo, "status", "--porcelain", timeout=3)
+            target_sha = _run(repo, "rev-parse", "HEAD", timeout=3)
             _run(repo, "fetch", remote_name, branch, timeout=10)
             if _has_user_changes(dirty):
                 local = _run(repo, "rev-parse", "HEAD", timeout=3)
                 remote_rev = _run(repo, "rev-parse", f"{remote_name}/{branch}", timeout=3)
                 if local == remote_rev:
                     _record_sync(repo, remote_name, branch, "ok", fetch=True)
-                    return False, None
+                    duration_ms = int((time.monotonic() - start_time) * 1000)
+                    record_sync_attempt(repo, remote_name, branch, target_sha, "ok",
+                                        duration_ms, confirmed_revision=local)
+                    _release_sync_lease(repo, remote_name, branch, success=True)
+                    return False, "; ".join(telemetry_warnings) if telemetry_warnings else None
                 warning = "远端有更新，但本地工作区非干净状态；保留 last-known-good，未自动合并"
                 _record_sync(repo, remote_name, branch, "blocked", error=warning, fetch=True)
+                duration_ms = int((time.monotonic() - start_time) * 1000)
+                record_sync_attempt(repo, remote_name, branch, target_sha, "blocked",
+                                    duration_ms, error=warning)
+                _release_sync_lease(repo, remote_name, branch, success=False)
                 return False, warning
             changed, push_needed = _integrate_remote(repo, remote_name, branch)
             if not changed and not push_needed:
                 _record_sync(repo, remote_name, branch, "ok", fetch=True)
-                return False, None
+                duration_ms = int((time.monotonic() - start_time) * 1000)
+                record_sync_attempt(repo, remote_name, branch, target_sha, "ok",
+                                    duration_ms, confirmed_revision=_run(repo, "rev-parse", "HEAD", timeout=3))
+                _release_sync_lease(repo, remote_name, branch, success=True)
+                return False, "; ".join(telemetry_warnings) if telemetry_warnings else None
             if changed:
                 from . import index
                 index.rebuild(repo)
@@ -307,16 +503,31 @@ def sync_before_read(repo: Path, cfg: dict) -> tuple[bool, str | None]:
                 _record_sync(repo, remote_name, branch, "pending", fetch=True)
             else:
                 _record_sync(repo, remote_name, branch, "ok", fetch=True)
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            new_sha = _run(repo, "rev-parse", "HEAD", timeout=3)
+            record_sync_attempt(repo, remote_name, branch, target_sha, "updated",
+                                duration_ms, confirmed_revision=new_sha,
+                                pending_push_count=1 if push_needed else 0)
+            _release_sync_lease(repo, remote_name, branch, success=True)
     except GitSyncConflict as exc:
         warning = str(exc)
         _record_sync(repo, remote_name, branch or "unknown", "conflict", error=warning, fetch=True)
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        record_sync_attempt(repo, remote_name, branch or "unknown", "", "conflict",
+                            duration_ms, error=warning)
+        _release_sync_lease(repo, remote_name, branch or "unknown", success=False)
         return False, warning
     except Exception as exc:
         warning = f"远程同步检查失败，继续使用 last-known-good: {exc}"
         _record_sync(repo, remote_name, branch or "unknown", "error", error=warning, fetch=True)
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        record_sync_attempt(repo, remote_name, branch or "unknown", "", "error",
+                            duration_ms, error=warning)
+        _release_sync_lease(repo, remote_name, branch or "unknown", success=False)
         return False, warning
     if push_needed:
         warning = push(repo, str((gcfg.get("remote", {}) or {}).get("url") or ""),
                        gcfg.get("allowed_remote_prefixes", []))
-        return updated, warning
-    return updated, None
+        if warning:
+            telemetry_warnings.append(warning)
+    return updated, "; ".join(telemetry_warnings) if telemetry_warnings else None

@@ -118,7 +118,9 @@ def test_import_creates_source_without_machine_path(isolated_repo, tmp_path):
     manifests = list(sources.iter_manifests(isolated_repo))
     assert len(manifests) == 1
     assert not list((isolated_repo / "references").glob("R-*.md"))
-    assert str(source) not in (isolated_repo / sources.MANIFESTS_DIR / "SRC-2026-0001.yaml").read_text(encoding="utf-8")
+    # 使用实际分配的 manifest ID（兼容 UUID 格式）
+    manifest_id = manifests[0]["id"]
+    assert str(source) not in (isolated_repo / sources.MANIFESTS_DIR / f"{manifest_id}.yaml").read_text(encoding="utf-8")
     obj = isolated_repo / manifests[0]["object"]
     assert "正文已经完整复制" in obj.read_text(encoding="utf-8")
     assert str(source) not in obj.read_text(encoding="utf-8")

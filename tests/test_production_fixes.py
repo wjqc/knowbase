@@ -92,7 +92,10 @@ def test_save_commits_index_and_leaves_clean_worktree(isolated_repo):
         ["git", "-C", str(repo), "status", "--porcelain"],
         capture_output=True, text=True, check=True,
     ).stdout
-    assert status == ""
+    # INDEX.md 已退役，不再提交到 Git（本地重建供速览），所以工作区会有 INDEX.md 未跟踪/修改
+    # 除了 INDEX.md 外，其他文件应该都已提交
+    lines = [line for line in status.splitlines() if "INDEX.md" not in line]
+    assert lines == [], f"除 INDEX.md 外不应有未提交文件: {lines}"
 
 
 def test_push_is_only_scheduled_after_repo_lock_is_released(isolated_repo, monkeypatch):

@@ -127,21 +127,71 @@ def _flag_path(session_id: str) -> Path:
     return Path(base) / f"knowbase-hook-{session_id}.flag"
 
 
+def _mid_capture_flag_path(session_id: str) -> Path:
+    """中途 capture 的 flag 文件路径（每个会话最多触发一次）。"""
+    base = os.environ.get("KNOWBASE_HOOK_STATE") or tempfile.gettempdir()
+    return Path(base) / f"knowbase-mid-capture-{session_id}.flag"
+
+
+def _maybe_trigger_mid_session_capture(session_id: str, transcript_path: str) -> None:
+    """M3-2: 检测 work_ops 达到阈值时触发中途 capture（不阻断）。
+
+    每个会话最多触发一次中途 capture，通过 flag 文件控制。
+    与 Stop Hook 的 capture 共享幂等键前缀，避免重复。
+    """
+    cfg = config.load_config()
+    hooks_cfg = cfg.get("hooks", {}) or {}
+    if not hooks_cfg.get("enabled", True):
+        return
+    # 检查是否启用中途 capture
+    if not hooks_cfg.get("mid_session_capture", False):
+        return
+    # 检查是否已经触发过
+    flag = _mid_capture_flag_path(session_id)
+    if flag.exists():
+        return
+    # 获取阈值（默认 5 次 work_ops）
+    threshold = hooks_cfg.get("mid_session_threshold", 5)
+    # 统计 work_ops
+    stats = _transcript_stats(transcript_path)
+    if stats["work_ops"] < threshold:
+        return
+    # 达到阈值，尝试入队 capture
+    job_id = _try_enqueue_capture(session_id, transcript_path, cfg)
+    if job_id:
+        # 设置 flag 防止重复触发
+        try:
+            flag.write_text("1", encoding="utf-8")
+        except OSError:
+            pass
+
+
 def stop_event(session_id: str, transcript_path: str) -> str:
-    """漏存（有操作无沉淀）或读后未回填 → 返回阻断 JSON（每会话限一次）；否则返回空串。"""
+    """漏存（有操作无沉淀）→ 入队 + 阻断引导领取；读后未回填 → 阻断提醒。
+
+    M0 增强：漏存场景自动入队 capture 任务，阻断提示包含 job_id 和领取指引。
+    """
     cfg = config.load_config()
     if not cfg.get("hooks", {}).get("enabled", True):
         return ""
     t = _transcript_stats(transcript_path)
+    job_hint = ""
     if t["work_ops"] and not t["memory_write"]:
+        # 尝试入队 capture 任务
+        job_id = _try_enqueue_capture(session_id, transcript_path, cfg)
         reason = (
-            "[knowbase] 本次会话有代码/文件操作但未沉淀经验。先过可复用过滤"
-            "（已修复的一次性 bug、repo/git/docs 能回答的事实、一次性结果数字不入库），"
-            "若仍有值得复用的踩坑/决策/固化流程/用户约束，先 memory_search 查重，"
-            "再 memory_save 保存（提示相似则 memory_update；正文含八项小节："
-            "结论/解决的问题/适用条件/不适用条件/可执行动作/关键证据/验证情况/未知与待确认）；"
-            "整篇文档等原始材料走 CLI knowbase import；"
-            "确认没有可复用经验，则直接回复“无可沉淀经验”结束。"
+            "[knowbase] 本次会话有代码/文件操作但未沉淀经验。"
+        )
+        if job_id:
+            reason += (
+                f"已自动入队提炼任务 {job_id}。请领取并提炼：\n"
+                f"  memory_job_claim(job_id=\"{job_id}\", host_session_id=\"<会话ID>\")\n"
+                "领取后按材料提炼候选，调用 memory_job_submit 提交。"
+                "若确认无值得复用经验，提交空结果即可。\n"
+            )
+        reason += (
+            "也可手动沉淀：先 memory_search 查重，再 memory_save（正文含八项小节）；"
+            "整篇文档走 CLI knowbase import。"
             "本提醒每次会话最多出现一次。"
         )
     elif t["memory_read"] and not t["feedback"]:
@@ -150,7 +200,7 @@ def stop_event(session_id: str, transcript_path: str) -> str:
             "请对实际参考/采纳的条目调用 "
             "memory_feedback(id, helpful/not_helpful/outdated/incorrect)——"
             "once→verified 晋升与 active→stale 淘汰只认反馈，缺反馈的记忆会永远停在低置信状态。"
-            "若读过的条目均未采纳，直接回复“未采纳，无需回填”结束。"
+            "若读过的条目均未采纳，直接回复'未采纳，无需回填'结束。"
             "本提醒每次会话最多出现一次。"
         )
     else:
@@ -163,6 +213,61 @@ def stop_event(session_id: str, transcript_path: str) -> str:
     except OSError:
         pass
     return json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False)
+
+
+def _try_enqueue_capture(session_id: str, transcript_path: str, cfg: dict) -> str:
+    """尝试入队 capture 任务。失败时返回空串（不阻断原有阻断逻辑）。
+
+    M3-1 增强：支持长会话多 checkpoint 切分，为每个 checkpoint 创建独立 job。
+    返回第一个 job_id（用于阻断提示），或空串表示无任务入队。
+    """
+    try:
+        from . import index, jobs
+        from .adapters import normalizer, checkpoint as cp_mod
+
+        rp = config.repo_path(cfg)
+        if not rp.exists():
+            return ""
+
+        # 推断 scope
+        conn = index.connect(rp)
+        try:
+            scope = _infer_scope(conn) or "global"
+        finally:
+            conn.close()
+
+        # 解析 transcript
+        events = normalizer.parse_transcript_file(
+            transcript_path, default_session_id=session_id, default_scope=scope,
+        )
+        if not events:
+            return ""
+
+        # M3-1: 使用 build_checkpoints 支持多 checkpoint 切分
+        checkpoints = cp_mod.build_checkpoints(events, session_id=session_id, scope=scope)
+        if not checkpoints:
+            return ""
+
+        first_job_id = ""
+        conn = index.connect(rp)
+        try:
+            for cp in checkpoints:
+                result = jobs.enqueue(
+                    conn, jobs.KIND_CAPTURE, scope,
+                    {"checkpoint": cp.__dict__, "transcript_ref": transcript_path},
+                    idempotency_key=cp.idempotency_key,
+                )
+                if result["created"]:
+                    jobs.set_preparing(conn, result["job_id"])
+                    jobs.set_awaiting(conn, result["job_id"], 1)
+                    if not first_job_id:
+                        first_job_id = result["job_id"]
+        finally:
+            conn.close()
+        return first_job_id
+    except Exception:
+        pass  # 入队失败不阻断原有逻辑
+    return ""
 
 
 # ---------- stdin/stdout 包装层 ----------
@@ -188,6 +293,11 @@ def cmd_session_start(style: str = "claude"):
 def cmd_user_prompt(style: str = "claude"):
     data = _read_stdin()
     prompt = _first(data, "prompt", "prompt_text", "user_prompt", "input")
+    # M3-2: 中途检查点触发（不阻断，异步入队）
+    sid = _first(data, "session_id", "sessionId")
+    transcript = _first(data, "transcript_path", "transcriptPath", "transcript")
+    if sid and transcript:
+        _maybe_trigger_mid_session_capture(sid, transcript)
     _emit(user_prompt(prompt), style)
 
 

@@ -77,7 +77,7 @@ r = save_impl("standard", "接口发布门禁标准", card(
     "接口上线必须过验收环境回归。", "防止未回归接口直上生产引发事故。",
     "- 对外 API 发布", "- 内部实验脚本", "发布前在验收环境跑全量回归。",
     "发布检查单第 3 项要求回归记录。"))
-check("standard 落 staging", "staging" in r and "S-2026" in r, r)
+check("standard 落 staging", "staging" in r and "S-" in r, r)
 
 # 6. preference 无论 source 入参如何都必须 staging；人工通过 CLI promote
 os.environ["KNOWBASE_AGENT_NAME"] = "claude-code"
@@ -94,11 +94,11 @@ check("preference human source 不可绕过 staging", "staging" in r, r)
 
 # 7. 检索：FTS5 命中 + 排序字段
 r = search_impl("EasyConnect 死锁")
-check("search FTS 命中", "P-2026-0001" in r, r)
+check("search FTS 命中", pid in r, r)
 
 # 8. 检索：2 字短词 LIKE 回退
 r = search_impl("死锁")
-check("search 短词 LIKE 回退", "P-2026-0001" in r, r)
+check("search 短词 LIKE 回退", pid in r, r)
 
 # 9. read → hit_count 增长
 read_impl(pid)

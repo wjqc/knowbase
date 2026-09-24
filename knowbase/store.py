@@ -4,6 +4,7 @@
 """
 
 import re
+import uuid
 from datetime import date
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -51,7 +52,7 @@ DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SECRET_RE = re.compile(
     r"(?i)(password|passwd|secret|api[_-]?key|token)\s*[=:]\s*['\"]?[^\s'\"]{6,}"
 )
-ID_RE = re.compile(r"^[A-Z]{1,2}-\d{4}-\d{4}$")
+ID_RE = re.compile(r"^[A-Z]{1,2}-\d{4}-\d{4}$|^[A-Z]{1,2}-[0-9a-f]{12}$")
 
 # 经验卡是共享资产，不能依赖作者机器上的文件。代码定位允许使用仓库相对路径；
 # 文档引用仅允许指向 knowbase 仓库内实际存在的相对路径。
@@ -232,16 +233,13 @@ def iter_all(repo: Path, include_staging: bool = False):
 # ---------- id 与查重 ----------
 
 def alloc_id(repo: Path, dtype: str, year: int | None = None) -> str:
-    year = year or date.today().year
-    d = Path(repo) / TYPE_DIR[dtype]
-    seq = 0
-    pat = re.compile(rf"^{PREFIX[dtype]}-{year}-(\d+)\.md$")
-    for directory in (d, Path(repo) / "staging"):
-        for f in directory.glob("*.md"):
-            m = pat.match(f.name)
-            if m:
-                seq = max(seq, int(m.group(1)))
-    return f"{PREFIX[dtype]}-{year}-{seq + 1:04d}"
+    """分配新卡片 ID。
+
+    新格式：`P-<uuid12>`（如 `P-a1b2c3d4e5f6`），跨机唯一；
+    旧格式 `P-2026-0001` 保留兼容，不再新分配。
+    """
+    short = uuid.uuid4().hex[:12]
+    return f"{PREFIX[dtype]}-{short}"
 
 
 def normalize_title(t: str) -> str:
