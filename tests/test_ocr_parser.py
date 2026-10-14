@@ -24,6 +24,13 @@ from knowbase.parsers.ocr_parser import (
 from knowbase.parsers.errors import ParseError
 
 
+def _fake_pytesseract():
+    """pytesseract 可选依赖缺失时的替身模块（只用于隔离依赖检查层）。"""
+    import types
+
+    return types.SimpleNamespace(image_to_string=lambda img, lang="eng": "")
+
+
 # -----------------------
 # TestOcrParserSupports
 # -----------------------
@@ -61,6 +68,8 @@ class TestOcrParserSupports:
 class TestOcrParserGracefulDegradation:
     def test_raises_when_tesseract_binary_missing(self, tmp_path, monkeypatch):
         """tesseract 二进制不在 PATH 时抛 ParseError + 平台安装提示。"""
+        # pytesseract 是可选依赖：注入假模块，让断言只针对二进制检查这一层
+        monkeypatch.setitem(sys.modules, "pytesseract", _fake_pytesseract())
         monkeypatch.setattr(
             "knowbase.parsers.ocr_parser._check_tesseract_binary",
             lambda: None,
@@ -117,7 +126,8 @@ class TestOcrParserGracefulDegradation:
 
     def test_raises_on_corrupt_image(self, tmp_path, monkeypatch):
         """损坏图片应抛 ParseError 'cannot open image'。"""
-        # 假定 tesseract 在 PATH（否则先被二进制检查拦下）
+        # 前两层依赖用假模块/假路径满足，只让断言落在解码失败这一层
+        monkeypatch.setitem(sys.modules, "pytesseract", _fake_pytesseract())
         monkeypatch.setattr(
             "knowbase.parsers.ocr_parser._check_tesseract_binary",
             lambda: "/fake/usr/bin/tesseract",
