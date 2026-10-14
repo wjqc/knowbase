@@ -22,9 +22,10 @@ _FENCE_RE = re.compile(r"^```.*$", re.MULTILINE)
 
 class MarkdownParser(DocumentParser):
     name = "markdown"
+    extensions = (".md", ".markdown", ".mdx")
 
     def supports(self, path: Path) -> bool:
-        return path.suffix.lower() in (".md", ".markdown", ".mdx")
+        return path.suffix.lower() in self.extensions
 
     def parse(self, path: Path) -> ParsedDocument:
         try:

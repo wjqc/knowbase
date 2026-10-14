@@ -54,6 +54,55 @@ SECRET_RE = re.compile(
 )
 ID_RE = re.compile(r"^[A-Z]{1,2}-\d{4}-\d{4}$|^[A-Z]{1,2}-[0-9a-f]{12}$")
 
+# 明文凭据识别：覆盖 JSON/引号包裹、Authorization 头、大写后缀键名、URL 内嵌密码。
+# 经验卡是多人共享资产，入库前必须拦住；宁可误报也不可漏报。
+_SECRET_KEYWORD = r"(?:pass(?:word|wd)?|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential)"
+_SECRET_PATTERN_SRCS = (
+    # key=value / "key": "value" / KEY_VALUE=...，键名允许前后缀与下划线分隔
+    rf"{_SECRET_KEYWORD}[a-z0-9_\-]*\s*[\"']?\s*[=:]\s*[\"']?[^\s'\"<>]{{6,}}",
+    # Authorization: Bearer <token> / Proxy-Authorization / Basic
+    r"(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic|token)\s+[\w.\-+/=]{8,}",
+    # 独立出现的 bearer <token>
+    r"\bbearer\s+[A-Za-z0-9\-._~+/]{16,}={0,2}",
+    # AWS 风格 access key id
+    r"(?:AKIA|ASIA)[A-Z0-9]{16}",
+    # URL 内嵌密码 scheme://user:pass@host（密码可含 @ 等特殊字符，取最后一个 @ 之前）
+    r"\b[a-z][a-z0-9+.\-]*://[^\s:/@]+:[^\s/]{3,}@[^\s/]+",
+)
+SECRET_PATTERNS = tuple(re.compile(src, re.I) for src in _SECRET_PATTERN_SRCS)
+SECRET_RE = re.compile("|".join(f"(?:{src})" for src in _SECRET_PATTERN_SRCS), re.I)
+
+
+def find_secrets(text) -> list[str]:
+    """返回文本/结构中疑似明文凭据的片段（已去重，供报错提示定位）。"""
+    values = [text] if isinstance(text, str) else []
+    if not isinstance(text, str):
+        collected: list[str] = []
+        _collect_strings(text, collected)
+        values = collected
+    found = []
+    for value in values:
+        for pattern in SECRET_PATTERNS:
+            found.extend(m.group(0) for m in pattern.finditer(value))
+    return list(dict.fromkeys(found))
+
+
+def _collect_strings(value, out: list[str], key_hint: str = "") -> None:
+    """递归收集任意嵌套结构里的字符串。
+
+    结构化数据里的凭据（如 {"api_key": "sk-xxx"}）键名是敏感词而值不含标识符，
+    因此把键名一并拼进待检文本，让 SECRET_PATTERNS 能按 key=value 语义命中。
+    """
+    if isinstance(value, str):
+        out.append(f"{key_hint}: {value}" if key_hint else value)
+    elif isinstance(value, dict):
+        for k, item in value.items():
+            _collect_strings(item, out, key_hint=str(k) if isinstance(k, str) else "")
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _collect_strings(item, out, key_hint)
+
+
 # 经验卡是共享资产，不能依赖作者机器上的文件。代码定位允许使用仓库相对路径；
 # 文档引用仅允许指向 knowbase 仓库内实际存在的相对路径。
 _MACHINE_PATH_RE = re.compile(
@@ -194,15 +243,36 @@ def render(meta: dict, body: str) -> str:
 
 # ---------- 路径与遍历 ----------
 
+def valid_id(mid: str) -> bool:
+    """卡片 ID 必须是分配器产出的格式，拒绝任何含路径分隔符的输入。"""
+    return bool(mid) and bool(ID_RE.match(mid))
+
+
 def mem_path(repo: Path, dtype: str, mid: str, staging: bool = False) -> Path:
+    if not valid_id(mid):
+        raise ValueError(f"非法卡片 ID: {mid!r}")
     d = Path(repo) / ("staging" if staging else TYPE_DIR[dtype])
     return d / f"{mid}.md"
 
 
+def _contained(repo: Path, path: Path) -> Path | None:
+    """确认 path 落在 repo 内（含符号链接解析后仍在仓库内），否则返回 None。"""
+    try:
+        root = Path(repo).resolve()
+        resolved = path.resolve()
+    except OSError:
+        return None
+    if resolved != root and root not in resolved.parents:
+        return None
+    return path
+
+
 def find_file(repo: Path, mid: str) -> Path | None:
+    if not valid_id(mid):
+        return None
     for d in ALL_DIRS:
-        p = Path(repo) / d / f"{mid}.md"
-        if p.exists():
+        p = _contained(repo, Path(repo) / d / f"{mid}.md")
+        if p is not None and p.exists():
             return p
     return None
 
@@ -343,8 +413,10 @@ def lint(meta: dict, body: str, repo: Path | None = None) -> list[str]:
                 errs.append(f"缺少必填小节: {sec}")
     if t == "bizrule" and not str(meta.get("provenance", "")).strip():
         errs.append("业务规则必须带出处 provenance（PRD 编号/条款/业务方确认记录），无出处的规则不入库")
-    if SECRET_RE.search(body or ""):
-        errs.append("body 疑似包含明文密钥(password/token 等)，请脱敏后再存")
+    leaks = find_secrets(_all_text(meta, body))
+    if leaks:
+        sample = "、".join(leaks[:2])
+        errs.append(f"疑似包含明文密钥(password/token/Authorization 等): {sample}，请脱敏后再存")
     errs.extend(code_refs_errors(meta))
     errs.extend(reference_errors(meta, body, repo))
     return errs

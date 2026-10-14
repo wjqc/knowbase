@@ -23,6 +23,9 @@ class ParsedDocument:
 
 class DocumentParser(ABC):
     name: str = "abstract"
+    # 该 parser 声明支持的扩展名（小写，含点）；supports() 以此为准，
+    # 同时供 knowbase.extraction.parsers.list_supported_formats() 枚举。
+    extensions: tuple[str, ...] = ()
 
     @abstractmethod
     def supports(self, path: Path) -> bool: ...

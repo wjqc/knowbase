@@ -342,6 +342,8 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
     """
     import hashlib
 
+    from .extraction.parsers import importable_extensions
+
     src_dir = Path(directory).expanduser()
     if not src_dir.is_dir():
         print(f"错误：目录不存在 {src_dir}")
@@ -352,8 +354,7 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
     if src_dir == rp.resolve() or rp.resolve() in src_dir.parents or src_dir in rp.resolve().parents:
         print("错误：导入目录与记忆库不可互相包含")
         return 1
-    supported = {".md", ".txt", ".pdf", ".docx", ".xlsx", ".pptx", ".html", ".htm",
-                 ".png", ".jpg", ".jpeg", ".py", ".js", ".ts", ".java", ".log"}
+    supported = importable_extensions()
     files = [f for f in sorted(src_dir.rglob("*"))
              if f.is_file() and f.suffix.lower() in supported
              and not any(part.startswith(".") for part in f.relative_to(src_dir).parts)

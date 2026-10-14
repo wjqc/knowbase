@@ -117,11 +117,20 @@ def import_source(repo: Path, text: str, *, title: str, scope: str, fmt: str,
 def load_manifest(repo: Path, source_id: str) -> dict | None:
     """加载指定 source_id 的 manifest。"""
     repo = Path(repo)
+    if not SRC_ID_RE.match(f"{source_id}.yaml"):
+        return None
     manifest_path = repo / MANIFESTS_DIR / f"{source_id}.yaml"
     if not manifest_path.exists():
         return None
     try:
-        data = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        resolved = manifest_path.resolve()
+        root = repo.resolve()
+    except OSError:
+        return None
+    if resolved != root and root not in resolved.parents:
+        return None
+    try:
+        data = yaml.safe_load(resolved.read_text(encoding="utf-8")) or {}
         return data if isinstance(data, dict) else None
     except Exception:
         return None

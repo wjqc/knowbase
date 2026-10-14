@@ -34,6 +34,17 @@ class CandidateErrors:
         return not self.errors
 
 
+def _flatten_strings(value) -> list[str]:
+    """递归展开任意嵌套结构中的字符串（凭据可能藏在 list/dict 里）。"""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for item in value.values() for s in _flatten_strings(item)]
+    if isinstance(value, (list, tuple)):
+        return [s for item in value for s in _flatten_strings(item)]
+    return []
+
+
 def validate_candidate(candidate: dict, *, scope: str = "",
                        repo_path=None) -> CandidateErrors:
     """校验宿主提交的候选经验。
@@ -80,10 +91,17 @@ def validate_candidate(candidate: dict, *, scope: str = "",
     elif not evidence:
         result.warnings.append("无证据引用，建议补充关键证据")
 
-    # 6. 凭据检测
-    full_text = " ".join(str(v) for v in body.values() if isinstance(v, str))
-    if store.SECRET_RE.search(full_text):
-        result.errors.append("body 疑似包含明文密钥，请脱敏")
+    # 6. 凭据检测（body 可能是嵌套结构，须递归展开，否则 list/dict 内的密钥可绕过）
+    leaks = store.find_secrets(body)
+    if leaks:
+        result.errors.append(f"body 疑似包含明文密钥（{leaks[0]}），请脱敏")
+    meta_leaks = store.find_secrets(
+        {k: v for k, v in candidate.items() if k != "body"}
+    )
+    if meta_leaks:
+        result.errors.append(f"候选字段疑似包含明文密钥（{meta_leaks[0]}），请脱敏")
+
+    full_text = " ".join(_flatten_strings(body))
 
     # 7. code_refs 校验
     code_refs = candidate.get("code_refs") or []

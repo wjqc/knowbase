@@ -14,9 +14,10 @@ from .base import DocumentParser, ParsedDocument
 
 class PdfParser(DocumentParser):
     name = "pdf"
+    extensions = (".pdf",)
 
     def supports(self, path: Path) -> bool:
-        return path.suffix.lower() == ".pdf"
+        return path.suffix.lower() in self.extensions
 
     def parse(self, path: Path) -> ParsedDocument:
         from .errors import ParseError

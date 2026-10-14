@@ -23,6 +23,12 @@ def wide_recall(conn, query: str, scope: str, *,
     """
     from .. import index
 
+    query = (query or "").strip()
+    if not query:
+        # 空 query 会让 LIKE 路用 instr(..., '') 命中全部卡片，
+        # 等于绕过 scope 过滤做全库召回，直接短路。
+        return []
+
     results: dict[str, dict] = {}  # id -> best score info
 
     # 路 1: FTS5 词法

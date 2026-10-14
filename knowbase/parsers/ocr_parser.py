@@ -34,9 +34,10 @@ def _check_tesseract_binary() -> str | None:
 
 class OcrParser(DocumentParser):
     name = "ocr"
+    extensions = tuple(IMAGE_EXTENSIONS)
 
     def supports(self, path: Path) -> bool:
-        return path.suffix.lower() in IMAGE_EXTENSIONS
+        return path.suffix.lower() in self.extensions
 
     def parse(self, path: Path) -> ParsedDocument:
         from .errors import ParseError

@@ -5,20 +5,12 @@ MCP 脱敏不能追溯撤销宿主此前收到的内容（§5.3）。
 """
 
 import re
-from pathlib import PurePath
 
-# 凭据模式
-_CREDENTIAL_PATTERNS = [
-    # API keys / tokens: key=value, key: value, "key": "value"
-    re.compile(
-        r'(?i)(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token'
-        r'|bearer|private[_-]?key|client[_-]?secret)\s*[=:]\s*["\']?[^\s"\'<>]{6,}["\']?'
-    ),
-    # AWS-style keys
-    re.compile(r'(?:AKIA|ASIA)[A-Z0-9]{16}'),
-    # Base64-looking tokens after key labels
-    re.compile(r'(?i)(?:key|token|secret)\s*[=:]\s*["\']?[A-Za-z0-9+/=]{20,}["\']?'),
-]
+from ..store import SECRET_PATTERNS
+
+# 凭据模式：与 store.SECRET_PATTERNS 共用同一份规则，
+# 避免"入库拦截"与"发往宿主前脱敏"两处规则漂移导致漏检。
+_CREDENTIAL_PATTERNS = SECRET_PATTERNS
 
 # 个人信息模式
 _PII_PATTERNS = [

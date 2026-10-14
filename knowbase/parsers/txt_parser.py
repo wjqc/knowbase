@@ -14,9 +14,10 @@ from .base import DocumentParser, ParsedDocument
 
 class TxtParser(DocumentParser):
     name = "txt"
+    extensions = (".txt", "")
 
     def supports(self, path: Path) -> bool:
-        return path.suffix.lower() in (".txt", ".log", "") or path.suffix.lower() is None
+        return path.suffix.lower() in self.extensions
 
     def parse(self, path: Path) -> ParsedDocument:
         try:

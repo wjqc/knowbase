@@ -1,6 +1,15 @@
-"""文档解析器注册表和格式检测。
+"""文档解析入口（M4-1）。
 
-M4-1: 统一的文档解析接口，支持多种格式（Markdown、纯文本、HTML、代码文件等）。
+解析实现统一在 knowbase.parsers（registry + 内置 parser）；本模块只保留对外 API：
+
+- ``ParsedDocument``：旧结构（text / meta / segments / format / source_path）
+- ``register_parser()``：允许外部按扩展名覆盖解析行为（优先于内置 parser）
+- ``detect_format()``：格式标识，供 segmenter 策略与下游展示使用
+- ``parse_document()``：统一分发；内置格式委托 knowbase.parsers registry
+- ``list_supported_formats()``：自定义扩展名 + 内置扩展名
+
+新 registry 的 ``ParsedDocument`` 只含 text/meta，segments 由本模块用
+extraction.segmenter 生成（registry 不负责 chunking）。
 """
 
 from dataclasses import dataclass, field
@@ -56,6 +65,7 @@ def detect_format(path: Path) -> str:
         - "javascript": JavaScript 代码
         - "go": Go 代码
         - "java": Java 代码
+        - "pdf" / "docx" / "xlsx" / "pptx" / "image": 二进制或图片文档
         - "unknown": 无法识别
     """
     path = Path(path)
@@ -65,12 +75,15 @@ def detect_format(path: Path) -> str:
     ext_to_format = {
         ".md": "markdown",
         ".markdown": "markdown",
+        ".mdx": "markdown",
         ".txt": "plaintext",
         ".text": "plaintext",
         ".html": "html",
         ".htm": "html",
+        ".xhtml": "html",
         ".py": "python",
         ".pyw": "python",
+        ".pyi": "python",
         ".js": "javascript",
         ".mjs": "javascript",
         ".cjs": "javascript",
@@ -85,19 +98,39 @@ def detect_format(path: Path) -> str:
         ".cxx": "cpp",
         ".cc": "cpp",
         ".hpp": "cpp",
+        ".hxx": "cpp",
+        ".cs": "csharp",
         ".rs": "rust",
         ".rb": "ruby",
         ".php": "php",
+        ".swift": "swift",
+        ".kt": "kotlin",
+        ".kts": "kotlin",
+        ".scala": "scala",
         ".sh": "shell",
         ".bash": "shell",
         ".zsh": "shell",
         ".fish": "shell",
+        ".sql": "sql",
         ".json": "json",
         ".yaml": "yaml",
         ".yml": "yaml",
         ".xml": "xml",
         ".csv": "csv",
         ".log": "log",
+        ".pdf": "pdf",
+        ".docx": "docx",
+        ".xlsx": "xlsx",
+        ".xlsm": "xlsx",
+        ".pptx": "pptx",
+        ".png": "image",
+        ".jpg": "image",
+        ".jpeg": "image",
+        ".gif": "image",
+        ".bmp": "image",
+        ".webp": "image",
+        ".tif": "image",
+        ".tiff": "image",
     }
 
     if ext in ext_to_format:
@@ -156,10 +189,82 @@ def detect_format(path: Path) -> str:
     return "unknown"
 
 
+# 需要按代码结构切分的格式标识（与 knowbase.parsers.code_parser 的语言集合对齐）
+_CODE_FORMATS = frozenset({
+    "python", "javascript", "typescript", "go", "java", "c", "cpp",
+    "csharp", "rust", "ruby", "php", "swift", "kotlin", "scala", "shell", "sql",
+})
+
+# 只有 HTML 的标题来自文档内容；其余内置格式沿用旧契约：标题 = 文件名
+_TITLE_FROM_CONTENT = frozenset({"html"})
+
+
+def _builtin_registry():
+    """内置解析器 registry（幂等注册）。"""
+    from ..parsers import register_builtin, registry
+
+    register_builtin()
+    return registry()
+
+
+def _builtin_extensions() -> set[str]:
+    """内置 parser 声明支持的扩展名。"""
+    exts: set[str] = set()
+
+    for p in _builtin_registry().parsers():
+        for ext in getattr(p, "extensions", ()):
+            if ext:
+                exts.add(ext.lower())
+
+    return exts
+
+
+def _segment_source_format(fmt: str) -> str:
+    """按格式标识选择 segmenter 策略。"""
+    if fmt in ("markdown", "html"):
+        return "markdown"
+    if fmt in _CODE_FORMATS:
+        return "code"
+    return "plaintext"
+
+
+def _adapt(
+    path: Path,
+    fmt: str,
+    parser,
+) -> ParsedDocument:
+    """把 knowbase.parsers 的结果适配成旧 ParsedDocument（含 segments）。"""
+    from .segmenter import segment_text
+
+    parsed = parser.parse(path)
+    meta = dict(parsed.meta)
+    meta.setdefault("title", path.stem)
+
+    if parser.name not in _TITLE_FROM_CONTENT:
+        meta["title"] = path.stem
+
+    meta["parser"] = parser.name
+
+    return ParsedDocument(
+        text=parsed.text,
+        meta=meta,
+        segments=segment_text(
+            parsed.text,
+            source_format=_segment_source_format(fmt),
+        ),
+        format=fmt,
+        source_path=str(path),
+    )
+
+
 def parse_document(path: Path) -> Optional[ParsedDocument]:
     """解析文档。
 
-    根据文件格式分发到对应的解析器。
+    分发顺序：
+    1. 外部通过 register_parser() 注册的解析函数（最高优先级）
+    2. knowbase.parsers 内置 registry（Markdown / HTML / 代码 / 日志 / 纯文本 /
+       PDF / DOCX / XLSX / PPTX / OCR）
+    3. 兜底：按 UTF-8 读取文本
 
     Args:
         path: 文档路径
@@ -175,7 +280,7 @@ def parse_document(path: Path) -> Optional[ParsedDocument]:
     # 检测格式
     fmt = detect_format(path)
 
-    # 查找解析器
+    # 1. 自定义注册表优先
     ext = path.suffix.lower()
     parser = _PARSER_REGISTRY.get(ext)
 
@@ -185,29 +290,33 @@ def parse_document(path: Path) -> Optional[ParsedDocument]:
             doc.format = fmt
             doc.source_path = str(path)
             return doc
-        except Exception as e:
+        except Exception:
             # 解析失败，返回 None
             return None
 
-    # 没有注册的解析器，使用默认解析器（纯文本）
+    # 2. 内置 registry
+    builtin = _builtin_registry().find(path)
+
+    if builtin is not None:
+        try:
+            return _adapt(path, fmt, builtin)
+        except Exception:
+            return None
+
+    # 3. 兜底：纯文本读取
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             text = f.read()
 
         from .segmenter import segment_text
 
-        # 根据格式选择切分策略
-        if fmt == "markdown":
-            segments = segment_text(text, source_format="markdown")
-        elif fmt in ("python", "javascript", "go", "java", "c", "cpp", "rust", "ruby", "php"):
-            segments = segment_text(text, source_format="code")
-        else:
-            segments = segment_text(text, source_format="plaintext")
-
         return ParsedDocument(
             text=text,
             meta={"title": path.stem},
-            segments=segments,
+            segments=segment_text(
+                text,
+                source_format=_segment_source_format(fmt),
+            ),
             format=fmt,
             source_path=str(path),
         )
@@ -216,149 +325,34 @@ def parse_document(path: Path) -> Optional[ParsedDocument]:
 
 
 def list_supported_formats() -> list[str]:
-    """列出所有支持的格式。"""
-    return sorted(set(_PARSER_REGISTRY.keys()))
+    """列出所有支持的扩展名（自定义注册 + 内置 parser）。"""
+    return sorted(set(_PARSER_REGISTRY.keys()) | _builtin_extensions())
 
 
-# ============================================================================
-# HTML 解析器（M4-2）
-# ============================================================================
-
-from html.parser import HTMLParser
+# registry 没有专门 parser、但可以按纯文本兜底解析的扩展名
+TEXT_FALLBACK_EXTENSIONS = frozenset({".json", ".yaml", ".yml", ".xml", ".csv"})
 
 
-class _HTMLContentExtractor(HTMLParser):
-    """HTML 内容提取器。
+def importable_extensions() -> set[str]:
+    """import / extract 的文件发现扩展名集合。
 
-    提取正文内容，去除 script/style/nav 等无关标签。
-    保留标题层级作为 locator。
+    = parser registry 声明的扩展名（内置 + 自定义注册）+ 纯文本兜底扩展名。
+    CLI 与 MCP 共用此集合，避免各自硬编码一份而漏掉新 parser 已支持的格式。
     """
+    return set(list_supported_formats()) | set(TEXT_FALLBACK_EXTENSIONS)
 
-    # 需要跳过的标签
-    SKIP_TAGS = {"script", "style", "nav", "header", "footer", "noscript", "iframe"}
 
-    # 块级标签（会产生换行）
-    BLOCK_TAGS = {
-        "p", "div", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6",
-        "ul", "ol", "li", "table", "tr", "td", "th", "thead", "tbody",
-        "blockquote", "pre", "article", "section", "aside"
-    }
-
-    def __init__(self):
-        super().__init__()
-        self.result = []
-        self.current_tag = ""
-        self.tag_stack = []
-        self.skip_depth = 0
-        self.heading_stack = []  # 当前标题路径
-        self.in_heading = False
-        self.current_heading_level = 0
-
-    def handle_starttag(self, tag, attrs):
-        tag = tag.lower()
-        self.tag_stack.append(tag)
-
-        # 检查是否需要跳过
-        if tag in self.SKIP_TAGS:
-            self.skip_depth += 1
-            return
-
-        if self.skip_depth > 0:
-            return
-
-        # 处理标题
-        if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
-            level = int(tag[1])
-            self.in_heading = True
-            self.current_heading_level = level
-            # 更新标题路径
-            while len(self.heading_stack) >= level:
-                self.heading_stack.pop()
-            self.heading_stack.append("")  # 占位，内容在 handle_data 中填充
-            self.result.append(f"\n{'#' * level} ")
-        elif tag in self.BLOCK_TAGS:
-            self.result.append("\n")
-
-    def handle_endtag(self, tag):
-        tag = tag.lower()
-
-        if tag in self.SKIP_TAGS and self.skip_depth > 0:
-            self.skip_depth -= 1
-            return
-
-        if self.skip_depth > 0:
-            return
-
-        if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
-            self.in_heading = False
-            self.result.append("\n")
-        elif tag in self.BLOCK_TAGS:
-            self.result.append("\n")
-
-        if self.tag_stack and self.tag_stack[-1] == tag:
-            self.tag_stack.pop()
-
-    def handle_data(self, data):
-        if self.skip_depth > 0:
-            return
-
-        text = data.strip()
-        if not text:
-            return
-
-        # 更新当前标题
-        if self.in_heading and self.heading_stack:
-            self.heading_stack[-1] = text
-
-        self.result.append(text)
-
-    def get_text(self) -> str:
-        """获取提取的文本。"""
-        text = "".join(self.result)
-        # 清理多余的换行
-        import re
-        text = re.sub(r'\n{3,}', '\n\n', text)
-        return text.strip()
-
+# ============================================================================
+# HTML 兼容入口（M4-2）
+# ============================================================================
 
 def parse_html(path: Path) -> ParsedDocument:
-    """解析 HTML 文档（M4-2）。
+    """解析 HTML 文档（M4-2 兼容入口）。
 
-    - 提取正文内容（去除 script/style/nav）
-    - 保留标题层级
-    - 表格提取为结构化文本
+    实现已统一到 knowbase.parsers.HtmlParser，本函数只做旧签名与
+    segments 的适配，parse_document() 也走同一个实现。
     """
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        content = f.read()
+    from ..parsers.html_parser import HtmlParser
 
-    extractor = _HTMLContentExtractor()
-    extractor.feed(content)
-    text = extractor.get_text()
-
-    # 提取标题
-    title = ""
-    import re
-    title_match = re.search(r'<title[^>]*>(.*?)</title>', content, re.IGNORECASE | re.DOTALL)
-    if title_match:
-        title = title_match.group(1).strip()
-    else:
-        # 尝试从 h1 提取
-        h1_match = re.search(r'<h1[^>]*>(.*?)</h1>', content, re.IGNORECASE | re.DOTALL)
-        if h1_match:
-            title = re.sub(r'<[^>]+>', '', h1_match.group(1)).strip()
-        else:
-            title = path.stem
-
-    # 切分
-    from .segmenter import segment_text
-    segments = segment_text(text, source_format="markdown")
-
-    return ParsedDocument(
-        text=text,
-        meta={"title": title},
-        segments=segments,
-    )
-
-
-# 注册 HTML 解析器
-register_parser([".html", ".htm"], parse_html)
+    path = Path(path)
+    return _adapt(path, "html", HtmlParser())

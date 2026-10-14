@@ -15,9 +15,10 @@ from .base import DocumentParser, ParsedDocument
 
 class PptxParser(DocumentParser):
     name = "pptx"
+    extensions = (".pptx",)
 
     def supports(self, path: Path) -> bool:
-        return path.suffix.lower() == ".pptx"
+        return path.suffix.lower() in self.extensions
 
     def parse(self, path: Path) -> ParsedDocument:
         from .errors import ParseError

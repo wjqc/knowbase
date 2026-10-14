@@ -170,6 +170,38 @@ def _checksum(sql: str) -> str:
     return hashlib.sha256(sql.encode("utf-8")).hexdigest()[:16]
 
 
+def _statements(sql: str) -> list[str]:
+    """把迁移脚本拆成单条语句。
+
+    不能用 executescript()：它会先提交当前事务，导致
+    「BEGIN IMMEDIATE → 逐条迁移 → 失败整体回滚」失效（前几条 DDL 已落库）。
+    sqlite3.complete_statement 感知字符串字面量与注释，可安全切分。
+    """
+    stmts: list[str] = []
+    buf = ""
+
+    for line in sql.splitlines(keepends=True):
+        buf += line
+        if sqlite3.complete_statement(buf):
+            stmt = buf.strip()
+            if stmt:
+                stmts.append(stmt)
+            buf = ""
+
+    tail = buf.strip()
+    if tail:
+        # 去掉纯注释行后再判断：否则「尾部注释 + 无分号结尾的语句」会被整段当注释丢掉
+        body = "\n".join(
+            line for line in tail.splitlines()
+            if line.strip() and not line.strip().startswith("--")
+        ).strip()
+        if body:
+            # 未以分号结尾的语句执行必然失败，显式报错而不是静默丢弃
+            raise ValueError(f"迁移语句缺少分号结尾: {body[:60]!r}")
+
+    return stmts
+
+
 def pending(conn: sqlite3.Connection) -> list[tuple[int, str]]:
     """返回尚未执行的迁移列表。"""
     conn.execute(MIGRATION_TABLE)
@@ -192,7 +224,8 @@ def apply_all(conn: sqlite3.Connection) -> list[int]:
     try:
         conn.execute("BEGIN IMMEDIATE")
         for version, sql in todo:
-            conn.executescript(sql)
+            for stmt in _statements(sql):
+                conn.execute(stmt)
             cs = _checksum(sql)
             conn.execute(
                 "INSERT INTO schema_migrations(version, applied_at, checksum) VALUES(?,?,?)",

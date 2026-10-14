@@ -157,8 +157,13 @@ def claim(conn, job_id: str, host_session_id: str, *,
           lease_seconds: int = DEFAULT_LEASE_SECONDS) -> dict:
     """原子领取：CAS 设置 lease，返回批次材料和令牌。
 
-    返回 {"batch_id", "materials", "lease_token", "expires_at", "fencing_token", "cursor"}
-    或 {"error": NO_WORK / LEASE_EXPIRED}。
+    返回 {"batch_id", "kind", "scope", "materials", "lease_token", "expires_at",
+    "fencing_token", "cursor"} 或 {"error": NO_WORK / LEASE_EXPIRED}。
+
+    可领取状态：
+    - awaiting_agent：首次领取；
+    - claimed 且租约已过期：换宿主接管（沿用原 attempt）；
+    - retry_wait 且 next_run_at 已到期：退避结束重投（attempt + 1）。
     """
     now = datetime.now(timezone.utc)
     now_str = now.isoformat(timespec="seconds")
@@ -166,27 +171,41 @@ def claim(conn, job_id: str, host_session_id: str, *,
 
     row = conn.execute(
         "SELECT state, lease_owner, lease_until, fencing_token, batch_cursor, "
-        "batch_total, attempt FROM jobs WHERE job_id=?",
+        "batch_total, attempt, kind, scope, next_run_at FROM jobs WHERE job_id=?",
         (job_id,),
     ).fetchone()
     if not row:
         return {"error": "not_found"}
 
-    state, lease_owner, lease_until, fencing, cursor, total, attempt = row
+    (state, lease_owner, lease_until, fencing, cursor, total, attempt,
+     kind, scope, next_run_at) = row
 
-    if state == STATE_AWAITING or (state == STATE_CLAIMED and lease_until and lease_until < now_str):
-        # 可领取（首次或租约过期）
+    lease_expired = bool(lease_until) and lease_until < now_str
+    # next_run_at 为空视为无退避，立即可领（时间戳同为 ISO 字符串，可直接比较）
+    retry_due = state == STATE_RETRY_WAIT and (not next_run_at or next_run_at <= now_str)
+
+    if state == STATE_AWAITING or (state == STATE_CLAIMED and lease_expired) or retry_due:
+        # 可领取（首次、租约过期、退避到期）
         new_fencing = fencing + 1
-        new_attempt = attempt + 1 if state == STATE_AWAITING else attempt
+        # 租约过期只是换宿主，不算新尝试；awaiting / retry 到期是新尝试
+        new_attempt = attempt if state == STATE_CLAIMED else attempt + 1
         lease_token = uuid.uuid4().hex
         batch_id = f"B-{uuid.uuid4().hex[:8]}"
 
-        conn.execute(
+        # CAS：state + fencing_token 未变才写入，避免并发双领
+        cur = conn.execute(
             "UPDATE jobs SET state=?, lease_owner=?, lease_until=?, fencing_token=?,"
-            " attempt=?, updated_at=? WHERE job_id=?",
+            " attempt=?, error=NULL, updated_at=? "
+            "WHERE job_id=? AND state=? AND fencing_token=?",
             (STATE_CLAIMED, f"{host_session_id}:{lease_token}", expires,
-             new_fencing, new_attempt, now_str, job_id),
+             new_fencing, new_attempt, now_str, job_id, state, fencing),
         )
+        if cur.rowcount != 1:
+            conn.rollback()
+            latest = conn.execute(
+                "SELECT state FROM jobs WHERE job_id=?", (job_id,)
+            ).fetchone()
+            return {"error": NO_WORK, "state": latest[0] if latest else "not_found"}
         conn.commit()
 
         # 加载 spool 材料
@@ -198,6 +217,8 @@ def claim(conn, job_id: str, host_session_id: str, *,
 
         return {
             "batch_id": batch_id,
+            "kind": kind,
+            "scope": scope,
             "materials": materials,
             "lease_token": lease_token,
             "expires_at": expires,
@@ -211,6 +232,14 @@ def claim(conn, job_id: str, host_session_id: str, *,
 
     if state == STATE_CLAIMED:
         return {"error": LEASE_EXPIRED, "held_by": lease_owner}
+
+    if state == STATE_RETRY_WAIT:
+        # 退避未到期：明确告知下次可领时间，避免宿主当成无任务而丢弃
+        return {
+            "error": NO_WORK,
+            "state": state,
+            "retry_at": next_run_at,
+        }
 
     return {"error": NO_WORK, "state": state}
 

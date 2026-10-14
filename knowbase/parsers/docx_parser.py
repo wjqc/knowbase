@@ -14,9 +14,10 @@ from .base import DocumentParser, ParsedDocument
 
 class DocxParser(DocumentParser):
     name = "docx"
+    extensions = (".docx",)
 
     def supports(self, path: Path) -> bool:
-        return path.suffix.lower() == ".docx"
+        return path.suffix.lower() in self.extensions
 
     def parse(self, path: Path) -> ParsedDocument:
         from .errors import ParseError

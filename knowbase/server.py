@@ -580,17 +580,22 @@ def job_claim_impl(job_id: str = "", scope: str = "", host_session_id: str = "",
                 return "无待领取任务"
             return f"领取失败：{result['error']}"
 
-        # 构建材料摘要
+        # 构建材料摘要：capture 的材料在 checkpoint.events，
+        # extract 的材料是 segments，二者字段完全不同，必须按 kind 分派
         materials = result.get("materials", {})
-        checkpoint_data = materials.get("checkpoint", {})
-        events = checkpoint_data.get("events", [])
+        kind = result.get("kind", "")
+        job_scope = result.get("scope", "") or materials.get("scope", "")
+        if kind == jobs.KIND_EXTRACT:
+            events = _extract_events(materials, result.get("cursor", 0))
+        else:
+            events = materials.get("checkpoint", {}).get("events", [])
 
         # 宽召回相似卡
         query_text = " ".join(e.get("text", "")[:200] for e in events[:5])
-        similar = recall.wide_recall(conn, query_text, materials.get("scope", ""))
+        similar = recall.wide_recall(conn, query_text, job_scope)
 
         lines = [
-            f"批次 {result['batch_id']}（job={job_id}）",
+            f"批次 {result['batch_id']}（job={job_id}，kind={kind or '?'}）",
             f"lease_token: {result['lease_token']}",
             f"expires_at: {result['expires_at']}",
             f"fencing_token: {result['fencing_token']}",
@@ -600,7 +605,9 @@ def job_claim_impl(job_id: str = "", scope: str = "", host_session_id: str = "",
         ]
         char_count = 0
         for ev in events:
-            entry = f"[{ev.get('role', '?')}] {ev.get('text', '')}"
+            seg_id = ev.get("segment_id", "")
+            prefix = f"[{seg_id}] " if seg_id else f"[{ev.get('role', '?')}] "
+            entry = prefix + ev.get("text", "")
             if char_count + len(entry) > max_chars:
                 lines.append("...（已截断，续租后继续领取）")
                 break
@@ -610,7 +617,7 @@ def job_claim_impl(job_id: str = "", scope: str = "", host_session_id: str = "",
         # M3-4: 添加提炼指引
         lines.append("")
         lines.append("== 提炼指引（v1） ==")
-        lines.append(_build_distillation_guide(events, similar, materials.get("scope", "")))
+        lines.append(_build_distillation_guide(events, similar, job_scope))
 
         if similar:
             lines.append("")
@@ -624,6 +631,29 @@ def job_claim_impl(job_id: str = "", scope: str = "", host_session_id: str = "",
         return "\n".join(lines)
     finally:
         conn.close()
+
+
+def _extract_events(materials: dict, cursor: int = 0) -> list[dict]:
+    """extract 任务的材料是 segments（而非 checkpoint.events）。
+
+    cursor 为已处理片段数，只回传未处理部分；segments 缺失时退化为整段 text，
+    保证旧 spool 数据仍可领取。
+    """
+    segments = materials.get("segments")
+    if not isinstance(segments, list) or not segments:
+        text = materials.get("text", "")
+        return [{"segment_id": "", "role": "material", "text": text}] if text else []
+
+    events = []
+    for seg in segments[cursor:]:
+        if not isinstance(seg, dict):
+            continue
+        events.append({
+            "segment_id": seg.get("segment_id", ""),
+            "role": "material",
+            "text": seg.get("text", ""),
+        })
+    return events
 
 
 def _build_distillation_guide(events: list[dict], similar: list[dict], scope: str) -> str:
@@ -762,7 +792,7 @@ def import_impl(directory: str, scope: str = "global", mode: str = "extract") ->
     """
     from pathlib import Path
     import hashlib
-    from .extraction.parsers import parse_document
+    from .extraction.parsers import importable_extensions, parse_document
 
     rp, err = _repo()
     if err:
@@ -776,9 +806,9 @@ def import_impl(directory: str, scope: str = "global", mode: str = "extract") ->
     if src_dir == rp.resolve() or rp.resolve() in src_dir.parents or src_dir in rp.resolve().parents:
         return "错误：导入目录与记忆库不可互相包含"
 
-    # 支持的文件格式
-    supported = {".md", ".txt", ".html", ".htm", ".py", ".js", ".ts", ".java", ".go",
-                 ".log", ".json", ".yaml", ".yml", ".xml"}
+    # 支持的文件格式统一由 parser registry 决定（Markdown/文本/代码/日志/HTML/
+    # PDF/DOCX/XLSX/PPTX/图片 + 纯文本兜底），与 CLI import 共用同一集合
+    supported = importable_extensions()
     files = [f for f in sorted(src_dir.rglob("*"))
              if f.is_file() and f.suffix.lower() in supported
              and not any(part.startswith(".") for part in f.relative_to(src_dir).parts)

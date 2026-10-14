@@ -179,11 +179,16 @@ def _scope_factor(m: dict, scope: str | None) -> float:
 
 
 def _match_ids(conn: sqlite3.Connection, terms: list[str]) -> dict[str, float] | None:
-    """≥3 字词走 FTS5 MATCH（trigram），返回 {id: 词法分}；不可用返回 None。"""
+    """≥3 字词走 FTS5 MATCH（trigram），返回 {id: 词法分}；不可用返回 None。
+
+    多词查询按 OR 召回后按命中词数加权：真实排障提问常是"主体 + 现象/动作"
+    （如「EasyConnect 断连 排查」），其中任一词命中即应召回，
+    命中越多的排得越前。全 AND 会要求单卡包含全部词，导致召回坍塌。
+    """
     big = [t.replace('"', "") for t in terms if len(t) >= 3]
     if not big:
         return None
-    match = " AND ".join(f'"{t}"' for t in big)
+    match = " OR ".join(f'"{t}"' for t in big)
     try:
         rows = conn.execute(
             "SELECT id, rank FROM mem_fts WHERE mem_fts MATCH ? ORDER BY rank",
@@ -191,15 +196,46 @@ def _match_ids(conn: sqlite3.Connection, terms: list[str]) -> dict[str, float] |
         ).fetchall()
     except sqlite3.OperationalError:
         return None
-    return {r[0]: -r[1] for r in rows} or None
+    if not rows:
+        return None
+    bm25 = {r[0]: -r[1] for r in rows}
+    # 逐词统计命中数，命中词数越多词法分越高（保留 bm25 的相对次序）
+    hit_count: dict[str, int] = {}
+    for term in big:
+        try:
+            sub = conn.execute(
+                "SELECT id FROM mem_fts WHERE mem_fts MATCH ?", (f'"{term}"',)
+            ).fetchall()
+        except sqlite3.OperationalError:
+            continue
+        for r in sub:
+            hit_count[r[0]] = hit_count.get(r[0], 0) + 1
+    if not hit_count:
+        return bm25
+    return {
+        mid: bm25.get(mid, 0.0) * (1.0 + 0.5 * (hit_count[mid] - 1))
+        for mid in hit_count
+    } or None
 
 
 def _like_ids(conn: sqlite3.Connection, terms: list[str]) -> dict[str, float]:
-    """短词 / MATCH 未命中的回退：LIKE 扫描。"""
-    conds = " AND ".join(["(instr(lower(title), lower(?)) > 0 OR instr(lower(tags), lower(?)) > 0 OR instr(lower(body), lower(?)) > 0)"] * len(terms))
-    params = [t for t in terms for _ in range(3)]
-    rows = conn.execute(f"SELECT id FROM mem_fts WHERE {conds}", params).fetchall()
-    return {r[0]: 1.0 for r in rows}
+    """短词 / MATCH 未命中的回退：LIKE 扫描。
+
+    与 _match_ids 同理按命中词数加权，任一词命中即召回。
+    """
+    if not terms:
+        return {}
+    scored: dict[str, float] = {}
+    for t in terms:
+        rows = conn.execute(
+            "SELECT id FROM mem_fts WHERE "
+            "(instr(lower(title), lower(?)) > 0 OR instr(lower(tags), lower(?)) > 0 "
+            "OR instr(lower(body), lower(?)) > 0)",
+            (t, t, t),
+        ).fetchall()
+        for r in rows:
+            scored[r[0]] = scored.get(r[0], 0.0) + 1.0
+    return scored
 
 
 def _fallback_vector(text: str, dim: int = 512) -> list[float]:
@@ -285,10 +321,15 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
     if not terms:
         return []
 
-    lex = _match_ids(conn, terms)
+    # ≥3 字词走 FTS5 MATCH（OR 召回 + 命中词数加权），None 表示不可用/无命中
+    lex = _match_ids(conn, terms) or {}
+    # 2 字及以下短词（如「死锁」）trigram 无法命中，单独 LIKE 召回后并入词法分。
+    # 原实现是在召回后再做「所有短词必须同时出现」的硬闸门，等价于 AND，
+    # 会把「主体 + 现象/动作」型提问整体过滤成空结果。
     short_terms = [t for t in terms if len(t) < 3]
-    if lex is None:
-        lex = _like_ids(conn, terms)
+    if short_terms:
+        for mid, score in _like_ids(conn, short_terms).items():
+            lex[mid] = max(lex.get(mid, 0.0), score * 0.7)
     if not lex:
         # trigram 无命中时整体回退 LIKE（错别字/词形变化兜底）
         lex = _like_ids(conn, terms)
@@ -318,13 +359,6 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
     for m in eligible:
         if m["id"] not in fused:
             continue
-        if short_terms and m["id"] in lex:
-            row = conn.execute(
-                "SELECT title, tags, body FROM mem_fts WHERE id=?", (m["id"],)
-            ).fetchone()
-            hay = " ".join(row).lower() if row else ""
-            if not all(t.lower() in hay for t in short_terms):
-                continue
         score = fused[m["id"]] * _scope_factor(m, scope) \
             * (1.5 if m["confidence"] == "verified" else 1.0) \
             * _freshness_factor(m) * _feedback_factor(m)

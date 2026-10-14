@@ -16,10 +16,10 @@ from .base import DocumentParser, ParsedDocument
 
 class XlsxParser(DocumentParser):
     name = "xlsx"
+    extensions = (".xlsx", ".xlsm")
 
     def supports(self, path: Path) -> bool:
-        s = path.suffix.lower()
-        return s == ".xlsx" or s == ".xlsm"
+        return path.suffix.lower() in self.extensions
 
     def parse(self, path: Path) -> ParsedDocument:
         from .errors import ParseError
