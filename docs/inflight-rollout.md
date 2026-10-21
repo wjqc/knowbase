@@ -31,7 +31,7 @@
 
 首机先用上述配置开启自动检索/本地观察，capture_enabled=false 暂不强制自动入队；原收尾提醒和 Agent 显式的阶段提炼仍可用。完整宿主链路验证后再打开 capture_enabled。不要把只读试用当成全部自动沉淀或三人验收已通过。
 
-正式使用建议安装经过测试的 wheel 到固定运行环境，MCP 与 Hook 同时指向该环境的 Python；避免服务直接运行开发目录的 editable 版本。运行环境仍指向原 repo_path 和同一 memory.db；固定发行包不是第二套知识库。切换前备份配置，回滚时关闭新机制并恢复之前的命令路径。
+正式使用建议安装经过测试的 wheel 到固定运行环境，MCP 与 Hook 同时使用该环境的 `python -I -m knowbase ...`；避免 editable 安装，且用 `-I` 防止工作目录里的同名源码覆盖发行包。运行环境仍指向原 repo_path 和同一 memory.db；固定发行包不是第二套知识库。切换前备份配置，回滚时关闭新机制并恢复之前的命令路径。
 
 宿主接线见 [ZCode](hosts/zcode.md)、[Claude Code](hosts/claude.md)；Trae 使用[主动工作流规则](trae-rules.md)。
 

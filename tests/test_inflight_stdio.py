@@ -16,8 +16,9 @@ from knowbase import config, store
 def test_registered_mcp_pipeline_creates_and_consumes_knowledge(memory_repo):
     async def probe():
         interpreter = os.environ.get("KNOWBASE_STDIO_INTERPRETER", sys.executable)
-        parameters = StdioServerParameters(command=interpreter, args=["-m", "knowbase", "serve"],
-            cwd=str(memory_repo.parent) if "KNOWBASE_STDIO_INTERPRETER" in os.environ else str(Path(__file__).resolve().parents[1]), env={
+        server_args = ["-I", "-m", "knowbase", "serve"] if "KNOWBASE_STDIO_INTERPRETER" in os.environ else ["-m", "knowbase", "serve"]
+        parameters = StdioServerParameters(command=interpreter, args=server_args,
+            cwd=str(Path(__file__).resolve().parents[1]), env={
                 "KNOWBASE_CONFIG": str(config.CONFIG_PATH), "KNOWBASE_REPO_PATH": str(memory_repo),
                 "KNOWBASE_AGENT_NAME": "stdio-probe"})
         async with stdio_client(parameters) as (read, write):

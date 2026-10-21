@@ -780,3 +780,11 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - 原生ZCode设置页核对6 Hook，MCP现有服务已完成off/on刷新并恢复启用，未改审批模式/未发会话消息。普通提炼仍未验收。
 - 完工审计记录C1非阻塞同步、C2采纳链、C3版本/任务反馈、C4安全导出缺口。继续原目标，不能提前以等人验收代替本地待实施项。
 - 准备0.2.0rc1固定wheel运行环境，保持一份业务库，后续源码开发与已运行服务隔离。
+
+### 2026-10-22 固定版本试用部署
+- 本地提交32ad7f0，包版本0.2.0rc1；wheel 43个模块与已提交源逐字节匹配，SHA256=5c8388bd0ce514f88677635ffc6dc38b55755507417afa5558241ef827b2f85a。
+- 固定环境 ~/.knowbase/runtime/releases/32ad7f0/venv 以已测试依赖版本约束安装；-I运行导入来自site-packages，不受源码工作目录覆盖。正式stdio通过1项installed-wheel smoke。
+- 四配置文件已备份并更新：ZCode 7处、Claude MCP 1处、Claude hooks 7处、Trae MCP 1处；没有修改审批模式或新增模型配置。配置备份在该release/config-backup。
+- 真实 core 配置开启检索/观察试用，capture_enabled=false；显式阶段capture引用观察仍可用，旧收尾提醒保留但不强制自动入队。医生核对191/191索引与embedding，待办0；普通网络fetch仍有超时告警，受限手动同步成功不等于网络永久修复，C1需继续。
+- Mac锁屏，CUA无法复核新路径的连接；未尝试绕过锁屏，已发解锁请求。manifest=pilot-configured/native_ui_pending，不标整个E4/E5通过。
+- 当前源码仅docs/test的-I部署说明待提交，产品模块保持32ad7f0固定发行版本；下一批C1–C4在隔离工作树继续，避免源码开发影响仍缓存旧路径的客户端。

@@ -101,4 +101,6 @@
 
 当前批次：收敛0.2.0rc1固定运行包并完成本机检索/观察试用，随后继续 C1→C2/C3→C4。源码后续开发不能直接改变已部署运行版本。新接口仍共用原库、原队列、宿主模型和既有写入服务。
 
-本地最近全套401 passed/1 skipped；预发布打包与固定环境smoke待完成。异步协作问题尚无回复，不视为许可或验收通过；但C1–C4可独立实施，不能据此标整个目标blocked。
+本地最近全套401 passed/1 skipped；0.2.0rc1 wheel 已构建，43模块与提交32ad7f0逐字节核对；固定环境在源码工作目录下以-I启动的stdio smoke通过。异步协作问题尚无回复，不视为许可或验收通过；但C1–C4可独立实施，不能据此标整个目标blocked。
+
+本机试用已配置：原库不变，ZCode/Claude/Trae 的MCP和Hook均指向 ~/.knowbase/runtime/releases/32ad7f0/venv/bin/python，以-I启动；enabled=true、capture_enabled=false。界面最终复核被Mac锁屏阻断，已请求用户解锁；不绕过登录/审批。后续开发转隔离工作树，继续C1–C4，不能把预览包当完整目标完成。
