@@ -241,6 +241,16 @@ MIGRATIONS: list[tuple[int, str]] = [
     (15, """
     ALTER TABLE sync_lease ADD COLUMN target_hash TEXT NOT NULL DEFAULT '';
     """),
+    (16, """
+    CREATE TABLE knowledge_uses(
+      use_id TEXT PRIMARY KEY,host_profile TEXT NOT NULL,session_id TEXT NOT NULL,
+      event_id TEXT NOT NULL,payload_hash TEXT NOT NULL,context_event_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,task_revision TEXT NOT NULL,scope TEXT NOT NULL,
+      memory_id TEXT NOT NULL,content_revision TEXT NOT NULL,state TEXT NOT NULL,
+      current_version INTEGER NOT NULL,created_at TEXT NOT NULL,
+      UNIQUE(host_profile,session_id,event_id));
+    CREATE INDEX knowledge_uses_task ON knowledge_uses(host_profile,session_id,task_id,memory_id,content_revision);
+    """),
 ]
 
 

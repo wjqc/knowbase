@@ -38,6 +38,8 @@ def session_start() -> str:
         "4. stale/once 状态的记忆采信前先在当前环境验证。\n"
         "5. 执行中进入新子任务/模块、发现新错误、重要决策前，调用 memory_context 提交本阶段主题和具体查询；"
         "无需等待下一条用户消息。长方案逐阶段查，不整篇只查一次；阶段完成同时检查技术经验与业务规则。\n"
+        "候选实际参考/采纳/无关/待验证时调用 memory_use，沿用实际 session_id/host_profile，"
+        "context_event_id 指向返回该卡的检索event_id，并携带 id/content_revision；不要命中即helpful。\n"
         "已开启观察的会话可用 memory_capture(session_id,scope,host_profile) 直接抓取持久化增量，无需重新复制长原文。\n"
         "6. 提炼使用 memory_job_claim(protocol_version=2)，材料未读完用 memory_job_material 续页；"
         "候选注明 type/title/scope/八项 body/segment_ids/evidence_refs，业务规则含 provenance 和 rule_context；"

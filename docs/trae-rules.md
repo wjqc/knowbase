@@ -15,6 +15,7 @@
 5. standard / preference / bizrule 保存时强制进 staging 待人审；正式规则 Agent 不可 memory_update，人工使用 promote/revise CLI；
 6. body 里不要出现明文密钥。
 7. 长任务先列目标、约束、子任务；进入新子任务、新错误和重要决策前主动调用 memory_context，
+   对实际候选调用 memory_use 记录 referenced/adopted/irrelevant/unverified；context_event_id 是返回该卡的检索事件，沿用会话、host_profile与content_revision。需要任务关联的全文读取时，memory_read 同时传 session_id/event_id/context_event_id/host_profile，得到独立阅读回执；不把命中或阅读自动变成helpful。
    指定 session_id/event_id/scope/stage/topics（当前主题+短查询），不要等下一条用户输入。
 8. 阶段结束同时识别技术经验及业务规则。材料较多时 memory_capture → memory_job_claim(protocol_version=2)，
    has_more 时 memory_job_material 续页；查重、按八项结构 memory_job_submit 后核对实际 memory_id/保存状态。

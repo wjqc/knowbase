@@ -89,6 +89,7 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                 and ((scope and scope != "global") or project_path)):
             prior = None
         result = {"event_id": event_id, "capability_mode": options.get("mode", "assisted"),
+                  "task_id":task_id or session_id,"task_revision":task_revision or (prior[1] if prior else ""),
                   "attribution": {"host_profile": host, "member_label": options.get("member_label", "unknown"),
                                   "device_label": options.get("device_label", "unknown")},
                   "retrieval_status": "no_hit", "candidates": [], "next_topics": [],
