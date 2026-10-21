@@ -33,8 +33,9 @@ def session_start() -> str:
         "新卡正文须含八项小节：结论/解决的问题/适用条件/不适用条件/可执行动作/关键证据/验证情况/未知与待确认；"
         "业务规则的代码定位写入 code_refs 字段；"
         "整篇文档等原始材料不入 memory_save，走 CLI knowbase import 导入为 source；\n"
-        "3. 按记忆行动或验证后 → 必须回填 memory_feedback（helpful/not_helpful/outdated/incorrect）；"
-        "once→verified 晋升与 active→stale 淘汰只认反馈，不回填状态机不转；\n"
+        "3. 按记忆行动并验证任务结果后回填 memory_feedback（helpful/not_helpful/outdated/incorrect），"
+        "携带expected_content_revision、memory_use的use_id、稳定task_outcome_id；同一结果重试不换结果ID。"
+        "旧调用仅记未绑定观察，不驱动晋升/淘汰；工具标签不是人工身份；\n"
         "4. stale/once 状态的记忆采信前先在当前环境验证。\n"
         "5. 执行中进入新子任务/模块、发现新错误、重要决策前，调用 memory_context 提交本阶段主题和具体查询；"
         "无需等待下一条用户消息。长方案逐阶段查，不整篇只查一次；阶段完成同时检查技术经验与业务规则。\n"
@@ -95,6 +96,14 @@ def user_prompt(prompt: str) -> str:
     # 矛盾知识只供主动调查，不自动建议采用。
     hits = [h for h in hits if not any(r.get("type") == "contradicts"
             for r in (store.load(rp, h["id"])[0] or {}).get("relations", []))]
+    from .mutations import _compute_revision
+    version_safe = []
+    for hit in hits:
+        meta,body,_=store.load(rp,hit["id"])
+        if meta and (not meta.get("verified_content_revision") or
+                     meta["verified_content_revision"]==_compute_revision(meta,body)):
+            version_safe.append(hit)
+    hits = version_safe
     hits = hits[:MAX_HITS]
     index.record_search(conn, prompt, scope, hits, tool="auto_search")
     conn.close()
@@ -206,7 +215,7 @@ def stop_event(session_id: str, transcript_path: str, *, allow_enqueue: bool = T
             "[knowbase] 本次会话读取过记忆但未回填使用反馈。"
             "请对实际参考/采纳的条目调用 "
             "memory_feedback(id, helpful/not_helpful/outdated/incorrect)——"
-            "once→verified 晋升与 active→stale 淘汰只认反馈，缺反馈的记忆会永远停在低置信状态。"
+            "同时携带expected_content_revision、memory_use返回的use_id和稳定task_outcome_id。"
             "若读过的条目均未采纳，直接回复'未采纳，无需回填'结束。"
             "本提醒每次会话最多出现一次。"
         )

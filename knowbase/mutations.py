@@ -62,6 +62,7 @@ def _compute_governance_revision(meta: dict) -> str:
         "status": meta.get("status", ""),
         "confidence": meta.get("confidence", ""),
         "last_verified": meta.get("last_verified", ""),
+        "verified_content_revision": meta.get("verified_content_revision", ""),
         "helpful_count": meta.get("helpful_count", 0),
         "unhelpful_count": meta.get("unhelpful_count", 0),
     }
@@ -210,6 +211,12 @@ def update_card(repo: Path, conn, mid: str, *,
 
     # 重新计算 revision
     new_content_rev = _compute_revision(meta, body)
+    if new_content_rev != current_content_rev:
+        meta["confidence"] = "once"
+        meta["last_verified"] = ""
+        meta["verified_content_revision"] = ""
+        meta["helpful_count"] = 0
+        meta["unhelpful_count"] = 0
     new_gov_rev = _compute_governance_revision(meta)
 
     # 写文件

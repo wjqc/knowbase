@@ -25,7 +25,7 @@ def test_registered_mcp_pipeline_creates_and_consumes_knowledge(memory_repo):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 registered = {tool.name for tool in (await session.list_tools()).tools}
-                assert {"memory_context", "memory_job_material", "memory_job_submit"} <= registered
+                assert {"memory_context", "memory_job_material", "memory_job_submit", "memory_use"} <= registered
                 async def call(name, arguments):
                     result = await session.call_tool(name, arguments)
                     assert not result.isError, result
@@ -56,5 +56,15 @@ def test_registered_mcp_pipeline_creates_and_consumes_knowledge(memory_repo):
                     "topics": [{"topic_id": "stage-two", "queries": ["订单 撤回 结算"], "status": "active"}]}))
                 assert mid in [card["id"] for card in context["candidates"]]
                 assert "结算状态" in await call("memory_read", {"id": mid})
+                card=next(card for card in context["candidates"] if card["id"]==mid)
+                use=json.loads(await call("memory_use",{"session_id":"stdio-s1","event_id":"adopt-phase-2",
+                    "context_event_id":"phase-2","id":mid,"content_revision":card["content_revision"],"state":"adopted"}))
+                assert use["feedback_recorded"] is False
+                feedback=await call("memory_feedback",{"id":mid,"outcome":"helpful",
+                    "expected_content_revision":card["content_revision"],"use_id":use["use_id"],
+                    "task_outcome_id":"controlled-protocol-verification","request_id":"stdio-feedback"})
+                assert "已记录反馈" in feedback
+                # 仅为隔离协议样本，不冒充真实业务质量或独立人工验收。
+                assert store.load(memory_repo,mid)[0]["helpful_count"]==1
                 assert store.load(memory_repo, mid)[0]["confidence"] == "once"
     asyncio.run(asyncio.wait_for(probe(), timeout=30))

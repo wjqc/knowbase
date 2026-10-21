@@ -805,3 +805,10 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - v16新增本机knowledge_uses，memory_use只接受已实际递送候选，记录referenced/adopted/irrelevant/unverified并关联任务、方案版本和卡内容版本；read可选会话绑定独立阅读回执。工具/host标签只作归因，不声明真实人数。
 - 改版后拒绝旧内容采纳；未验证/无关可记录旧版本并标current_version=false；并发同事件只存一条，不同payload冲突。检索/阅读/采纳都不自动产生helpful。
 - 定向25 passed（消费反例、context、正式stdio、迁移/分页）。固定rc1未部署此新接口，C3继续实现版本和任务结果反馈，C4继续统计导出。
+
+### C3 版本与任务结果反馈
+- v17 feedback_events/feedback_requests共用原库，反馈绑定expected_content_revision/use_id/task_outcome_id。同版本同任务结果换请求/工具仍只应用一次，请求别名重用不同payload冲突。
+- 旧调用保留legacy_unbound观察及原反馈日志，不改变状态或有效验证计数；human前缀不再作为人工权限。可信人工确认继续CLI verify。历史日志未重写。
+- 内容更新/人工revise清除旧版本验证；新晋升和人工verify保存verified_content_revision，自动建议核对版本。旧版本反馈只可重放已有回执，不验证新内容。
+- 写前持久反馈回执，文件before/after哈希核对及索引/日志事务恢复；模拟文件写前/写后中断均不重复累加。回执恢复后可补当前版本Git提交，不提交已改版的旧结果。
+- 定向44 passed；全套424 passed/1 skipped（39.94s），包括真实stdio消费/反馈及更新后的旧脚本回归。首次全套的3个旧合同断言已修正：调用重试计数仍保留，治理测试改用版本/任务绑定协议。固定rc1与真实schema14不变。

@@ -168,8 +168,8 @@ def read_impl(id: str, session_id: str = "", event_id: str = "",
         head += f" ｜ governance_revision={gov_rev}"
     if read_receipt:
         head += f" ｜ read_use_id={read_receipt['use_id']}"
-    head += (f" ｜ 采纳/验证后请回填 memory_feedback(id, helpful/not_helpful/outdated/incorrect)"
-             f"——晋升与淘汰只认反馈\n\n")
+    head += (" ｜ 参考/采纳先memory_use；验证后memory_feedback携带expected_content_revision、use_id、"
+             "稳定task_outcome_id——本版本反馈用于晋升与淘汰；旧调用仅保留观察\n\n")
     refs = []
     for ref in meta.get("code_refs") or []:
         location = f"{ref.get('repo', '')} {ref.get('path', '')}"
@@ -228,7 +228,8 @@ def search_impl(query: str, type: str | None = None, scope: str | None = None,
 
 def feedback_impl(id: str, outcome: str, context: str = "",
                   expected_governance_revision: str = "",
-                  request_id: str = ""):
+                  request_id: str = "", expected_content_revision: str = "",
+                  use_id: str = "", task_outcome_id: str = ""):
     """记录反馈（L1: 使用 commit_adapter 带 governance_revision 检查）。"""
     from . import commit_adapter
 
@@ -247,6 +248,8 @@ def feedback_impl(id: str, outcome: str, context: str = "",
             expected_governance_revision=expected_governance_revision,
             request_id=request_id,
             lock_timeout=cfg.get("lock_timeout", 10.0),
+            expected_content_revision=expected_content_revision,
+            use_id=use_id,task_outcome_id=task_outcome_id,
         )
 
         # 处理适配器返回
@@ -260,16 +263,26 @@ def feedback_impl(id: str, outcome: str, context: str = "",
             return f"错误：{result['error']}"
 
         events = result.get("events", [])
-        meta, body, path = store.load(rp, id)
-        staging = "staging" in str(path)
+        # 调用次数包含重试；实际结果回执/治理计数只应用一次。
         index.record_usage(conn, "feedback", id, f"{outcome} {context}".strip())
-        gw = _post_save(rp, cfg, meta, body, path, staging,
-                        f"feedback({id}): {outcome} by {by}")
+        sync_current = False
+        gw = None
+        if result.get("governance_applied"):
+            with RepoLock(rp,cfg.get("lock_timeout",10)):
+                meta,body,path=store.load(rp,id)
+                from .mutations import _compute_revision,_compute_governance_revision
+                # 落盘后崩溃重试仍能补提交；旧回执不得提交已经改版的内容。
+                if (meta and _compute_revision(meta,body)==result["content_revision"] and
+                        _compute_governance_revision(meta)==result["governance_revision"]):
+                    sync_current = True
+                    gw = _post_save(rp, cfg, meta, body, path, path.parent.name=="staging",
+                                    f"feedback({id}): {outcome} by {by}")
     finally:
         conn.close()
 
-    pw = _push_after_write(rp, cfg, gw)
-    out = [f"已记录反馈：{id} ← {outcome}（by {by}）"] + events
+    pw = _push_after_write(rp, cfg, gw) if sync_current else None
+    suffix = "（幂等恢复，不重复治理计数）" if result.get("idempotent") else ""
+    out = [f"已记录反馈：{id} ← {outcome}（by {by}）"+suffix] + events
     if gw:
         out.append(gw)
     if pw:
@@ -800,7 +813,7 @@ mcp.tool(name="memory_save", description="保存一条经验记忆。standard/pr
 mcp.tool(name="memory_update", description="修改已有记忆的内容/标签/关系。confidence 与 status 由服务端状态机管理，不接受指定")(update_impl)
 mcp.tool(name="memory_read", description="按 id 读取记忆全文（自动累计 hit_count）")(read_impl)
 mcp.tool(name="memory_search", description="检索经验记忆：任务开始涉及具体项目/系统/报错时先调用。检索词建议 ≥3 字的具体名词或报错关键词")(search_impl)
-mcp.tool(name="memory_feedback", description="按记忆行动后回填结果：helpful/not_helpful/outdated/incorrect。驱动经验晋升与淘汰")(feedback_impl)
+mcp.tool(name="memory_feedback", description="验证任务结果后回填helpful/not_helpful/outdated/incorrect；携带expected_content_revision、memory_use返回的use_id、稳定task_outcome_id。按卡版本+任务结果去重。旧调用仅保留未绑定观察，不改变治理状态")(feedback_impl)
 mcp.tool(name="memory_context", description="执行中知识检索：拆解长方案后、进入子任务、新错误和重要决策前调用；提供当前主题与查询，阶段结束检查技术经验及业务规则待办")(context_impl)
 mcp.tool(name="memory_use", description="记录已递送候选的实际使用状态：referenced参考/adopted采纳/irrelevant无关/unverified待验证。沿用memory_context的会话、event_id和卡片版本；不自动生成helpful。返回use_id供任务结果反馈使用")(use_impl)
 mcp.tool(name="memory_stats", description="记忆库统计：数量分布、使用漏斗、TOP 记忆")(stats_impl)

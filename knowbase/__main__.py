@@ -325,8 +325,15 @@ def cmd_revise(mid: str, body_file: str, title: str | None = None,
         if path.parent.name == "staging":
             print(f"错误：{mid} 仍在 staging，请使用 memory_update 后再 promote")
             return 1
+        prior_content_revision = _compute_revision(meta,_old_body)
+        if expect_revision and expect_revision != prior_content_revision:
+            print("错误：版本冲突（等待写锁期间内容已变化），未修改。")
+            return 1
         if title is not None:
             meta["title"] = title.strip()
+        if _compute_revision(meta,new_body) != prior_content_revision:
+            meta.update(confidence="once",last_verified="",verified_content_revision="",
+                        helpful_count=0,unhelpful_count=0)
         meta["updated"] = date.today().isoformat()
         errs = store.lint(meta, new_body, rp)
         if errs:

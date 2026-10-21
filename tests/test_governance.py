@@ -53,7 +53,14 @@ index.record_search(conn,'</script><img src=x onerror=alert(1)>','demo',[])
 conn.close()
 out=generate(config.repo_path(),tmp/'dashboard.html')
 assert '</script><img' not in out.read_text()
-feedback_impl(mid,'incorrect')
+from knowbase.server import context_impl,use_impl
+ctx=json.loads(context_impl(session_id='gov-negative',event_id='lookup',scope='demo',host_profile='governance',
+    current_goal='AlphaUnique 工程部署'))
+card=next(c for c in ctx['candidates'] if c['id']==mid)
+used=json.loads(use_impl(session_id='gov-negative',event_id='use',context_event_id='lookup',id=mid,
+    content_revision=card['content_revision'],state='referenced',host_profile='governance'))
+feedback_impl(mid,'incorrect',expected_content_revision=card['content_revision'],use_id=used['use_id'],
+    task_outcome_id='checked-invalid')
 assert hooks.user_prompt('AlphaUnique 工程部署')==''
 assert '未命中' in search_impl('AlphaUnique',scope='demo')
 assert mid in search_impl('AlphaUnique',scope='demo',include_inactive=True)

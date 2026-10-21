@@ -107,20 +107,30 @@ row = conn.execute("SELECT hit_count FROM meta WHERE id=?", (pid,)).fetchone()
 check("read 计数", row[0] >= 1, str(row))
 conn.close()
 
-# 10. feedback：A helpful（1 工具，不晋升）→ B helpful（跨 2 工具，晋升 verified）
+# 10. 两个绑定内容版本及任务结果的 helpful，跨工具标签晋升（不代表独立人数）
+def feedback_binding(mid,task):
+    import json
+    from knowbase.server import context_impl,use_impl
+    meta,_,_=store.load(rp,mid)
+    ctx=json.loads(context_impl(session_id=task,event_id="lookup",scope=meta["scope"],
+        host_profile="e2e",current_goal=meta["title"]))
+    card=next(c for c in ctx["candidates"] if c["id"]==mid)
+    use=json.loads(use_impl(session_id=task,event_id="adopt",context_event_id="lookup",id=mid,
+        content_revision=card["content_revision"],state="adopted",host_profile="e2e"))
+    return dict(expected_content_revision=card["content_revision"],use_id=use["use_id"],task_outcome_id="validated-result")
 os.environ["KNOWBASE_AGENT_NAME"] = "claude-code"
-r = feedback_impl(pid, "helpful", "避坑成功")
+r = feedback_impl(pid, "helpful", "避坑成功",**feedback_binding(pid,"e2e-task-a"))
 check("feedback A", "已记录反馈" in r, r)
 meta, _, _ = store.load(rp, pid)
 check("单工具不晋升", meta["confidence"] == "once", str(meta["confidence"]))
 
 os.environ["KNOWBASE_AGENT_NAME"] = "cursor"
-r = feedback_impl(pid, "helpful", "跨工具同样有效")
+r = feedback_impl(pid, "helpful", "跨工具同样有效",**feedback_binding(pid,"e2e-task-b"))
 meta, _, _ = store.load(rp, pid)
 check("跨工具晋升 verified", meta["confidence"] == "verified" and meta["last_verified"], r)
 
 # 11. outdated → stale
-r = feedback_impl(pid, "outdated", "客户端已升级 8.x")
+r = feedback_impl(pid, "outdated", "客户端已升级 8.x",**feedback_binding(pid,"e2e-task-c"))
 meta, _, _ = store.load(rp, pid)
 check("outdated → stale", meta["status"] == "stale", r)
 

@@ -10,7 +10,7 @@
    如 "EasyConnect 死锁"、"Docker 镜像加速"），命中后先 memory_read 再动手；
 2. 任务结束：产生了踩坑（现象/原因/正确做法）、技术决策、固化流程、用户约束 → memory_save；
    返回"已存在相似记忆"时改用 memory_update；
-3. 按某条记忆解决问题（或发现它失效）→ memory_feedback 回填 helpful / not_helpful / outdated / incorrect；
+3. 按某条记忆实际行动并验证任务结果后，memory_feedback 回填 helpful / not_helpful / outdated / incorrect，携带 expected_content_revision、memory_use 返回的 use_id、稳定 task_outcome_id。旧调用只保留未绑定观察，不改变治理；重试同一结果保持ID。正文变化后旧反馈不能验证新版本，工具标签不代表真实人数；
 4. stale / once 状态的记忆采信前先在当前环境验证；不要整读 INDEX.md，检索一律走 memory_search；
 5. standard / preference / bizrule 保存时强制进 staging 待人审；正式规则 Agent 不可 memory_update，人工使用 promote/revise CLI；
 6. body 里不要出现明文密钥。

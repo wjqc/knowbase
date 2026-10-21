@@ -45,6 +45,8 @@ def _candidate(repo, mid, scope, automatic, timeout):
         if (not meta or path.parent.name == "staging" or meta.get("type") == "reference"
                 or meta.get("status") != "active" or meta.get("scope") not in (scope,"global")
                 or (automatic and meta.get("confidence") != "verified")
+                or (automatic and meta.get("verified_content_revision") and
+                    meta["verified_content_revision"]!=_compute_revision(meta,body))
                 or any(r.get("type")=="contradicts" for r in meta.get("relations",[]))):
             return None
         return {"id":mid,"scope":meta["scope"],"content_revision":_compute_revision(meta,body),

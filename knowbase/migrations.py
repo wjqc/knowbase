@@ -251,6 +251,19 @@ MIGRATIONS: list[tuple[int, str]] = [
       UNIQUE(host_profile,session_id,event_id));
     CREATE INDEX knowledge_uses_task ON knowledge_uses(host_profile,session_id,task_id,memory_id,content_revision);
     """),
+    (17, """
+    CREATE TABLE feedback_events(
+      receipt_id TEXT PRIMARY KEY,request_id TEXT NOT NULL,payload_hash TEXT NOT NULL,
+      memory_id TEXT NOT NULL,content_revision TEXT NOT NULL,use_id TEXT NOT NULL,
+      task_key TEXT NOT NULL,task_outcome_id TEXT NOT NULL,agent TEXT NOT NULL,
+      outcome TEXT NOT NULL,binding TEXT NOT NULL,state TEXT NOT NULL,
+      before_hash TEXT NOT NULL,after_hash TEXT NOT NULL,after_meta_json TEXT NOT NULL,
+      result_json TEXT NOT NULL,created_at TEXT NOT NULL);
+    CREATE UNIQUE INDEX feedback_request ON feedback_events(request_id) WHERE request_id<>'';
+    CREATE UNIQUE INDEX feedback_task_result ON feedback_events(memory_id,content_revision,task_key,task_outcome_id)
+      WHERE binding='version_task';
+    CREATE TABLE feedback_requests(request_id TEXT PRIMARY KEY,payload_hash TEXT NOT NULL,receipt_id TEXT NOT NULL);
+    """),
 ]
 
 
