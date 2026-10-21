@@ -73,3 +73,37 @@ def test_registered_mcp_pipeline_creates_and_consumes_knowledge(memory_repo):
                 assert calls["memory_context"]==1 and calls["memory_feedback"]==1
                 assert "memory_metrics" not in calls
     asyncio.run(asyncio.wait_for(probe(), timeout=30))
+
+
+def test_registered_mcp_refresh_observes_peer_card(memory_repo,tmp_path):
+    from test_inflight_refresh import pair,publish
+    peer=pair(memory_repo,tmp_path)
+    mid=publish(peer)
+    async def probe():
+        interpreter=os.environ.get("KNOWBASE_STDIO_INTERPRETER",sys.executable)
+        args=["-I","-m","knowbase","serve"] if "KNOWBASE_STDIO_INTERPRETER" in os.environ else ["-m","knowbase","serve"]
+        params=StdioServerParameters(command=interpreter,args=args,
+            cwd=str(Path(__file__).resolve().parents[1]),env={"KNOWBASE_CONFIG":str(config.CONFIG_PATH),
+                "KNOWBASE_REPO_PATH":str(memory_repo),"KNOWBASE_AGENT_NAME":"stdio-refresh"})
+        async with stdio_client(params) as (read,write):
+            async with ClientSession(read,write) as session:
+                await session.initialize()
+                loop=asyncio.get_running_loop();deadline=loop.time()+15
+                attempt=0
+                delivered=False
+                while loop.time()<deadline:
+                    started=loop.time()
+                    result=await session.call_tool("memory_context",{"session_id":"peer-refresh",
+                        "event_id":f"stage-{attempt}","scope":"orders","current_goal":"SSE 断线"})
+                    context=json.loads(result.content[0].text)
+                    if attempt==0:
+                        assert loop.time()-started<2,"检索不应等待网络刷新"
+                    delivered = delivered or mid in [card["id"] for card in context.get("candidates",[])]
+                    if delivered and context["freshness"]["stale"] is False:
+                        full=await session.call_tool("memory_read",{"id":mid})
+                        assert "消息序号" in full.content[0].text
+                        return
+                    attempt+=1
+                    await asyncio.sleep(0.1)
+                raise AssertionError("后台刷新未把同事卡送达正式MCP检索")
+    asyncio.run(asyncio.wait_for(probe(),timeout=25))
