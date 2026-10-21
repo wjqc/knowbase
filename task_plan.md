@@ -90,6 +90,8 @@
 
 ## 执行中知识使用实施（active goal，2026-10-22 更新）
 
+后续代码开发路径：`/Users/qc/.codex/worktrees/inflight-contracts/knowbase`（codex/inflight-contracts）。生产固定包为32ad7f0/0.2.0rc1，主工作区产品代码暂冻结；C1–C4在隔离工作树实施。
+
 目标完整保留 docs/knowbase-inflight-memory-implementation-plan.md 的 U1–U6、E0–E5；完工核对见 docs/inflight-completion-audit.md，不把预发布/局部绿色测试当全部完成。
 
 - E0：ZCode真实注入/消费局部通过；永久32K输入+6个规则预标注包已交付，待人审；正常提炼、Claude/Trae未真实验收。

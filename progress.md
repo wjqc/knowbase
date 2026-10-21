@@ -788,3 +788,9 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - 真实 core 配置开启检索/观察试用，capture_enabled=false；显式阶段capture引用观察仍可用，旧收尾提醒保留但不强制自动入队。医生核对191/191索引与embedding，待办0；普通网络fetch仍有超时告警，受限手动同步成功不等于网络永久修复，C1需继续。
 - Mac锁屏，CUA无法复核新路径的连接；未尝试绕过锁屏，已发解锁请求。manifest=pilot-configured/native_ui_pending，不标整个E4/E5通过。
 - 当前源码仅docs/test的-I部署说明待提交，产品模块保持32ad7f0固定发行版本；下一批C1–C4在隔离工作树继续，避免源码开发影响仍缓存旧路径的客户端。
+
+### 控制记录：后续开发已隔离
+- 后续源码位于 /Users/qc/.codex/worktrees/inflight-contracts/knowbase（codex/inflight-contracts），开发env/私有测试快照与生产分离；基线401 passed/1 skipped。
+- 本机预览包路径 /Users/qc/.knowbase/runtime/releases/32ad7f0/knowbase-0.2.0rc1-py3-none-any.whl，安装的43模块与产品提交匹配；固定解释器和-I启动确保不加载工作目录源码。
+- 三客户端共用原默认配置/数据根已逐项核对；试用enabled=true/capture_enabled=false，explicit阶段捕获/原收尾提醒保留。新路径原生复核需解锁Mac，未越过锁屏/审批。
+- 下一轮在隔离工作树推进C1–C4，全部目标仍active；人工样本签核、真实宿主提炼与三人实际消费未冒充完成。
