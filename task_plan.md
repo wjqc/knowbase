@@ -88,32 +88,17 @@
 43. 同步独立知识文档并提交必要变更（完成：knowledge commit 92187b1；保留其他既有未跟踪内容）
 
 
-## 执行中知识使用实施（2026-10-21，active goal）
+## 执行中知识使用实施（active goal，2026-10-22 更新）
 
-目标：完整执行 docs/knowbase-inflight-memory-implementation-plan.md，保留 U1–U6 的真实验收，不以局部测试代替宿主/团队验收。
-- E0 宿主能力探针、冻结基线与独立样本：in_progress。codegraph 未初始化，转直接源码；pytest 基线运行中。
-- E1 原文保真、分页、片段覆盖与迁移：pending。
-- E2 memory_context 执行中任务检索：pending。
-- E3 技术经验/业务规则候选到真实卡片、恢复：pending。
-- E4 正式 Hook/主动工作流接线：pending。
-- E5 全量回归、升级备份、知识文档、团队试点：pending。
-约束：不用独立模型/第二套 DB/队列；现有 memory.db 不删；不改旧迁移；staging 不自动生效；只有真实运行证据才能标 event_driven。
+目标完整保留 docs/knowbase-inflight-memory-implementation-plan.md 的 U1–U6、E0–E5；完工核对见 docs/inflight-completion-audit.md，不把预发布/局部绿色测试当全部完成。
 
-### 当前批次状态（2026-10-21 实施持续中）
-- E0：宿主文档及 CLI 可执行入口已确认（ZCode 0.17.0）；真实下一步消费探针仍 external_pending。
-- E1：capture 路径已实现保真/分页/租约/manifest/覆盖内核，旧 import 路径和自动 Hook 路径仍需切换；不标整批完成。
-- E2：memory_context 已实现并有独立测试；新主题过预算继续调度、宿主消费/真实事件待完成。
-- E3：共享 writer、候选到卡、规则 staging、提交/应用恢复已实现；需补并发/版本复查/正式 stdio 综合验收。
-- E4/E5：尚未开始正式配置切换、团队试点；不得宣布目标完成。
-下一步：先修复完整回归保留的显示契约，再审查 E3 应用恢复与 E1 import，接入 E4。
+- E0：ZCode真实注入/消费局部通过；永久32K输入+6个规则预标注包已交付，待人审；正常提炼、Claude/Trae未真实验收。
+- E1：材料、分页、游标、旧Hook统一内核、恢复主链路有局部测试。
+- E2：阶段检索/范围绑定/缓存/限频已实现；C1非阻塞刷新与C2采纳链尚待。
+- E3：提炼候选到卡片、staging、恢复、任务覆盖主链路已实现；C3版本和任务反馈契约尚待。
+- E4：ZCode原生页面显示6 Hook，服务已执行关闭/恢复刷新；准备固定发行环境，执行中检索/观察先试用，新增自动入队暂关。未修改审批权限或发送其他会话消息。
+- E5：备份/迁移/双克隆有证据；内网Git已借助现有知识恢复并独立读回（cd332fe）；C4隐私最小化统计导出未实现，三人真实任务/净效果测量待验。
 
-### 本地交付审计（2026-10-21）
-- E0 PARTIAL：ZCode 0.17.0 真实工具事件→候选→后续回复消费通过（预置任务主题夹具）；headless build 的 MCP 被 No permission client configured 拒绝，未更改/绕过许可策略。
-- E1 本地 PASS：完整材料、续页、持久观察、范围游标、压缩后已观察材料恢复、迁移/校验和与旧统计保留。
-- E2 本地 PASS + 宿主递送局部 PASS：14 个正式 MCP 工具注册，memory_context 分阶段/错误查询、预算续做、缓存失效、scope 绑定；任意真实长方案规划未验收。
-- E3 本地/正式 stdio PASS：候选→共享 writer→卡片/索引读回；业务规则 staging、无出处 review；租约/fencing/重放与重复复查；宿主实际自主提炼未验收。
-- E4 PARTIAL：ZCode 用户级三工具事件、Claude 工具事件/PreCompact 均已备份注册；Trae 规则和 MCP instructions 已更新；真实 inflight.enabled 仍 false，等待重连及许可验收。
-- E5 PARTIAL：387 passed, 1 skipped；stdio、双 Git 克隆、备份、真实 schema14、INDEX 派生视图退役验证；191 卡/668 usage/24 feedback 保留。内网 push 返回 Empty reply from server，未推送成功；三人真实任务/净 token/用时测量尚缺。
-- 目标保持 active：已发异步问题请求普通 ZCode 会话配合重连验收，未获回复不视为授权/验收完成。无 live exec 遗留（最终 tests/probe 均已结束）。
+当前批次：收敛0.2.0rc1固定运行包并完成本机检索/观察试用，随后继续 C1→C2/C3→C4。源码后续开发不能直接改变已部署运行版本。新接口仍共用原库、原队列、宿主模型和既有写入服务。
 
-最终本地复核：394 passed, 1 skipped；新增并发背压/Hook-MCP 会话交接/待办限频永久测试。此更新不关闭正常宿主许可、三人业务试点与内网同步门槛。当前没有可据以宣布完整目标完成的证据。
+本地最近全套401 passed/1 skipped；预发布打包与固定环境smoke待完成。异步协作问题尚无回复，不视为许可或验收通过；但C1–C4可独立实施，不能据此标整个目标blocked。

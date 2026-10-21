@@ -178,3 +178,61 @@ def test_hook_query_plan_uses_same_real_session_as_mcp(memory_repo, tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM context_sessions").fetchone()[0] == 1
     assert "withdraw" in conn.execute("SELECT topics_json FROM context_sessions").fetchone()[0]
     conn.close()
+
+
+def test_stage_capture_uses_persisted_source_without_recopying_long_input(memory_repo, tmp_path):
+    enable(memory_repo, tmp_path)
+    # 先保存长用户输入；不再向 memory_capture 重传该文本。
+    text = "阶段需求正文\n" + "背景说明。" * 3000 + "\n尾部规则：已结算订单禁止撤回。"
+    host_events.handle({"session_id": "source-session", "prompt": text, "cwd": str(tmp_path)},
+                       event="user-prompt", style="zcode")
+    from knowbase.server import capture_impl
+    captured = capture_impl(session_id="source-session", scope="orders", host_profile="zcode")
+    assert "已入队" in captured and "已持久化观察" in captured
+    conn = index.connect(memory_repo)
+    job = conn.execute("SELECT job_id FROM jobs").fetchone()[0]
+    payload = materials.payload_for_job(conn, job)
+    assert "".join(s["text"] for s in payload["segments"]) == text
+    conn.close()
+    repeated = capture_impl(session_id="source-session", scope="orders", host_profile="zcode")
+    assert "无新增" in repeated
+
+
+def test_persisted_source_capture_rejects_different_scope(memory_repo, tmp_path):
+    enable(memory_repo, tmp_path)
+    host_events.handle({"session_id": "source-session", "prompt": "订单规则", "cwd": str(tmp_path)},
+                       event="user-prompt", style="zcode")
+    from knowbase.server import capture_impl
+    assert "SCOPE_MISMATCH" in capture_impl(session_id="source-session", scope="other", host_profile="zcode")
+    conn = index.connect(memory_repo)
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+    conn.close()
+
+
+def test_unmapped_project_hint_can_bind_session_without_global_fallback(memory_repo, tmp_path):
+    enable(memory_repo, tmp_path)
+    unknown = tmp_path / "new-project"
+    request = {"session_id": "new-scope", "tool_name": "Read", "cwd": str(unknown), "tool_use_id": "r1"}
+    first = host_events.handle(request, event="tool-before", style="zcode")
+    assert first["error"] == "SCOPE_UNRESOLVED"
+    assert "memory_context" in host_events.render(first)
+    assert "new-scope" in host_events.render(first)
+    from knowbase.server import context_impl
+    binding = json.loads(context_impl(**first["planning_context"], scope="new-project",
+        current_goal="本项目校验", topics=[{"topic_id":"checks","queries":["校验"],"status":"active"}]))
+    assert binding["scope"] == "new-project" and not binding.get("error")
+    later = host_events.handle({**request, "tool_use_id":"r2"}, event="tool-before", style="zcode")
+    assert later["scope"] == "new-project" and not later.get("error")
+
+
+def test_query_observation_pilot_does_not_automatically_enqueue(memory_repo, tmp_path):
+    enable(memory_repo, tmp_path)
+    cfg = json.loads(config.CONFIG_PATH.read_text())
+    cfg["inflight"]["capture_enabled"] = False
+    config.CONFIG_PATH.write_text(json.dumps(cfg))
+    result = host_events.handle(event(tmp_path, tmp_path / "missing"), event="tool-after", style="zcode")
+    assert not result.get("error")
+    conn = index.connect(memory_repo)
+    assert conn.execute("SELECT COUNT(*) FROM context_events WHERE observation_json!='{}'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+    conn.close()

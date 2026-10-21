@@ -29,7 +29,7 @@ DEFAULTS = {
     "stats": {"enabled": True},
     "hooks": {"enabled": True, "inject_min_confidence": "verified"},
     "inflight": {
-        "enabled": False, "mode": "assisted", "protocol_version": 2,
+        "enabled": False, "capture_enabled": True, "mode": "assisted", "protocol_version": 2,
         "checkpoint_work_ops": 6, "checkpoint_minutes": 10,
         "max_queries_per_topic": 3, "max_queries_per_event": 6,
         "max_candidates": 3, "context_token_budget": 800,

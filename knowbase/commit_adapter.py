@@ -378,7 +378,7 @@ def adapter_feedback(repo: Path, conn, mid: str, outcome: str, by: str, *,
             # 更新索引
             staging = "staging" in str(path)
             index.upsert(conn, meta, body, path, staging)
-            index.record_usage(conn, "feedback", mid, f"{outcome}")
+            # 请求次数只在 MCP 入口记录；feedback_log 保留实际应用结果。
 
             # 标记 intent 完成
             _complete_intent(conn, intent_id, f"feedback:{mid}:{outcome}")

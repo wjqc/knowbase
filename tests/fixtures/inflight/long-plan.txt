@@ -1,0 +1,632 @@
+
+
+===== SOURCE: docs/knowbase-inflight-memory-plan.md =====
+# knowbase：Agent 执行中检索与增量沉淀方案
+
+日期：2026-10-21。设计作为实施依据保留；用户已授权实施。
+实现接线：本地内核、MCP 与宿主适配已实施，执行中注入有局部真实证据；自动提炼和团队验收 external_pending。运行验证及迁移记录见 progress.md 和 docs/host-capabilities.md，不以本设计清单代替验收。
+
+本文件细化《三项核心目标实施方案》§5 的执行中使用路径；保留原方案的宿主模型、既有队列、Markdown 卡片、SQLite 和 Git 架构，不启动其尚未确定的数据权威迁移。
+
+实施分解见 [实施方案 v1.0](knowbase-inflight-memory-implementation-plan.md)，包含宿主探针、材料分页、任务检索、技术经验/业务规则成卡、迁移恢复及三人试点。候选提交到真实卡片的断点以实施方案 §2/§7 的新增取证和处理为准。
+
+## 1. 用户结果与约束
+
+目标：用户发出一次长任务后，即使不再发消息，Agent 在进入具体子任务、发现新问题和得到验证结论时，仍能查经验、采用经验、及时沉淀；上下文压缩或进程退出不丢掉尚未整理的证据。
+
+使用率以“该查时查了、相关知识影响了实际行动、值得复用的结论得到处理”为准，不能用增加无效查询、卡片数量或反馈数量达成。
+
+沿用既有设计：Hook 收集事件、轻量检索和递送提醒；当前宿主 Agent 负责理解任务、拆查询、判断适用性和总结；MCP 负责检索、任务状态与写入。knowbase 不新增独立模型服务，不读取宿主密钥。无需新界面，F1–F5 本期不适用。
+
+| 用户任务 | 输入和必要条件 | 合格结果 | 不算完成 |
+|---|---|---|---|
+| 执行长方案 | 可读取的方案、项目 scope、当前子任务 | 当前子任务执行前获得相关约束；后续子任务到达时继续检索 | 整篇原文只查一次；只检索开头几段 |
+| 执行中遇错 | 工具实际结果、错误签名、环境 | 下一次相关尝试前补查经验，核对适用条件 | 错误入队后无人消费；只到下一条用户消息才查询 |
+| 阶段经验沉淀 | 现象、行动、实际验证、来源片段 | 候选经查重保存或明确无候选，下一任务可检索 | 只生成摘要；入队当保存成功；把未实施方案写成验证经验 |
+| 长会话恢复 | 原始片段快照、覆盖清单、持久游标 | 只补未处理部分，重复执行不重复写卡 | 已有一次 save 后忽略剩余会话 |
+
+## 2. 当前事实与缺口
+
+以下是当前源码静态取证，不是运行验收：
+
+- `hooks.py:user_prompt` 在用户消息时检索，直接以原始 prompt 搜索；没有按实施阶段构建查询计划。
+- `_maybe_trigger_mid_session_capture` 从 `cmd_user_prompt` 调用：仍需下一次用户输入；`mid_session_capture` 默认 false，flag 每个会话最多触发一次。仅开启此开关无法覆盖持续执行。
+- `stop_event` 仍以会话是否有过 memory_write 判断漏存；一次 save/update/feedback 可能遮蔽后续尚未沉淀的内容。
+- 已有 `memory_capture → memory_job_claim/renew/submit/status`、jobs 租约和 checkpoint 构建，可复用，不能再建第二套提炼队列。
+- `normalizer.py` 对单事件文本保留到 8,000 字符，部分工具结果更短；`capture_impl` 调用单个 `build_checkpoint`，默认预算 16,000 字符；claim 返回材料还可能被 `max_chars` 截断。需要补齐原文分页和覆盖证明，不能仅把预算调大。
+- 截图和当前配置只确认 SessionStart/UserPromptSubmit/Stop。执行中工具事件、压缩前事件的支持、参数和上下文注入时机，须逐宿主实测，不能把候选事件名直接写成已接通。
+
+## 3. 执行中使用路径
+
+```text
+用户长输入/方案文件
+  → 当前 Agent 提取目标、约束、子任务、风险、待确认项
+  → 保存任务主题及原文定位，按当前阶段制定短查询
+  → 进入子任务前检索 → 读相关卡 → 核验条件 → 影响行动
+  → 工具结果出现新错误/新对象 → 补查 → 验证解决方案
+  → 阶段完成 → 从新增证据提炼 → 查重 → 保存/更新/待审核
+  → 进入下一子任务；压缩和结束仅作最后兜底
+```
+
+### 3.1 两条互补的触发路径
+
+**宿主主动路径（所有能调用 MCP 的宿主均可接入，但执行纪律仍需验证）**：在工作流中要求 Agent 进入子任务、发现新问题、阶段完成时调用下文的 `memory_context`。这是 Agent 在本轮执行中的工具调用，不依赖新用户消息。SessionStart 只负责一次性下发协议和恢复待办；不能承担全过程执行。
+
+**工具事件路径（按宿主能力启用）**：如宿主确实提供执行前后工具事件，适配器观察即将访问的模块、实际错误和阶段变化；事件名称、是否支持继续执行、能否注入到下一步，均以该宿主录制样本为准。事件只做确定性处理，语义查询计划仍由当前 Agent 提交。支持压缩前事件时额外保存游标和待沉淀证据；不支持时由主动路径在宿主公开的整理节点执行，不承诺能截获任意自动压缩。
+
+无执行中事件的宿主标记 `assisted`，不能声称达到强制自动覆盖。MCP 服务不能自行监听模型思考、任意聊天或唤醒已退出的 Agent。仅靠轮询 transcript 可收集、入队，不能证明宿主会读取并完成总结。
+
+### 3.2 触发策略
+
+| 时机 | 检索动作 | 沉淀动作 |
+|---|---|---|
+| 长任务拆解后 | 查当前目标和高风险约束，建立主题清单 | 原文和方案先作材料，不直接生成“成功经验” |
+| 进入新子任务/新模块/新环境 | 按本阶段问题、实体和已知限制查询 | 将上一阶段未处理证据保留到 checkpoint |
+| 新错误、失败测试、意外行为 | 用错误签名、组件名、环境补查，再决定下一次尝试 | 记录现象和尝试，解决前不当结论保存 |
+| 准备重要方案选择 | 查历史决策、约束和相邻反例 | 已确认的决定可提炼 decision，注明尚未实施部分 |
+| 阶段验证完成、用户纠正 | 按需查重、核对旧卡 | 整理本阶段增量，调用既有 capture/job 流程 |
+| 长时间持续操作 | 有新实体或未解决问题才补查 | 达到阈值后的下一工具事件检查证据是否值得提炼 |
+| 压缩前/Stop | 恢复未覆盖主题，不反复全库查询 | 保存未处理片段和游标，兜底处理待办 |
+
+初始可调默认：6 次非 knowbase 工具操作或 10 分钟后，在下一个事件检查是否需要 checkpoint；新错误/阶段完成立即检查，不等待阈值。阈值仅是防遗漏兜底，不能替代语义判断，不是已测最优参数。
+
+排除 knowbase 自身调用、其 Git 同步和遥测操作，防止“检索触发检索、保存触发保存”。相同错误在环境未变时只补查一次；普通读取同模块和重复运行相同工具不机械重复检索。
+
+### 3.3 现有工具可以先执行的宿主规则
+
+以下规则可先作为工作流指引使用，不依赖拟新增工具；本轮仅提供模板，尚未写入实际 Agent 配置。它能改善主动使用，但不能代替工具事件的真实接线验收。
+
+```text
+1. 接到长任务，先列目标、约束和子任务；为当前子任务构造具体查询，
+   调用 memory_search（显式 scope），必要时 memory_read 核对适用条件。
+2. 在本轮连续执行中，每次开始新的子任务/模块，或出现新的实际错误，
+   重新判断并检索相关知识；不要等待用户下一条输入，也不要整篇原文只查一次。
+3. 知识命中只作候选。已参考的卡记录版本和用途，实际验证后如实反馈。
+4. 一个问题解决且验证、一个阶段完成时，判断是否形成可复用结论。
+   有结论就先查重，再按既有治理要求 save/update；材料较多时按有界增量
+   调用 memory_capture，随后 claim/submit/status 完成提炼，不把 queued 当已保存。
+5. 当前 capture 长文本完整性未修复前，仅传入已确认完整的有界片段，
+   在宿主工作记录保存尚未传入的片段与原文位置，后续分批处理，禁止只传摘要冒充全部原文。
+6. 完成一次保存后继续跟踪后续新经验；没有可复用内容允许不保存。
+   结束/整理上下文前核对所有阶段的覆盖与待办，未完成任务明确保留。
+```
+
+## 4. 长方案和长输入怎么查
+
+### 4.1 先结构化，再分阶段查询
+
+由正在执行任务的宿主模型生成：目标、明确约束、子任务、涉及的系统/代码实体、风险、原文位置、待确认项。任务主题须覆盖输入的全部章节/语义段，当前不执行的内容标 pending，不能当成已经查过。
+
+查询表达“现在要解决什么”，而不是整篇复制：`组件/业务实体 + 操作/问题 + 关键环境或限制`。保留错误码、类名、库名等精确词；必要时由宿主作同义改写。短输入“继续”从已有任务状态恢复当前主题，不应单因字数不足放弃。
+
+示例仅用于说明查询构造，不表示库中已有答案。用户提供一份涵盖认证、SSE、侧栏和断线恢复的实施方案：
+
+| 到达阶段 | 可以构造的查询 | 核对内容 |
+|---|---|---|
+| 开始认证适配 | `旧系统 登录态 token iframe` | 信任边界、历史鉴权限制 |
+| 开始 SSE | `SSE 断线重连 会话恢复 重复消息` | 恢复约定及重复消费风险 |
+| 开始侧栏 | `侧栏 首次预填 面板挂载` | 既有体验和生命周期约束 |
+| 执行中首次 401 | `SSE 401 token 过期` | 新观测到的具体故障 |
+
+将相关候选合并按卡片内容版本去重，返回“结论摘要、适用条件、来源、验证状态、对应子任务”。索引命中不等于已读、已采纳；Agent 需要时再读全文。标注一次候选是否参考、采用、无关或未验证，不自动生成 helpful。
+
+### 4.2 有界查询与覆盖
+
+初始每个活跃子任务最多 3 个查询方向，首次最多 6 次检索；每次最多回传 3 条候选摘要，默认合计注入预算约 800 token。全文另按需读取并记录成本。预算为待实测的默认值；token 估算与实际计量分开。
+
+零命中允许一次有针对性的改写；仍无结果明确“当前无适用记忆”，继续正常源码分析。达到预算后的主题进入 deferred，进入该子任务或取得新证据后再查，不能静默丢弃。大输入沿原文章节/段落分页，超出单次预算返回 next_cursor、未处理片段数与完整性标志。
+
+缓存键含 scope、主题/实体/错误签名、知识版本及相关环境；版本变化或新证据使缓存失效。限频只跳过相同条件下的重复工作，不拦截新的错误和未覆盖子任务。
+
+主动检索可发现 once 候选，但必须标明待验证并由 Agent 核验；自动建议继续保持 verified 门槛。staging、stale、冲突卡仅用于明确的复核/查重，不作执行建议。scope 必须由显式参数、会话绑定或路径映射确定；无法解析时报告缺口，不退化成跨项目全库搜索。
+
+## 5. 执行中怎么总结和入库
+
+### 5.1 以结论和证据为单位
+
+每个阶段保存本地工作记录：问题、实际观察、尝试过的方法、成功/失败结果、版本环境、来源事件/代码位置、验证证据、未知项。只收可观察消息和工具结果，不要求或保存模型隐含思考链。
+
+解决一个问题并取得证据后即可提炼，不等整个实施方案结束。业务知识也必须在需求澄清、方案评审、用户纠正、代码分析中持续识别，不要求先发生故障或完成代码实现。一次输出可以产生多条主题清晰的经验；没有可复用结论时提交 no_candidate 及理由。候选至少保留既有八项小节，不能为凑卡补写证据。
+
+| 输入内容 | 处理方式 |
+|---|---|
+| 用户提出的未实施方案 | 本地任务材料；已明确决定可作为 decision 候选，验证写“尚未实施” |
+| 一次性修改文件列表、进度和通过总数 | 项目进度记录，不入经验卡 |
+| 经复现定位的根因及验证过的修复办法 | pitfall/workflow 候选，记录适用和失效边界 |
+| 失败尝试 | 作为现象/反例证据；有明确可复用边界时才独立成卡 |
+| 用户纠正、业务规则、人员标准、偏好 | 保留出处，遵循现有 staging 人审，不自动生效 |
+| 整篇方案或对话原文 | 本地材料快照；明确允许共享的文件才走既有 source 导入，不塞进卡片正文 |
+
+业务规则是重点提炼类别，包括业务术语与对象含义、状态转换、准入/校验条件、角色权限、计算口径、例外处理和跨系统约束。使用既有 bizrule 类型，不再新增平行规则库。每次阶段提炼同时检查“新增技术经验”和“新增/变更业务规则”；用户明确纠正规则时立即形成候选，不等 Stop。
+
+每条规则记录：适用项目/业务对象、触发条件、必须/禁止的结果、例外与边界、原始出处、确认状态、适用版本及未知项；有代码定位时填写 code_refs。可用 Given/When/Then 表达，但不能把未说明的例外补成事实。PRD 条款或用户明确确认可作规则出处，代码逆向仅是候选证据，须写明代码版本及“待业务确认”；仅有 Agent 推测时保留待确认材料，不伪造 provenance 入规则库。
+
+区分规则的业务确认、人工激活和实现验证：已有明确出处的规则可以在尚未开发时保存候选，验证部分注明未实现；Agent 保存 bizrule 仍按现行机制进入 staging，人工 promote 后才供默认检索使用。未激活规则可经显式复核读取，不得冒充已生效知识。规则修订应保留旧版本和变更出处，并提示与旧卡/代码不一致之处，不能直接把现有代码行为视为正确业务规则。
+
+验收增加：一条长需求包含状态规则、权限规则和计算规则，三类均须形成可追溯候选或明确待确认记录；后半段规则不能因文本预算丢失。需求确认但尚未实现、代码与需求冲突、用户纠正旧规则三类样本分别核对确认/激活/实现状态，不用“没有技术踩坑”作为 no_candidate 理由。
+
+### 5.2 增量、去重、恢复
+
+复用 `memory_capture → memory_job_claim → 宿主提炼/查重 → memory_job_submit → memory_job_status`。Hook 入队不是完成；同一会话允许连续多个检查点。移除“本会话已有任意 memory_write 就全部免检”和“每会话仅一次 capture”的覆盖判据。
+
+分别保存 observed（已观察）与 settled（已完成处理）游标；入队时不可推进 settled。处理覆盖以 segment_id/text_hash 为准，状态为 pending/queued/claimed/saved/updated/needs_review/no_candidate；失败和部分处理不跨过未完成片段。后面的片段可独立处理，连续游标只推进到第一个缺口前。
+
+原始事件先在本地持久化，再归一化/切分；禁止截断后把片段标为完整。允许给模型有界摘录，但须保留可读取的完整版本、original_length、truncated、next_cursor 和定位。跨片段的“失败→修复→验证”以事件关联或重叠窗口保持因果；不能把失败误提炼为最终结论。
+
+幂等键包含 host_profile/session_id、scope、原文版本、事件范围/片段哈希和 extractor_version。重试返回同一任务/提交结果；同 key 不同内容拒绝。重复结论优先关联原卡或带 revision 更新，查重包括本项目 once/staging 和允许的 global。提交时复查，旧 revision 和矛盾进入重新评估，不静默覆盖。
+
+只有持久提交并读回确认后，覆盖状态才进入 saved/updated；needs_review 表示候选已处理、知识尚未生效。原文已处理不代表质量已验收。租约、fencing、request_id 继续复用 jobs/commit_adapter；宿主退出后 awaiting_agent，下次由宿主继续，不能声称后台已自动完成。
+
+## 6. 最小接口与数据契约（拟新增）
+
+保留现有 memory_search/read/capture/job/save/update/feedback；新增一个面向阶段的 `memory_context`，共享既有检索和队列，不另造存储服务。以下为设计接口，尚不能调用。
+
+```text
+memory_context(
+  session_id, event_id, scope, stage,
+  task_id, task_revision, current_goal,
+  topics=[{topic_id, source_segment_ids, entities, queries, status}],
+  evidence_refs=[], observed_cursor="", request_id=""
+)
+stage = task_plan | subtask_start | new_failure | decision | verified_result
+      | checkpoint | before_compact | recover
+```
+
+返回字段：`event_id, scope, retrieval_status, candidates[], next_topics[], capture_due, job_ids[], pending_segments, next_cursor, truncated, budget_used, warnings[]`。候选含 `id, revision, summary, applicable_when, confidence, status, topic_ids`；拒绝跨 scope 或缺字段用明确错误。稳定结果状态区分 executed/no_hit/skipped_cache/deferred_budget/scope_unresolved/unsupported_event/failed，失败不得转换成 no_hit。
+
+执行中事件适配器收取 host/tool 的可观察数据，调用同一 context 内核。Hook 无法进行语义拆解时，可用已保存主题/错误关键词作轻量检索，或返回宿主制定查询的指引；不能假设 Hook 子进程能直接借用宿主模型。压缩恢复时返回当前任务主题、采用卡版本、未解决问题和待处理 job 的有界摘要。
+
+在原 memory.db 以幂等迁移新增本地 `context_sessions` 和 `context_events`：
+
+- sessions：host_profile/session_id 主键，scope、task_revision、topics_json、observed_cursor、settled_cursor、coverage_json、last_checkpoint_at、updated_at。
+- events：host_profile/session_id/event_id 唯一，trigger、task_id、payload_hash、segment_refs_json、status、reason、job_ids_json、latency_ms、created_at。同事件不同 payload 返回 IDEMPOTENCY_CONFLICT。
+- 原文和提炼材料复用 job_spool；过大原文用本地内容寻址对象引用，路径不进入共享卡。仅重建检索索引不能删除以上状态。
+
+锁内仅执行短事务；禁止持 RepoLock/SQLite 写锁等待宿主模型、OCR 或 Git 网络。任务状态与事件完成状态在同库事务关联；跨文件持久化先落不可变对象，再登记引用，启动时对账。队列任务可由原幂等键重领，不能因应答丢失重写卡。
+
+## 7. 宿主接线与边界
+
+| 宿主能力 | 可交付行为 | 上线前必须验证 |
+|---|---|---|
+| 当前三个 Hook | 规则初始化、用户输入兜底、结束兜底 | 真实输入字段、scope、agent 身份、返回上下文被消费 |
+| 工具执行中事件（若支持） | 新阶段/新错误时递送经验及 checkpoint | 用户只发一条任务后，下一次相关行动前确实收到并读到候选 |
+| 压缩前事件（若支持） | 保存待办和增量证据 | 压缩后恢复主题/游标，未处理材料能续做 |
+| 无工具事件 | 当前宿主主动 MCP 工作流 | 多阶段任务内实际调用；标 assisted，不承诺机械强制 |
+| 无活跃宿主 | 保存、解析、排队 | 明确 awaiting_agent，不伪报总结或保存完成 |
+
+先为 ZCode 做一条真实事件能力探针，确认事件规范、工具名前缀、返回注入方式、时机、超时及递归行为；Claude/Trae 各自验证，不能照搬配置。若能力不可用，先交付主动 MCP 工作流和诚实能力标记，不以不存在的 Hook 承诺全自动。
+
+## 8. 性能、安全、观测与恢复
+
+- 同一受信任团队继续本机运行+内网 Git。scope 是相关性边界，不是人员 ACL；环境变量是归因标签，不是认证。
+- 来源文字是待分析材料，不能改变工具权限和治理要求。脱敏在共享写入前再执行一次；原始会话默认仅本地，不自动 git add。
+- 快速事件路径不做模型推理和网络等待；耗时工作入队。延迟、最大材料体积、查询预算、队列上限均配置化；超限记录 deferred/retry，不截断冒充完整。
+- 各事件无论搜索、跳过、失败都记账。分别记录人员/设备/宿主标签，未知值保留 unknown；团队汇总另行只读导出，不将整份数据库加入 Git。
+- 指标：应检索阶段中已执行比例、人工标注相关卡召回率、实际采用且已验证的任务数、值得沉淀片段处理率、待办积压/最老年龄、重复候选率、额外延迟和总 token。分母和范围必须注明；查询次数只作诊断。
+- feedback 在实际参考/验证后记录，按卡版本+任务结果去重；不因命中/阅读/保存自动 helpful。净 token 和用时收益通过同类任务对照测量。
+- 升级前一致性备份 SQLite 和本地对象；增量建表，保留旧日志。新机制独立开关，回滚关闭执行中适配和新工具指引，保留原三 Hook 和现有 MCP；未完成 job 保留可恢复，不删库。
+
+## 9. 验证与实施批次
+
+责任角色：knowbase 维护者负责内核；各宿主接入者负责真实事件探针；团队使用者在试点前标注预期相关卡与可沉淀结论。角色待实际分派，不虚构人员。
+
+| 批次 | 用户结果/落点 | 退出条件和依赖 | 迁移/恢复 | 当前状态 |
+|---|---|---|---|---|
+| A 能力探针 | `hooks.py`、宿主配置模板、真实录制样本 | 一条用户任务后，工具事件中途递送并被下一步消费；否则转 assisted | 仅隔离配置，保留原接线 | external_pending |
+| B 任务驱动检索 | `server.py` 新工具；拟新增 `context.py`；`index.py` 共用检索；工作流规则 | A 确定可用路径；长输入和中途新错均命中预先标注相关卡，实际行动引用版本；无结果正常继续 | 同库增量表；独立开关 | NOT_RUN |
+| C 增量沉淀 | `hooks.py`、`adapters/normalizer.py`、`checkpoint.py`、`jobs.py`、`extraction/*` | 两个阶段各产生不同可复用结论均处理；超长证据尾部可读取，重试/崩溃无重复或覆盖缺口 | 备份 spool/游标；租约恢复 | NOT_RUN |
+| D 三人真实试点 | README、`docs/trae-rules.md`、宿主指引与只读统计 | 三人各完成一条实际多阶段任务，核对采用结果、候选质量和额外开销，报告宿主差异 | 小批开启，失败关闭新增路径 | external_pending |
+
+独立预期由团队在执行前标注，不以检索系统自己返回的卡作为标准答案。关键反例：
+
+1. 用户只发一次长方案，Agent 连续工作：在第二、第三子任务仍查到所需经验；不得等下一条用户消息。
+2. 相关证据位于输入中部和尾部，且超过现有 8,000/16,000 字符：完整定位、查询和提炼，不因头部命中宣布全覆盖。
+3. 同一错误反复出现：不重复刷检索；随后换环境/出现新错误必须补查。
+4. 已保存阶段一经验后继续阶段二：新增证据仍会处理，feedback 不冒充沉淀完成。
+5. 方案声称成功但工具实际失败：不生成已验证经验；业务规则候选仍进 staging。
+6. claim 只返回材料前半段：后半段保持 pending，下一批能够领取；不允许 renew 后仍不断返回同一截断内容。
+7. 保存成功应答丢失、任务重投、压缩、宿主退出：已有幂等和游标恢复后卡片唯一、覆盖不前移过缺口。
+8. scope 缺失、Hook 不支持、队列满、索引失败：分别报告真实状态，不当作“未命中”，不无限阻断开发。
+9. memory_context/read/save 及同步自身不递归触发；重复注入不导致 helpful 数虚增。
+
+高风险前置门：A 未验证前不得宣称 ZCode 全自动；真实长文本与分页未过前不得宣称自动总结完整；C 恢复测试未过前不得扩大自动写入。可独立先完善主动检索指引、scope 和日志，但这些不能替代宿主验收。
+
+## 10. 设计维度收敛
+
+| 维度 | 本期结论与验证位置 |
+|---|---|
+| D1 定位 | 执行中有效复用与沉淀，见 §1；不以调用量为验收 |
+| D2 模型状态 | 主题、事件、片段覆盖、既有 job 状态，见 §4–6 |
+| D3 数据权威 | 卡片沿用现有权威；本地状态/原文保真，见 §5–6 |
+| D4 分层 | 宿主语义、适配触发、MCP 共享内核；见 §3/6/7 |
+| D5 接口 | memory_context 与既有 job 协议，错误/分页/版本见 §6 |
+| D6 并发 | 幂等、租约、revision、同库事件对账，见 §5–6 |
+| D7 失败 | 不支持/无宿主/部分输入/重试/未知结果，见 §5/7–9 |
+| D8 信任 | scope 非 ACL、原文非指令、脱敏与本地默认，见 §8 |
+| D9 有界性 | 分阶段预算、分页、缓存、背压，见 §4/8；默认待实测 |
+| D10 观测 | 完整事件及阶段使用结果，见 §6/8 |
+| D11 演进 | 增量建表、稳定协议、老工具兼容，见 §6/8 |
+| D12 运维 | 本地备份、开关和回滚，见 §8–9 |
+| D13 验收 | 真实宿主、独立标注、长输入尾部和恢复反例，见 §9 |
+| D14 人与流程 | 宿主提炼、维护者接线、人工治理与试点标注，见 §5/9 |
+
+设计取舍：优先任务语义节点+已证实的工具事件，优于每个工具无条件检索；优先分阶段增量总结，优于每次重扫全会话；优先复用当前 Agent，遵守既定不新增模型服务的约束。尚无需要改变用户方向的裁决；查询/预算/阈值均为可推翻默认。宿主能力与真实效果是待验证技术假设，不包装成已完成。
+
+
+===== SOURCE: docs/knowbase-inflight-memory-implementation-plan.md =====
+# knowbase 执行中知识使用与沉淀：实施方案 v1.0
+
+日期：2026-10-21。源码基线：`2049e1f`。依据：[执行中检索与增量沉淀设计](knowbase-inflight-memory-plan.md)、[三项核心目标方案](knowbase-three-goals-implementation-plan.md)及本轮源码取证。
+
+**本方案已获用户实施授权，正在执行。** 以下保留原批次和验收契约；实际实现/迁移/测试及尚未通过的门槛以 progress.md 和 docs/host-capabilities.md 为准。不能将原计划中的接口存在、测试通过或本机注入证据升级为自动提炼与三人真实业务验收。
+
+## 1. 最终交付及完成定义
+
+交付一套融入 Agent 连续执行过程的知识使用机制：用户只发一次长任务，Agent 在进入各子任务、遇到新问题时使用相关经验与业务规则；阶段结束及时提炼新增知识；长输入尾部、压缩前的待办及进程重启后未完成材料可继续处理。
+
+继续使用当前宿主模型、Python MCP、现有检索、同一个 memory.db、Markdown 卡片和内网 Git。不新增模型 API、中心数据库或第二套队列，不切换既有知识权威，不新建业务规则库。本期无新界面，不涉及前端实施及 F1–F5。
+
+| 编号 | 必须交付的用户结果 | 失败判据 |
+|---|---|---|
+| U1 | 一次用户输入后的多个子任务中持续查询知识 | 等待下一条用户消息才查；只在开场注入 |
+| U2 | 新错误发生后，下一次相关尝试前取得适用候选或明确无结果 | 只记录错误、入队而不递送给执行者 |
+| U3 | 长方案中部、尾部规则均被识别和处理 | 只读开头、截断后仍报告全部完成 |
+| U4 | 技术经验及业务规则实际成卡或形成可追溯待审核提案 | candidates 表有记录即报“已入知识库” |
+| U5 | 后续阶段可继续沉淀，崩溃/重试不会遗漏或重复写卡 | 一次 save/feedback 遮蔽后续；应答丢失产生重复卡 |
+| U6 | 其他成员同步后可按项目检索已生效知识，待审规则保持隔离 | 只证明本地可读；待审规则成为默认执行依据 |
+
+业务规则与技术经验同等纳入 U3/U4，且规则的业务确认、人工激活、代码实现验证分别记录。命中次数、通过测试总数、保存数量均不代替以上结果。
+
+## 2. 现状、可复用能力与必须补齐的断点
+
+静态取证不代表以下问题已在真实宿主复现。
+
+| 当前位置 | 可复用内容/实际行为 | 实施要求 |
+|---|---|---|
+| `hooks.py:user_prompt/_maybe_trigger_mid_session_capture` | 用户消息触发；中途 capture 默认关闭、每会话一次 | 新增执行中适配；按增量覆盖判断，不依赖下一条输入 |
+| `hooks.py:stop_event` | 会话内任何 memory_write 可抑制漏存提醒 | 改查未处理片段/阶段，Stop 仅兜底 |
+| `adapters/normalizer.py`、`checkpoint.py` | 多格式归一化、多 checkpoint；存在单事件截断 | 原文先保真，模型材料分页，超长单事件继续切分 |
+| `server.py:capture_impl/job_claim_impl` | capture 构建单 checkpoint；claim 可能截断输出 | 统一 capture/import 的完整 manifest 与分页，不能靠 renew 重复同一截断头部 |
+| `jobs.py:claim/renew/submit` | 已有 CAS、token、租约和候选持久化 | 补批次实际成员、到期校验、幂等回执及连续覆盖；复用队列，不重建 |
+| `server.py:job_submit_impl` | 校验后存 candidates；没有调用写卡路径 | 增加候选到卡片的应用服务和读回确认 |
+| `jobs.py:submit` | 按非 pending 数量或候选数累加 cursor | 改成 manifest 成员校验和连续完成前缀，不让重复/乱序推进超前 |
+| `migrations.py:v8` | segment_results 以 segment_id 单列为主键 | 修正跨 job 的同名片段覆盖风险，保留存量记录 |
+| `extraction/validator.py` | 有候选基本校验，但不等同 save 的完整 lint | 八项正文、bizrule provenance、scope、引用及治理共用写前校验 |
+| `server.py:save_impl`、`commit_adapter.py` | 已有 lint、幂等 intent、卡片写入、索引/Git 路径 | 提取共享写服务供 save 与候选应用调用，不解析 save 返回文本判断成功 |
+| `store.py`、`mutations.py` | bizrule、provenance、code_refs、内容/治理 revision | 保留现有类型与治理，新增元数据必须贯穿读写/哈希/同步路径 |
+
+核心顺序：先验证宿主能否执行中递送；同时以完整材料和真实成卡闭环作为自动沉淀放量的前置条件。
+
+## 3. 实施批次与依赖
+
+以下为单名熟悉项目的开发者的初估，包含开发及本地回归；不含宿主不支持事件时的产品改造、外部等待及业务方审核排期。估算待 E0/E1 后校准，不作为已承诺日期。
+
+| 批次 | 可交付结果 | 主要落点 | 前置/退出闸门 | 估算 |
+|---|---|---|---|---|
+| E0 接入探针与基线 | 确认每个宿主能监听什么、能否中途注入；冻结独立验收样本 | 新增 `tests/fixtures/inflight/`、`docs/host-capabilities.md`；现有 Hook 配置的隔离副本 | 真实 ZCode 一条用户任务中完成一次中途递送，或明确 assisted；不凭事件名假定支持 | 0.5–1 人日 |
+| E1 原文、分页和覆盖 | 长输入无静默丢失；可领取尾部，游标可靠 | `adapters/normalizer.py`、`checkpoint.py`、新增 `materials.py`、`jobs.py`、`migrations.py` | 长单事件/多主题/乱序/重试反例通过，旧日志和队列保留 | 2–3 人日 |
+| E2 执行中检索 | 当前 Agent 按阶段提交查询，新错误补查并获得有界上下文 | 新增 `context.py`、`server.py`、`index.py`、`config.py`、宿主工作流 | U1/U2；新错误不被重复缓存挡住；scope 不串项目 | 2–3 人日 |
+| E3 增量提炼与真实成卡 | 候选可成为 active/once 卡或 staging 提案，结果可读回 | 新增 `extraction/materialize.py`、`extraction/validator.py`、`server.py`、`jobs.py`、`commit_adapter.py`、`mutations.py`、`store.py` | U3/U4/U5；未生效规则不进入默认检索；应答丢失不重复保存 | 3–4 人日 |
+| E4 宿主正式接线 | 从真实工具事件到检索/提炼，再到 Agent 下一步消费 | `hooks.py`、新增 `adapters/host_events.py`、`__main__.py`、拟新增 `docs/hosts/*.md`、`docs/trae-rules.md` | E0 确认能力；E1–E3 通过；无事件的宿主明确 assisted | 1–2 人日 |
+| E5 升级、故障与团队试点 | 可回滚，三位成员实际复用，记录使用效果及成本 | `migrations.py`、`__main__.py:doctor`、README、回归集与验收记录 | 下文正式入口/故障验收通过，U6 完成 | 2–3 人日，另观察 3–5 个工作日 |
+
+合计初估 **10.5–16 人日**，加真实试点观察窗口。E1/E2 中不依赖宿主事件的工作可先做；E0 未通过不得宣称全自动，E1/E3 未通过不得扩大自动写入。每批单独形成可审查变更，避免 Hook、长文本和写入恢复一次性混发。
+
+## 4. E0：宿主能力与贯穿样本
+
+### 4.1 宿主能力清单
+
+每个宿主记录版本、工具事件及实际字段、transcript 格式、工作目录来源、session/tool_call 标识、注入格式、下一步消费时机、超时、阻断语义、压缩事件、工具名前缀。
+
+先核对本地安装的事件规范及录制样本，再生成配置；事件名称尚未确认前不写入真实配置。ZCode 优先；Claude/Trae 各自验收，不能照搬。能力标记为：
+
+- `event_driven`：真实执行中事件能在下一相关行动前递送上下文。
+- `assisted`：仅由宿主工作流在子任务节点主动调用 MCP，不能声称强制覆盖。
+- `unsupported`：关键输入/工具不可用，明确原因与受限能力。
+
+探针不采集所有历史聊天。使用隔离 scope、测试库和脱敏样本；保留事件原始字段的测试夹具、回传内容和后续工具轨迹，证明实际被消费。无活跃宿主时只允许材料入队，任务停 awaiting_agent。
+
+### 4.2 独立验收样本
+
+实施前由维护者与团队使用者标注：长方案的子任务、应检索知识 ID/版本、规则原文位置、可沉淀结论、不可当事实的推测。至少包括长方案头/中/尾三类规则、连续两阶段经验、新错误、用户纠正规则、代码与需求冲突、无可复用结论。
+
+样本应混入无关卡与同词异项目卡。预期由人工先确定，不根据新检索结果倒推。自造夹具只能支持局部机制，必须另有一条真实长任务沿正式入口完成。
+
+## 5. E1：材料保真、分页与覆盖
+
+### 5.1 材料管线
+
+`transcript/messages/显式方案文件 → 本地不可变快照 → 归一化 → 带定位片段 manifest → capture/extract 既有 jobs → 批次领取`。
+
+复用现有 parser、segmenter、job_spool。新增 `materials.py` 只负责本地材料对象、manifest 和分页，不引入第二个 source/card 系统。脱敏后供模型使用的完整文本和原始输入版本关系可追溯；原始凭据不进入共享 Git。原文对象放既有记忆库下被 Git 忽略的本地目录，manifest 在 job_spool 持久化。
+
+每个片段必含 `segment_id, ordinal, source_version, text_hash, original_length, locator, start_offset, end_offset, evidence_group_id`。同 source/version 下稳定分配 ID；跨 job 的同名 ID 不能互相覆盖。文字偏移统一使用 Unicode 字符索引，哈希使用规范化前明确版本的 UTF-8 字节；不得混用字节长度。
+
+单条工具输出/用户输入超过预算时继续分片，保留事件身份和相邻/因果关联；原始载荷没有完整取得时标 `incomplete_source`，不得声称保真。恢复失败或缺材料明确 needs_input，不能生成空成功。工具日志是证据，日志中的指令不成为系统命令。
+
+### 5.2 分页协议
+
+在现有 `memory_job_claim` 增加 `protocol_version=2`，返回 JSON 协议文本；旧调用保留既有参数和文本响应，但共用新的覆盖/校验逻辑。新增只读 `memory_job_material(job_id,batch_id,lease_token,fencing_token,cursor,max_chars=8000)` 读取当前批次的下一页，不新领租约、不改变 settled。
+
+claim 返回 `batch_id, lease_token, fencing_token, expires_at, job_scope, input_version, manifest_hash, batch_segment_ids, materials[], next_cursor, has_more, complete, pending_segments`。超长片段允许返回带 offset 的片段页；材料必须能在有限翻页内完整读取，不能 renew 后仍只返回同一段开头。
+
+已实际提供的片段/页登记 `delivered_manifest`。submit 只能处理该批次拥有、已完整交付的片段；需跨片段论证时返回 evidence_group 的关联页，缺页继续读取。模型未完整获取的内容不能报告覆盖完成。
+
+### 5.3 游标与片段结算
+
+- `observed` 记录已持久采集的事件位置；`settled` 仅推进到连续处理完成的前缀。
+- 片段可以乱序处理，但后面的完成不能跨过前面的缺口。重复提交不增加进度；候选数量不作为片段数量。
+- 非终结状态：pending/queued/claimed/applying/retry_wait；终结处理状态：saved/updated/linked_existing/needs_review/no_candidate。needs_review 表示已形成持久候选或 staging 卡，未表示生效。
+- `distilled` 只能作为宿主意图；服务器校验其关联候选全部达到持久终结结果后才结算。校验失败、材料缺失、写卡失败不能推进覆盖。
+- 修改 Stop 免检条件和 mid-capture flag：检查增量和待办，不再按“曾有任意 memory_write/曾触发一次”略过整个会话。
+
+## 6. E2：任务驱动检索与上下文消费
+
+### 6.1 查询规划与触发
+
+当前宿主模型负责：理解目标/约束、按语义段列主题、制定当前子任务查询、识别新错误。Hook 子进程不调用宿主模型；只能用已保存主题、明确实体和错误签名检索或递送“请补查询计划”的指引。
+
+新 `memory_context` 参数：
+
+```json
+{
+  "protocol_version": 2,
+  "session_id": "s-1", "event_id": "e-12", "request_id": "r-12",
+  "scope": "cmi", "stage": "subtask_start",
+  "task_id": "t-1", "task_revision": "sha256-of-task",
+  "current_goal": "实现订单撤回校验",
+  "topics": [{"topic_id":"p-2", "source_segment_ids":["seg-2"],
+    "entities":["订单","审批状态"], "queries":["订单 撤回 审批状态 权限"], "status":"active"}],
+  "evidence_refs": [], "observed_cursor": "event:12"
+}
+```
+
+stage 枚举：task_plan/subtask_start/new_failure/decision/verified_result/checkpoint/before_compact/recover。new_failure 必须提供可定位实际工具结果；verified_result 必须给验证引用，宿主自述“已通过”不自动提高卡片 confidence。
+
+响应为 `event_id, capability_mode, retrieval_status, candidates, next_topics, capture_due, job_ids, pending_segments, resume_cursor, budget_used, warnings`。候选携带 `id, content_revision, summary, applicable_when, confidence, status, topic_ids`。摘要来自卡片正文，缺内容标 unknown，不能凭标题生成未在卡片中的结论。
+
+### 6.2 行为规则
+
+1. scope 解析顺序：显式参数与已绑定会话一致性校验 → 会话绑定 → 项目路径映射。冲突报错；未知项目不扩成全库。首次绑定可来自合法的显式 scope，scope 不是 ACL。
+2. 只查询 active 主题；其他主题 pending/deferred，进入阶段后再查。短输入“继续”恢复现有任务，不以长度为由丢弃。
+3. 复用 `index.search` 与既有排序。主动调查可返回 once 及验证提示；自动候选保持 verified，staging/stale/冲突只用于明确复核/查重。
+4. 初始默认：每主题 3 个方向、首批最多 6 次检索、合并最多 3 条候选、摘要注入预算约 800 token；零命中允许一次改写。预算达到后返回 deferred 主题，不丢输入。
+5. 查询结果按卡片版本去重。缓存键含 scope、任务/主题版本、实体/错误签名、环境及知识版本；新错误、scope/环境变化、相关知识更新必须失效。知识版本暂以 Git HEAD 与本机卡片写入修订标识组合，不以数据库文件 mtime 代替。
+6. 返回内容必须到达当前执行 Agent；读取和实际行动轨迹分别记录。采用时核对适用条件，反馈仅在实际使用/验证后填写，不因命中自动 helpful。
+
+## 7. E3：技术经验、业务规则与真实写卡闭环
+
+### 7.1 每阶段双路提炼
+
+维护每阶段新增的“技术经验”和“业务知识”候选。业务知识包含术语/对象含义、状态转换、准入校验、角色权限、计算口径、例外及跨系统约束。需求澄清、用户纠正、方案决定均可触发，不以发生故障或完成代码为前提。
+
+扩展 `_build_distillation_guide`，同步调整 MCP instructions、Hook 指引及 Trae 规则，避免入口继续只强调踩坑。普通经验按现行政策保存 active/once；bizrule/standard/preference 一律 staging。未获业务出处的推断保留待确认候选，不伪造 provenance。
+
+### 7.2 候选契约
+
+`memory_job_submit` 增加 `protocol_version=2, fencing_token`；批次/租约参数沿用，所有提交都执行新成员和状态检查。V2 候选：
+
+```text
+candidate_key, type, title, scope, action=create|update|link_existing|review,
+target_id?, expected_content_revision?, expected_governance_revision?,
+body={conclusion,problem,applicable_when,not_applicable_when,
+      actionable_steps,key_evidence,verification,unknown_items},
+evidence_refs[], source_refs[], code_refs[], provenance?,
+segment_ids[], rule_context?, duplicate_evaluation
+```
+
+rule_context（bizrule 必填）包括 business_object、trigger、required_or_forbidden、exceptions、applicable_version、business_confirmation、implementation_status。枚举分别为 `explicit_source|code_inferred|unconfirmed` 和 `not_implemented|implemented_unverified|verified|unknown`；这些是证据分类，不是审批授权，不能设置 active/verified。
+
+已有 provenance 字符串继续保留；rule_context 为可选 frontmatter 扩展，存量卡未填为 unknown，不回填虚假确认。必要内容同时写入八项正文，使共享卡自足。用户确认引用脱敏消息摘录/日期及定位，PRD 引用文件版本与条款；共享引用必须可在现有 source 机制中定位或正文自足，本机 transcript 绝对路径只留本地。
+
+将 type/title/provenance/rule_context/source_refs/code_refs/action/segment_ids 等完整保存在 candidate payload 中；不能只存 body/evidence 后丢失治理类型。rule_context/provenance/source_refs 纳入统一内容 revision，并同步修正 create/update、读回、哈希、lint、Git 往返和索引序列化；生效权限仍由既有人工 CLI 控制。
+
+### 7.3 校验、查重和应用
+
+拟新增 `extraction/materialize.py`，调用从现有 save/update 提取的共享写服务。共享服务返回结构化结果；save 的既有文本响应仅作为外层展示，不用于内部判定。不得绕过完整 lint、RepoLock、commit_adapter、关系副作用、索引和 Git。
+
+提交顺序：
+
+1. 查询同 job/request_id 的持久回执，同 key 同 payload 返回原结果；不同 payload 拒绝，幂等恢复先于租约校验。
+2. 对新提交校验 batch_id、当前 token/fencing、绝对到期时间、job scope、已交付 manifest；拒绝伪造片段、跨项目候选和未知 decision。
+3. 校验八项内容、provenance、source 哈希/定位、code_refs 及治理；错误返回逐候选/片段结果，不能过滤掉候选却仍把其片段标 distilled。
+4. 既有宽召回供宿主判断重复/补充/矛盾。提交前同 scope 复查 revision 与新候选；发现变化返回 needs_reassessment。标题相似只作候选线索，不证明两个业务规则相同。调整共享查重路径，避免跨项目同标题误拒；所有 save 与 submit 行为一致。
+5. 短 SQLite 事务持久保存完整候选及应用意图/回执，job 进入 validating。此时租约交接已提交，不允许其他宿主再次 claim 该批次。
+6. 锁外组织逐候选应用；共享写服务内部采用既有短 RepoLock 与 intent 恢复，稳定写入幂等键为 job_id+candidate_key+candidate_version，不随重试 request_id 变化。
+7. 对卡片文件、content_revision、索引状态读回。普通新卡记录 saved_active_once；规则记录 saved_staging；link_existing 核对目标版本；待确认材料记录 review_pending。读回失败保留 applying/retry，不报成功。
+8. 同库事务回填候选结果与片段覆盖；一个片段关联多候选时必须全部获得终结结果才能结算。保存与 Git 推送状态分开，本地成功/同步待办不能冒充其他成员已收到。
+
+单批部分写卡成功时保留其确定结果，失败部分可独立续做，不回滚已发布的正确卡。跨文件/SQLite 无法一个事务覆盖，依靠应用回执+既有 write_intents 做对账，不能假称全部原子完成。启动恢复及 job_status 的有界恢复路径可接续 validating；没有宿主时仅能重放已确定的应用意图，不能生成新语义结论。
+
+规则修正不得直接 Agent update 已激活的治理卡。新规则形成关联旧卡及其 revision 的 staging 提案，人工按现有 revise/promote 流程裁决；旧规则不因一个未审核候选自动失效。规则确认、激活、实现验证在返回结果和默认检索中分别可见。
+
+### 7.4 完成响应
+
+逐候选返回 `candidate_id, action, outcome, memory_id, content_revision, governance_status, local_state, sync_state, error, retryable`。批次返回 `processed_segment_ids, pending_segment_ids, next_contiguous_cursor, saved_active, saved_staging, linked_existing, review_pending, failed, state`。
+
+只存 candidates 时不得返回 saved；job 的 succeeded 表示所有片段已可靠处理，可能含 staging，必须同时返回有效卡/待审卡/无候选数量。needs_review 和 no_candidate 的含义不变为“全部已生效”。
+
+## 8. 数据迁移、幂等与兼容
+
+基线 schema 为 v8；实际采用 v9–v14：v12 增加应用回执租约、v13 保存相似卡快照、v14 持久化脱敏观察事件，补足表内恢复与压缩边界。其余字段见下表；禁止修改已运行的旧迁移。
+
+| 迁移 | 表/字段与约束 | 兼容策略 |
+|---|---|---|
+| v9 执行上下文 | context_sessions：PK(host_profile,session_id)，scope、task_revision、topics_json、observed_cursor、settled_cursor、coverage_json、last_checkpoint_at、updated_at；context_events：UNIQUE(host_profile,session_id,event_id)，task_id、trigger、payload_hash、status、reason、segment_refs_json、job_ids_json、latency_ms、created_at | JSON 默认空对象/数组；老使用日志不回填成 Hook 事件；同事件不同内容冲突 |
+| v10 材料和批次覆盖 | job_segments：PK(job_id,segment_id)，UNIQUE(job_id,ordinal)，source_version/hash、定位/offset、evidence_group_id；job_batches：batch_id PK，job_id、input_version、manifest_hash、segment_ids_json、delivered_json、owner、fencing_token、expires_at、state | 从可完整还原的 spool 建 manifest；不能还原的旧截断材料标 legacy_incomplete/needs_input，不伪造原文 |
+| v10 覆盖修正 | 事务重建 segment_results，PK(job_id,segment_id)，增加 settlement_state/receipt_id/linked_ids_json；保留 decision/reason、旧时间字段 | 旧行原样保留；无法证明与 manifest 一致的旧 distilled 不自动算成已成卡，单列待对账 |
+| v11 应用与回执 | candidates 增 payload_json/payload_hash、materialization_state、memory_id、memory_revision；job_submissions：PK(job_id,request_id)，batch_id、payload_hash、state、result_json、created_at、updated_at | 旧候选不自动大批写卡；逐条显式复核恢复缺字段/证据，保留旧决策供审计 |
+
+所有表位于原 memory.db，沿用迁移事务、WAL 与短写入；副作用锁顺序 RepoLock→SQLite。应用意图先独立提交，不持 SQLite 事务等待 RepoLock；后台网络和模型不持两种写锁。
+
+同 job 的 manifest 固定；来源变化新建 input_version/任务，不覆写已 claim 的输入。statement、candidate 与写卡幂等使用各自明确作用域。幂等检查还需比对 job/batch/payload，不能用他人 request_id 取回无关结果。
+
+旧 MCP 工具和文本展示保留；新指引显式要求 V2。旧协议缺少完整候选信息时允许保存 review_pending，并返回缺字段，不能继续宣称已入库。原 save/read/search 等绕过任务入口仍调用同一校验/写服务；治理 CLI 不被 Agent 的新字段绕过。
+
+## 9. E4：正式事件接线和资源预算
+
+### 9.1 工具事件适配
+
+新增 `adapters/host_events.py` 将已验证宿主载荷转换成 `host_profile, session_id, event_id, tool_call_id, project_path, trigger, tool_name, payload_ref, timestamp`。event_id 优先使用宿主稳定 ID；没有时以会话内可重放序列/载荷哈希构造，不能以当前时间生成导致重投重复。
+
+拟新增 CLI `knowbase hook tool-before|tool-after|before-compact --style <宿主>` 作为内部规范名；实际宿主事件映射必须来自 E0。现有 session-start/user-prompt/stop 继续兼容。适配器先记录事件，再执行轻量 context 内核；解析失败/超时同样记录原因。
+
+- 开始新子任务/模块：优先由宿主主动 memory_context 提供语义主题；工具路径变化只作提示信号，不能每个文件都算新阶段。
+- 新错误：使用实际返回状态与脱敏错误签名，同签名同环境限频；语义判断由宿主确认，日志中出现单词 error 不足以认定任务失败。
+- 阶段验证/规则纠正：宿主主动提交 evidence_refs，触发增量 capture 并领取，不必再等 UserPromptSubmit。
+- 排除 knowbase 自身工具、其 Git/索引/日志活动；支持批量工具结果时逐项保留身份，不能丢失败项。
+- 无可用中途事件时仅启用主动工作流并显示 assisted；MCP 无法强制宿主每个思考步骤调用工具。
+
+### 9.2 配置草案
+
+以下配置键待实现后才能生效；不修改用户当前配置，不擅自扩大聊天扫描范围。
+
+```json
+{
+  "inflight": {
+    "enabled": false, "mode": "assisted", "protocol_version": 2,
+    "checkpoint_work_ops": 6, "checkpoint_minutes": 10,
+    "max_queries_per_topic": 3, "max_queries_per_event": 6,
+    "max_candidates": 3, "context_token_budget": 800,
+    "material_page_chars": 8000, "max_batches_per_opportunity": 2,
+    "fast_path_timeout_ms": 1000, "max_pending_jobs": 200,
+    "host_profile": "zcode-local", "member_label": "configured-label"
+  }
+}
+```
+
+数值均为可调初值：token 字段在缺少真实 tokenizer/宿主用量时标 estimated，不伪造精确成本。快路径不等待 Git 网络；超过 1 秒返回 deferred 警告、保留待办。6 次操作或 10 分钟只在下一个事件检查，非独立定时唤醒；新错误和阶段结束不等待阈值。连续提炼预算耗尽后把 job 留待下个宿主机会，不占用无限对话。
+
+单输入对象初始上限 10 MiB、单批最多 32 个片段、单片段目标 4,000 字符，实际按语义边界切分；超上限显式返回需分批及原文定位，禁止头部截取后宣称完整。队列满保留已接受任务，拒绝新任务并记录 backlog_full；用户原始任务可继续，沉淀缺口可追踪。是否满足真实输入规模由 E1/试点校准。
+
+## 10. 验收矩阵与检查命令
+
+拟新增测试均按真正用户结果验证，不写仅镜像函数实现的断言。已有 regression 集保留；项目基线并未在本轮重跑，下述全部为实施时检查计划。
+
+| 用例 | 独立预期/正式入口 | 断言与故障点 | 对应结果 |
+|---|---|---|---|
+| A01 一次输入三个子任务 | 人工标注各阶段相关卡；真实宿主 | 第二、第三阶段无需新用户消息仍检索，下一行动体现适用约束 | U1 |
+| A02 执行中出现新错误 | 实际失败工具结果；工具事件→Agent | 新错误补查、相同错误限频、环境改变重新查 | U2 |
+| A03 超长单消息与方案 | 头/中/尾标注，超过 8,000/16,000 字符及跨页证据 | 完整分页、尾部规则保留；缺页不可 settled | U3 |
+| A04 双阶段沉淀 | 第一阶段已 save，第二阶段产生新结论 | feedback/save 不免除第二阶段；有新卡/提案的 ID 与读回 | U4/U5 |
+| A05 三类业务规则 | 状态、权限、计算规则和原文出处 | 各自成 staging；可读全文，默认检索不出现，人工激活后可检索 | U3/U4/U6 |
+| A06 代码推断及用户纠正 | 未实现需求、代码冲突、用户明确修订 | 确认/激活/实现不混淆，旧规则不被未审候选覆盖 | U4 |
+| A07 候选应用恢复 | 写卡后杀进程/丢响应、索引前失败、push 失败 | 恢复返回相同卡；本地/索引/远端状态分别报告；无重复 helpful | U5/U6 |
+| A08 批次和覆盖 | 两 job 同名 segment；乱序/重复/非法片段 | 不跨 job 覆盖、不越过缺口、无凭空进度 | U3/U5 |
+| A09 租约与并发 | 过期未接管提交、接管后旧提交、相同 request 重放 | 新提交过期拒绝；已持久提交可幂等读回；stale 更新不覆盖 | U5 |
+| A10 无候选/无命中/失败 | 预先标注无关材料；scope 缺失/队列满/索引错 | no_candidate/no_hit/deferred/error 分开；开发不无限阻断 | U1/U5 |
+| A11 自递归与压缩 | 实际 memory_* 调用和可用压缩事件 | 不自触发；压缩后主题、采用版本和待办恢复 | U1/U5 |
+| A12 三机共享 | 两个隔离克隆的 Git 回归＋三人真实环境 | 生效卡同步后可查；staging 保持隔离；本地 usage 不冒充团队统计 | U6 |
+
+测试落点建议：新增 `test_inflight_context.py`、`test_material_paging.py`、`test_capture_coverage.py`、`test_candidate_materialization.py`、`test_inflight_bizrules.py`、`test_inflight_host_contract.py`；在 `test_m3.py`、`test_p1_migrations_jobs.py`、`test_bizrule.py`、`test_code_refs.py` 中保留历史反例并补相邻入口。真实宿主录制证据与 mock 分开登记。
+
+实施阶段运行：先用项目 `.venv/bin/python -m pytest` 执行该批定向测试；每批落地前跑相关既有回归，完整合入前跑全套、compileall 与 diff 检查。MCP 验收必须通过 stdio 正式工具注册调用，不能只调用 impl；Git 验收至少使用两个克隆，真实团队试点另行完成。纯文档阶段不以运行无关全套测试冒充实现验证。
+
+## 11. 观测、试点与回滚
+
+### 11.1 指标和试点记录
+
+所有触发记录 executed/skipped_cache/unsupported_event/scope_unresolved/deferred_budget/backlog_full/failed/no_hit 等原因。现有 usage_log 保持原含义；新增 context_events 记录完整事件，候选应用状态用于核对真正入库率。标签保留 member/device/host，未设置记 unknown，不视为可信身份。
+
+试点逐任务记录：标注的应检索阶段数、实际检索/采用阶段、采用卡版本及验证结果、标注的应沉淀结论数、保存/待审/遗漏/重复、额外延迟、总 token 与总用时的可得性。分母由预先标注提供，不能用系统检测到的事件自证覆盖率。
+
+本地实验的 A01–A12 必需断言全满足；真实效果指标由首批标注任务形成基线后设门槛，不提前承诺节省百分比。若要测 token/工时净收益，使用同模型配置、相近难度和独立任务样本的开启/关闭对照，注明模型缓存、熟悉度和样本限制。反馈次数不折算工时。
+
+三位成员各完成至少一条实际多阶段任务；维护者核对“查询影响了哪一步”和“别人能否找到新知识”。三人试点仅证明该样本接入，不能直接声称部门全面提效。待审规则的积压需有人工审核责任角色，不能通过自动 promote 降低积压。
+
+### 11.2 升级顺序
+
+1. 记录代码/配置/宿主版本；SQLite 在线一致性备份，备份本地材料对象和 Markdown/Git revision。不得直接复制活跃 WAL 的单个主文件冒充完整备份。
+2. 维护窗口暂停相关本机 MCP/Hook 写入，执行同库增量迁移和一致性核对；任何失败回滚迁移事务，保留备份与错误。
+3. 发布兼容运行代码，新 inflight 默认 false；重启 MCP，确认新旧协议、旧 save/search、候选和使用日志计数保持。
+4. 隔离 scope 完成协议回归；按 E0 的证据为一个宿主开启 assisted 或 event_driven。先执行中只读检索，E3 门槛通过后启用自动候选应用。
+5. 单成员真实任务通过后推广至三位成员，逐机检查版本、scope_map、身份标签及能力状态；不把 Git 拉取当作本机 Hook 已更新。
+
+### 11.3 回滚与事故恢复
+
+- 先关闭 inflight 和新事件适配，恢复原三 Hook；保存队列和原文，不删库、不清空已接受任务。
+- 已保存正确卡不批量撤销；错误卡按 revision 和既有治理流程修正/归档。待审规则未生效，仍保留待审。
+- schema 为增量，禁止在线反向删表。回退代码前确认旧版本可忽略新表/元数据；如必须恢复旧数据库，先冻结写入并导出升级后新卡、回执及待办，明确恢复窗口和未重放数据。
+- 原文对象丢失进入 needs_input；卡已存在而回执未完成，按稳定写键和 write_intents 对账；Git 离线保留 local_saved/sync_pending，联网后走现有同步重试。
+
+## 12. 实施准入、责任与分层状态
+
+| 风险/决定 | 处理与责任角色 | 未通过时限制 |
+|---|---|---|
+| ZCode 执行中事件及注入可用性 | 宿主接入者在 E0 录制正式证据 | 只能交付 assisted，禁止全自动宣传/批量配置 |
+| 原文尾部与跨页因果完整性 | 内核开发者以人工定位样本完成 E1 | 禁止大规模自动总结/写入 |
+| 候选到卡片的治理与恢复 | 内核开发者和复核者完成 E3/A05–A09 | 可以保留待办，不声称知识已保存 |
+| 业务规则确认与审核 | 业务规则负责人确认来源，按人工 CLI 激活 | 未审不得默认注入或自动替换旧规则 |
+| 长文本宿主语义提炼效果 | 团队使用者预标注并评审 E5 的真实任务 | 保留遗漏与待确认，不能用格式校验代替正确率 |
+| 预算及效果 | 维护者按试点调参，记录实际成本和负担 | 参数为默认值，不能宣称已优化或净省 token |
+
+本期取舍已明确，无须用户再指定技术细节：复用宿主模型/现有队列与写服务、分阶段检索、增量提炼、业务规则保留人工激活。新的中心服务、模型 API 和知识权威迁移不属于本实施方案。
+
+代码和局部验证已开始落地，实际范围及结果见 progress.md；ZCode 执行中注入/消费局部通过，headless build 模式的 MCP 提炼被许可客户端缺失阻断。三人试点和净效果测量仍待执行，保留原准入条件。
+
+
+===== SOURCE: docs/inflight-rollout.md =====
+# 执行中知识使用：升级、接入与验收
+
+适用当前源码；新增机制复用原 memory.db、经验卡和 Git，不需要新模型 API。
+
+## 1. 升级前
+
+暂停当前机器的 knowbase 写入；记录源码版本与现有配置。使用 SQLite 在线 backup 备份 memory.db，保留 Markdown/Git revision 与本地运行材料；不要只复制活跃数据库主文件。配置备份留本机，不提交 Git。
+
+新版本按 v9–v14 增量迁移：执行上下文、材料/批次、复合片段键、提交回执、应用租约、相似卡快照、脱敏事件观察。旧 usage/feedback/spool 保留。旧候选和截断材料保持 legacy_unverified/待复核，不自动大批成卡。
+
+更新代码后重连宿主的 knowbase MCP，确认可以发现 `memory_context`、`memory_job_material` 等共 14 个工具。已启动旧服务不会因磁盘代码变化自动获得新协议；当前对话应重连 MCP 或在更新后开启新会话。
+
+## 2. 配置
+
+合并至现有 `~/.knowbase/config.json`，保留已有 repo_path、Git 配置等字段：
+
+```json
+{
+  "scope_map": {"/你的项目绝对路径": "库中对应项目名"},
+  "inflight": {
+    "enabled": true,
+    "capture_enabled": false,
+    "mode": "assisted",
+    "checkpoint_work_ops": 6,
+    "checkpoint_minutes": 10
+  }
+}
+```
+
+新机制默认关闭；开启前先完成当前宿主的隔离检索、提炼和回滚验收。mode 是配置声明，不是验收证明；没有完整证据时保留 assisted。映射支持规范路径别名；不要把不同项目映射成一个 scope 来提高命中率。
+
+首机先用上述配置开启自动检索/本地观察，capture_enabled=false 暂不强制自动入队；原收尾提醒和 Agent 显式的阶段提炼仍可用。完整宿主链路验证后再打开 capture_enabled。不要把只读试用当成全部自动沉淀或三人验收已通过。
+
+正式使用建议安装经过测试的 wheel 到固定运行环境，MCP 与 Hook 同时指向该环境的 Python；避免服务直接运行开发目录的 editable 版本。运行环境仍指向原 repo_path 和同一 memory.db；固定发行包不是第二套知识库。切换前备份配置，回滚时关闭新机制并恢复之前的命令路径。
+
+宿主接线见 [ZCode](hosts/zcode.md)、[Claude Code](hosts/claude.md)；Trae 使用[主动工作流规则](trae-rules.md)。
+
+## 3. Agent 工作流
+
+1. 先把长需求拆为目标、约束、子任务及原文位置，调用 memory_context(stage=task_plan)，以短查询表达当前阶段的问题。
+2. 本轮执行中进入子任务、新错误和重要决策前调用 memory_context；命中后读卡并核对条件。不要等用户下一条消息。
+3. 阶段完成检查技术经验与业务规则。较长材料用 memory_capture；领取时 memory_job_claim(protocol_version=2)，has_more 时 memory_job_material 续页。
+   开启工具观察后，可沿用 Hook 提示的 session_id/scope/host_profile 直接调用 memory_capture 收集持久增量，无需模型重抄长原文。无观察来源时需显式提供材料，不假装已抓取。
+4. 根据八项结构提炼，引用已完整交付片段的 ID/hash；有相似卡时读回并给 duplicate_evaluation。业务规则保留出处、业务确认/激活/实现状态，不把代码推断当业务真值。
+5. memory_job_submit 后核对 results 中实际 memory_id、content_revision、治理与同步状态；校验失败不推进进度。bizrule/standard/preference 仍进 staging，由人工审核。
+6. 任务未处理完保留 awaiting_agent/validating。memory_job_status 可恢复已确定的应用；没有活跃宿主时不生成新语义结论。
+
+Hook 会先将可观察事件脱敏存本地数据库。transcript 不可得或已重写时可从已观察事件恢复，但 coverage_scope=observed_host_events 不代表完整聊天。未知输入/破损 transcript、缺证据和队列满均要明确报告，不能标成功。
+
+## 4. 验收与能力记录
+
+- 本地测试：完整长输入、尾部规则、续页、租约、版本、候选真实成卡、幂等恢复、默认检索隔离与正式 stdio。
+- 待人工复核材料包：tests/fixtures/inflight/，含冻结的真实项目设计输入、来源哈希、6 个规则/反例锚点；human_approved=false 时不能计作人工金标准通过。
+- 宿主：一次用户输入后，第二/第三子任务仍能获得经验；下一步行动实际消费候选；阶段完成可通过宿主 MCP 领取、提交并读回卡。
+- 团队：每人至少一条实际多阶段任务，确认他人同步后能查到生效卡，待审规则不混入默认建议。
+- 净提效：分别记录相关阶段覆盖、采用并验证的任务数、知识遗漏、额外时延及可得的总 token。没有对照不报节省百分比。
+
+当前证据与限制见 [宿主能力记录](host-capabilities.md)。ZCode 隔离 build 模式已证实执行中注入和消费；MCP 提炼因该 headless 模式没有 permission client 被拒，整链未验收。应在正常有许可客户端的宿主会话中验证；不要为测试关闭团队的许可/审批策略。
+
+## 5. 回滚
+
+关闭 inflight.enabled，移除新工具事件配置即可恢复原三 Hook 路径；保留数据和待办，不删表。已保存卡按现有治理处理，不批量撤销正确知识。
+
+回退旧代码前确认能忽略新字段和新表；如需恢复旧备份，先冻结写入并导出升级后卡片、回执、未完成材料，记录实际损失/重放窗口。原始日志不随 Git 分享，备份仍需包含数据库。

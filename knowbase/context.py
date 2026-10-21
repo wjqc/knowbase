@@ -23,6 +23,20 @@ def _section(body: str, name: str) -> str:
     return match.group(1).strip() if match else "unknown"
 
 
+def _summary(body: str) -> str:
+    """兼容旧卡三小节，但不把缺失的适用条件猜成已知。"""
+    from .extraction.sanitizer import sanitize
+    conclusion = _section(body, "结论")
+    if conclusion != "unknown":
+        return sanitize(conclusion)[:500]
+    for heading in ("正确做法", "解决方案", "处理方法"):
+        existing = _section(body, heading)
+        if existing != "unknown":
+            return ("旧卡原文（" + heading + "）：" + sanitize(existing))[:500]
+    excerpt = "\n".join(line for line in body.splitlines() if line.strip() and not line.lstrip().startswith("#"))
+    return ("旧卡原文片段：" + sanitize(excerpt))[:500] if excerpt else "unknown"
+
+
 def execute(repo, *, session_id: str, event_id: str, scope: str = "",
             stage: str = "subtask_start", task_id: str = "", task_revision: str = "",
             current_goal: str = "", topics=None, evidence_refs=None, observed_cursor: str = "",
@@ -146,7 +160,7 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                         seen.add(hit["id"])
                         row = conn.execute("SELECT content_revision FROM entity_heads WHERE entity_id=?", (hit["id"],)).fetchone()
                         candidate = {"id": hit["id"], "scope": hit["scope"], "content_revision": row[0] if row else materials.digest(body),
-                                     "title": hit["title"], "summary": _section(body, "结论")[:500],
+                                     "title": hit["title"], "summary": _summary(body),
                                      "applicable_when": _section(body, "适用条件")[:300],
                                      "confidence": hit["confidence"], "status": hit["status"], "topic_ids": [tid]}
                         size = len(json.dumps(candidate, ensure_ascii=False))

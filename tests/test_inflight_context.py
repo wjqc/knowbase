@@ -129,3 +129,33 @@ def test_empty_global_start_does_not_lock_later_project_binding(memory_repo):
     bound = json.loads(context_impl(session_id="late-project", event_id="real-task", scope="orders",
                                    stage="task_plan", current_goal="订单撤回"))
     assert bound["scope"] == "orders" and not bound.get("error")
+
+
+def test_legacy_three_section_card_uses_existing_text_not_invented_conditions(memory_repo):
+    meta = store.new_meta("pitfall", "Clash TUN 旧版内网排查卡", "orders", ["Clash"], "agent:fixture:legacy")
+    meta.pop("schema", None)
+    meta["id"] = "P-2020-0001"
+    body = "## 现象\n内网 Git 空回复。\n## 原因\n路由指向 fake-IP。\n## 正确做法\n先核对路由，再验证办公网接口连通性。\n"
+    path = store.mem_path(memory_repo, "pitfall", meta["id"])
+    path.write_text(store.render(meta, body))
+    conn = index.connect(memory_repo)
+    index.upsert(conn, meta, body, path)
+    conn.close()
+    result = run("legacy", queries=["Clash TUN"])
+    assert "先核对路由" in result["candidates"][0]["summary"]
+    assert result["candidates"][0]["applicable_when"] == "unknown"
+
+
+def test_feedback_request_count_is_not_duplicated_by_adapter(memory_repo):
+    mid = seed(memory_repo)
+    from knowbase.server import feedback_impl
+    feedback_impl(mid, "helpful", context="受控链路验证", request_id="feedback-once")
+    conn = index.connect(memory_repo)
+    assert conn.execute("SELECT COUNT(*) FROM usage_log WHERE tool='feedback'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM feedback_log").fetchone()[0] == 1
+    conn.close()
+    feedback_impl(mid, "helpful", context="同请求重放", request_id="feedback-once")
+    conn = index.connect(memory_repo)
+    assert conn.execute("SELECT COUNT(*) FROM usage_log WHERE tool='feedback'").fetchone()[0] == 2
+    assert conn.execute("SELECT COUNT(*) FROM feedback_log").fetchone()[0] == 1
+    conn.close()

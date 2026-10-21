@@ -38,6 +38,7 @@ def session_start() -> str:
         "4. stale/once 状态的记忆采信前先在当前环境验证。\n"
         "5. 执行中进入新子任务/模块、发现新错误、重要决策前，调用 memory_context 提交本阶段主题和具体查询；"
         "无需等待下一条用户消息。长方案逐阶段查，不整篇只查一次；阶段完成同时检查技术经验与业务规则。\n"
+        "已开启观察的会话可用 memory_capture(session_id,scope,host_profile) 直接抓取持久化增量，无需重新复制长原文。\n"
         "6. 提炼使用 memory_job_claim(protocol_version=2)，材料未读完用 memory_job_material 续页；"
         "候选注明 type/title/scope/八项 body/segment_ids/evidence_refs，业务规则含 provenance 和 rule_context；"
         "memory_job_submit 后核对 memory_id/保存状态，queued 和 accepted 不代表已成卡。"
@@ -170,7 +171,7 @@ def _maybe_trigger_mid_session_capture(session_id: str, transcript_path: str) ->
             pass
 
 
-def stop_event(session_id: str, transcript_path: str) -> str:
+def stop_event(session_id: str, transcript_path: str, *, allow_enqueue: bool = True) -> str:
     """漏存（有操作无沉淀）→ 入队 + 阻断引导领取；读后未回填 → 阻断提醒。
 
     M0 增强：漏存场景自动入队 capture 任务，阻断提示包含 job_id 和领取指引。
@@ -182,7 +183,7 @@ def stop_event(session_id: str, transcript_path: str) -> str:
     job_hint = ""
     if t["work_ops"] and not t["memory_write"]:
         # 尝试入队 capture 任务
-        job_id = _try_enqueue_capture(session_id, transcript_path, cfg)
+        job_id = _try_enqueue_capture(session_id, transcript_path, cfg) if allow_enqueue else ""
         reason = (
             "[knowbase] 本次会话有代码/文件操作但未沉淀经验。"
         )
@@ -220,58 +221,39 @@ def stop_event(session_id: str, transcript_path: str) -> str:
 
 
 def _try_enqueue_capture(session_id: str, transcript_path: str, cfg: dict) -> str:
-    """尝试入队 capture 任务。失败时返回空串（不阻断原有阻断逻辑）。
-
-    M3-1 增强：支持长会话多 checkpoint 切分，为每个 checkpoint 创建独立 job。
-    返回第一个 job_id（用于阻断提示），或空串表示无任务入队。
-    """
+    """旧收尾/中途入口也复用完整材料 manifest，不再截断或建第二套任务。"""
+    from . import materials
+    from .adapters import normalizer
+    rp = config.repo_path(cfg)
+    if not rp.exists():
+        return ""
+    conn = index.connect(rp)
     try:
-        from . import index, jobs
-        from .adapters import normalizer, checkpoint as cp_mod
-
-        rp = config.repo_path(cfg)
-        if not rp.exists():
+        scope = _infer_scope(conn)
+        if has_project_context() and not scope:
             return ""
-
-        # 推断 scope
-        conn = index.connect(rp)
-        try:
-            scope = _infer_scope(conn) or "global"
-        finally:
-            conn.close()
-
-        # 解析 transcript
-        events = normalizer.parse_transcript_file(
-            transcript_path, default_session_id=session_id, default_scope=scope,
-        )
+        scope = scope or "global"
+        events = normalizer.parse_transcript_auto(transcript_path, default_session_id=session_id,
+                                                  default_scope=scope, strict=True)
         if not events:
             return ""
-
-        # M3-1: 使用 build_checkpoints 支持多 checkpoint 切分
-        checkpoints = cp_mod.build_checkpoints(events, session_id=session_id, scope=scope)
-        if not checkpoints:
+        payload = materials.capture_payload(events, scope=scope, session_id=session_id)
+        if not payload["segments"]:
             return ""
-
-        first_job_id = ""
-        conn = index.connect(rp)
-        try:
-            for cp in checkpoints:
-                result = jobs.enqueue(
-                    conn, jobs.KIND_CAPTURE, scope,
-                    {"checkpoint": cp.__dict__, "transcript_ref": transcript_path},
-                    idempotency_key=cp.idempotency_key,
-                )
-                if result["created"]:
-                    jobs.set_preparing(conn, result["job_id"])
-                    jobs.set_awaiting(conn, result["job_id"], 1)
-                    if not first_job_id:
-                        first_job_id = result["job_id"]
-        finally:
-            conn.close()
-        return first_job_id
-    except Exception:
-        pass  # 入队失败不阻断原有逻辑
-    return ""
+        from . import jobs
+        result = jobs.enqueue(conn, jobs.KIND_CAPTURE, scope, payload,
+                              idempotency_key=f"capture:legacy-hook:{session_id}:{scope}:{payload['input_version']}")
+        if result.get("error"):
+            return ""
+        if result["created"] or result.get("state") in ("queued", "preparing"):
+            materials.register_manifest(conn, result["job_id"], payload)
+            jobs.set_preparing(conn, result["job_id"])
+            jobs.set_awaiting(conn, result["job_id"], len(payload["segments"]))
+        return result["job_id"]
+    except (OSError, ValueError, TypeError):
+        return ""  # 提醒仍会保留；不能以坏来源创建空成功任务。
+    finally:
+        conn.close()
 
 
 # ---------- stdin/stdout 包装层 ----------
@@ -323,7 +305,7 @@ def cmd_user_prompt(style: str = "claude"):
 def cmd_stop(style: str = "claude"):
     os.environ.setdefault("KNOWBASE_AGENT_NAME", style)
     data = _read_stdin()
-    if config.load_config()["inflight"]["enabled"]:
+    if config.load_config()["inflight"]["enabled"] and config.load_config()["inflight"]["capture_enabled"]:
         from .adapters import host_events
         from .materials import digest
         result = host_events.handle(data, event="stop", style=style)
@@ -339,7 +321,8 @@ def cmd_stop(style: str = "claude"):
     sid = _first(data, "session_id", "sessionId") \
         or os.environ.get("CLAUDE_SESSION_ID") or os.environ.get("ZCODE_SESSION_ID") or "unknown"
     tp = _first(data, "transcript_path", "transcript", "transcriptPath")
-    out = stop_event(sid, tp)
+    cfg = config.load_config()
+    out = stop_event(sid, tp, allow_enqueue=not cfg["inflight"]["enabled"] or cfg["inflight"]["capture_enabled"])
     if out:
         print(out)  # 顶层 decision/reason：claude 与 zcode 同形
 

@@ -1,0 +1,100 @@
+{
+  "schema": "inflight-acceptance-v1",
+  "frozen_date": "2026-10-22",
+  "input_sha256": "5b3dce0a146f5eaf6550fa59e55f924a30d6806513ecde95ae7f50de722d2df3",
+  "input_chars": 32239,
+  "sources": [
+    {
+      "path": "docs/knowbase-inflight-memory-plan.md",
+      "sha256_original": "5cd4e1692e5aed2a6061ac68e9c53c9242f2e0f3b9954743dbd74a413c953947",
+      "start_char": 0,
+      "end_char": 11746,
+      "transform": "project-root placeholder only"
+    },
+    {
+      "path": "docs/knowbase-inflight-memory-implementation-plan.md",
+      "sha256_original": "0659ccb578057da219d0d32c3280318997baed124432307e76e100a556782d79",
+      "start_char": 11746,
+      "end_char": 29448,
+      "transform": "project-root placeholder only"
+    },
+    {
+      "path": "docs/inflight-rollout.md",
+      "sha256_original": "2453b264e6c29a51b852a7a46e9b1dd7770c8d9996b6d46b4a11112822c16c15",
+      "start_char": 29448,
+      "end_char": 32239,
+      "transform": "project-root placeholder only"
+    }
+  ],
+  "annotation_author": "implementation_agent",
+  "human_approved": false,
+  "acceptance_scope": "frozen real project design material; expectations prelabelled, not human acceptance",
+  "cases": [
+    {
+      "case_id": "rule-staging",
+      "title": "治理与生效分开",
+      "anchor": "bizrule/standard/preference 一律 staging",
+      "start_char": 19618,
+      "line": 403,
+      "expected_behavior": "业务规则进入待审；不能以模型判断直接激活。",
+      "review_status": "agent_prelabel_pending_human",
+      "human_reviewer": null,
+      "human_reviewed_at": null
+    },
+    {
+      "case_id": "coverage-prefix",
+      "title": "片段覆盖而非候选计数",
+      "anchor": "候选数量不作为片段数量",
+      "start_char": 17431,
+      "line": 358,
+      "expected_behavior": "未读/未处理片段不可标完成；乱序完成不能跨过缺口。",
+      "review_status": "agent_prelabel_pending_human",
+      "human_reviewer": null,
+      "human_reviewed_at": null
+    },
+    {
+      "case_id": "real-card",
+      "title": "候选提交与实际成卡分开",
+      "anchor": "只存 candidates 时不得返回 saved",
+      "start_char": 22521,
+      "line": 447,
+      "expected_behavior": "必须有卡片/索引读回，或明确 review/no_candidate；不能把排队当保存。",
+      "review_status": "agent_prelabel_pending_human",
+      "human_reviewer": null,
+      "human_reviewed_at": null
+    },
+    {
+      "case_id": "no-fake-provenance",
+      "title": "业务来源与推断分开",
+      "anchor": "未获业务出处的推断保留待确认候选",
+      "start_char": 19657,
+      "line": 403,
+      "expected_behavior": "代码推断不冒充已确认 PRD；规则确认、激活、实现验证分别记录。",
+      "review_status": "agent_prelabel_pending_human",
+      "human_reviewer": null,
+      "human_reviewed_at": null
+    },
+    {
+      "case_id": "scope-guard",
+      "title": "项目范围与跨项目混用",
+      "anchor": "未知项目不扩成全库",
+      "start_char": 18865,
+      "line": 390,
+      "expected_behavior": "范围不明时报告，不能捞其他项目答案冒充本项目规则。",
+      "review_status": "agent_prelabel_pending_human",
+      "human_reviewer": null,
+      "human_reviewed_at": null
+    },
+    {
+      "case_id": "no-progress-card",
+      "title": "经验与过程数字分开",
+      "anchor": "一次性修改文件列表、进度和通过总数",
+      "start_char": 5253,
+      "line": 134,
+      "expected_behavior": "仅有测试总数/进度不是可复用业务规则，不强行造卡。",
+      "review_status": "agent_prelabel_pending_human",
+      "human_reviewer": null,
+      "human_reviewed_at": null
+    }
+  ]
+}

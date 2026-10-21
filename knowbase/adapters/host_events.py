@@ -54,8 +54,12 @@ def capture_increment(repo, session_id, transcript_path, scope, host):
               if path.is_file() else None)
     conn = index.connect(repo)
     try:
-        row = conn.execute("SELECT coverage_json FROM context_sessions WHERE host_profile=? AND session_id=?",
+        row = conn.execute("SELECT coverage_json,scope FROM context_sessions WHERE host_profile=? AND session_id=?",
                            (host, session_id)).fetchone()
+        if not row:
+            return {"error": "SESSION_CONTEXT_MISSING", "needs_input": True}
+        if row[1] != scope:
+            return {"error": "SCOPE_MISMATCH"}
         coverage = json.loads(row[0]) if row else {}
         checkpoint = coverage.get("_hook_capture", {})
         source_kind = "transcript" if events is not None else "observations"
@@ -149,13 +153,22 @@ def handle(data: dict, *, event: str, style: str) -> dict:
         if not last_at:
             last_at = conn.execute("SELECT MIN(created_at) FROM context_events WHERE host_profile=? AND session_id=?",
                                    (host, session)).fetchone()[0]
+        known_scopes = [r[0] for r in conn.execute("SELECT DISTINCT scope FROM meta WHERE scope!='global' ORDER BY scope LIMIT 20")]
+        cutoff = (datetime.now(timezone.utc).timestamp() - 60)
+        recent_scope_errors = [r[0] for r in conn.execute("SELECT created_at FROM context_events WHERE host_profile=? "
+                               "AND session_id=? AND status='scope_unresolved' ORDER BY rowid DESC LIMIT 1", (host, session))]
+        scope_notice = not recent_scope_errors or datetime.fromisoformat(recent_scope_errors[0]).timestamp() < cutoff
     finally:
         conn.close()
     if not scope:
         # context 内核统一记录无法解析，而不是退化成全库。
-        return context.execute(repo, session_id=session,
+        result = context.execute(repo, session_id=session,
             event_id=materials.digest({"event": event, "input": data}), stage="observe", scope="",
             host_profile=host, current_goal="", automatic=True, project_path=str(project or ""), observation=observation)
+        result.update(scope_binding_required=True, scope_notice=scope_notice, project_path=str(project or ""),
+            known_scopes=known_scopes, planning_context={"session_id":session,"host_profile":host,
+                "event_id":"scope-plan:"+materials.digest(data),"stage":"task_plan"})
+        return result
     failed = event == "tool-failure"
     response = data.get("tool_response") or data.get("tool_result") or {}
     if isinstance(response, dict):
@@ -189,7 +202,7 @@ def handle(data: dict, *, event: str, style: str) -> dict:
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(last_at)).total_seconds()
         due = due or age >= cfg["inflight"]["checkpoint_minutes"] * 60
     transcript = data.get("transcript_path") or data.get("transcriptPath")
-    if due:
+    if due and cfg["inflight"]["capture_enabled"]:
         try:
             captured = capture_increment(repo, session, transcript, scope, host)
         except (OSError, ValueError, TypeError) as exc:
@@ -240,6 +253,15 @@ def handle(data: dict, *, event: str, style: str) -> dict:
 def render(result):
     if result.get("status") in {"disabled", "skipped_self"}:
         return ""
+    if result.get("scope_binding_required"):
+        if not result.get("scope_notice", True):
+            return ""
+        return ("[knowbase] 当前项目范围未确定，尚未检索，未退回全库。请根据当前项目选原有 scope（未建库的新项目用明确项目标识），"
+                "调用 memory_context 并补 scope/current_goal/topics，沿用会话身份："
+                + json.dumps(result["planning_context"], ensure_ascii=False)
+                + "。项目路径：" + result.get("project_path", "unknown")
+                + "；已有 scope 标签（部分）：" + ", ".join(result.get("known_scopes", []))
+                + "。项目归属不明确时保持未检索，不查询其他项目内容。")
     if result.get("error"):
         return "[knowbase] 执行中知识处理未完成：" + str(result["error"]) + "；请核对 scope/待办，不把失败当作无知识。"
     lines = []

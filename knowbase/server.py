@@ -318,7 +318,7 @@ def json_counts(counts):
 
 def capture_impl(session_id: str = "", checkpoint: str = "", scope: str = "",
                  transcript_ref: str = "", messages: list | None = None,
-                 request_id: str = "") -> str:
+                 request_id: str = "", host_profile: str = "") -> str:
     """入队一个对话沉淀任务。
 
     返回 job_id + 状态；宿主收到后通过 memory_job_claim 领取材料并提炼。
@@ -330,6 +330,18 @@ def capture_impl(session_id: str = "", checkpoint: str = "", scope: str = "",
         return "错误：session_id 必填"
     if not scope:
         return "错误：scope 必填"
+    if not messages and not transcript_ref and host_profile:
+        from .adapters.host_events import capture_increment
+        try:
+            result = capture_increment(rp, session_id, "", scope, host_profile)
+        except (OSError, ValueError, TypeError) as exc:
+            return f"错误：{type(exc).__name__}，观察材料未完成入队"
+        if result.get("error"):
+            return f"错误：{result['error']}"
+        if result.get("job_ids"):
+            return ("已入队 " + ", ".join(result["job_ids"]) +
+                    "（来源：本会话已持久化观察，state=awaiting_agent；请领取提炼，尚未成卡）")
+        return "无新增观察材料；请继续处理已有任务，或显式提供 messages/transcript_ref。"
 
     # 构建 checkpoint
     events = []
@@ -766,7 +778,7 @@ mcp.tool(name="memory_search", description="检索经验记忆：任务开始涉
 mcp.tool(name="memory_feedback", description="按记忆行动后回填结果：helpful/not_helpful/outdated/incorrect。驱动经验晋升与淘汰")(feedback_impl)
 mcp.tool(name="memory_context", description="执行中知识检索：拆解长方案后、进入子任务、新错误和重要决策前调用；提供当前主题与查询，阶段结束检查技术经验及业务规则待办")(context_impl)
 mcp.tool(name="memory_stats", description="记忆库统计：数量分布、使用漏斗、TOP 记忆")(stats_impl)
-mcp.tool(name="memory_capture", description="入队对话沉淀任务。宿主会话结束或检查点时调用，返回 job_id 供后续领取")(capture_impl)
+mcp.tool(name="memory_capture", description="阶段完成时入队提炼任务。提供材料，或沿用 Hook 的 session_id/scope/host_profile 直接收集已持久化观察，避免复制长原文；返回 job_id，不代表已成卡")(capture_impl)
 mcp.tool(name="memory_job_claim", description="领取提炼批次。返回脱敏材料、相似卡引用、lease_token 和到期时间")(job_claim_impl)
 mcp.tool(name="memory_job_material", description="分页读取已领取批次材料，保留原文定位；返回 next_cursor，读完后再提交对应片段")(job_material_impl)
 mcp.tool(name="memory_job_renew", description="续租当前批次。延长 lease 到期时间")(job_renew_impl)

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -14,8 +15,9 @@ from knowbase import config, store
 
 def test_registered_mcp_pipeline_creates_and_consumes_knowledge(memory_repo):
     async def probe():
-        parameters = StdioServerParameters(command=sys.executable, args=["-m", "knowbase", "serve"],
-            cwd=str(Path(__file__).resolve().parents[1]), env={
+        interpreter = os.environ.get("KNOWBASE_STDIO_INTERPRETER", sys.executable)
+        parameters = StdioServerParameters(command=interpreter, args=["-m", "knowbase", "serve"],
+            cwd=str(memory_repo.parent) if "KNOWBASE_STDIO_INTERPRETER" in os.environ else str(Path(__file__).resolve().parents[1]), env={
                 "KNOWBASE_CONFIG": str(config.CONFIG_PATH), "KNOWBASE_REPO_PATH": str(memory_repo),
                 "KNOWBASE_AGENT_NAME": "stdio-probe"})
         async with stdio_client(parameters) as (read, write):
