@@ -15,7 +15,7 @@
 
 | 编号 | 原契约/当前缺口 | 代码依据 | 后续落点与验收 |
 |---|---|---|---|
-| C1 | 执行中快路径不能因只读而长期看不到同事更新。当前 context 直接读取本地索引，没有非阻塞触发既有 TTL 同步；传统 memory_search 的同步不能代替新入口 | context.py:execute；server.py:search_impl；gitops.py:sync_before_read | 复用现有同步内核及跨进程租约；快路径不等网络；新卡到达后缓存失效，失败明确 last-known-good/新鲜度 |
+| C1 | 本地实现：context 非阻塞调度短生命周期刷新，跨进程租约与冷却期共用；fetch 不占 RepoLock，合并/索引重建持锁。候选读取遇锁返回 deferred_sync，不误记为检索完成 | context.py:execute；refresh.py；gitops.py:sync_before_read；迁移v15 | 双克隆实际提交/接收、慢fetch并发读取、租约争抢/过期接管、关闭auto_pull/目标改变、失败保留本地卡、auto_push=false均有回归。后台刷新只接收远端变更，推送仍走写入链路。仍未进入固定发行包/真实三机验收 |
 | C2 | 设计要求记录参考/采纳/无关/待验证并关联任务和卡版本。当前主要保留候选和反馈，尚不能独立统计完整任务采纳链 | context.py 返回和事件字段；index.py:feedback_log | 增加有界采纳记录/结果协议，不能命中即自动 helpful；用真实消费与反例验证 |
 | C3 | 设计要求按卡版本+任务结果去重反馈。当前只有 request_id 和 governance revision，未完整约束读后内容变更和跨请求重复；治理中的标签/内容版本也需核准 | server.py:feedback_impl；commit_adapter.py:adapter_feedback；lifecycle.py:apply_feedback | 增补版本/任务绑定、旧接口兼容和重放边界；旧版本反馈不能验证新内容；工具标签不能充当人工身份 |
 | C4 | 团队统计应只读导出汇总而非复制原始数据库。当前 stats/doctor 可看本机，尚无稳定的隐私最小化导出协议 | __main__.py:cmd_stats/cmd_doctor；server.py:stats_impl | 提供不含查询/原文/业务正文的计数导出、范围及schema，支持三机收集；人数需真实使用者确认 |

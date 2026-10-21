@@ -155,7 +155,7 @@ def test_push_validates_actual_remote_not_declared_url(isolated_repo):
     assert "不在白名单" in result
 
 
-def test_sync_uses_dynamic_branch_and_holds_repo_lock(isolated_repo, monkeypatch):
+def test_sync_uses_dynamic_branch_without_holding_lock_during_network(isolated_repo, monkeypatch):
     repo, _ = isolated_repo
     subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "file:///tmp/remote.git"],
                    check=True)
@@ -169,11 +169,8 @@ def test_sync_uses_dynamic_branch_and_holds_repo_lock(isolated_repo, monkeypatch
         if args[:2] == ("status", "--porcelain"):
             return ""
         if args[:3] == ("fetch", "origin", "trunk"):
-            from knowbase.locking import LockTimeout
-            with pytest.raises(LockTimeout):
-                with RepoLock(target, timeout=0.05):
-                    pass
-            observed.append("locked")
+            with RepoLock(target, timeout=0.05):
+                observed.append("network-unlocked")
             return ""
         if args[:2] == ("rev-parse", "HEAD"):
             return "abc"
@@ -187,7 +184,7 @@ def test_sync_uses_dynamic_branch_and_holds_repo_lock(isolated_repo, monkeypatch
     cfg["git"]["allowed_remote_prefixes"] = ["file://"]
     changed, warning = gitops.sync_before_read(repo, cfg)
     assert (changed, warning) == (False, None)
-    assert observed == ["locked"]
+    assert observed == ["network-unlocked"]
 
 
 def test_sync_pushes_local_ahead_branch_after_releasing_lock(isolated_repo, monkeypatch):
@@ -222,6 +219,7 @@ def test_sync_pushes_local_ahead_branch_after_releasing_lock(isolated_repo, monk
     monkeypatch.setattr(gitops, "push", fake_push)
     cfg = config.load_config()
     cfg["git"]["auto_pull"] = True
+    cfg["git"]["auto_push"] = True
     cfg["git"]["allowed_remote_prefixes"] = ["file://"]
     changed, warning = gitops.sync_before_read(repo, cfg)
     assert (changed, warning) == (False, None)
@@ -258,6 +256,7 @@ def test_sync_rebases_diverged_branch_when_changes_do_not_overlap(isolated_repo,
     monkeypatch.setattr(gitops, "push", lambda *_a, **_k: pushed.append(True))
     cfg = config.load_config()
     cfg["git"]["auto_pull"] = True
+    cfg["git"]["auto_push"] = True
     cfg["git"]["allowed_remote_prefixes"] = ["file://"]
 
     changed, warning = gitops.sync_before_read(repo, cfg)

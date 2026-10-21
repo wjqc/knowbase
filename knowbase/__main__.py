@@ -822,7 +822,17 @@ def main(argv=None):
     p_jobs_retry = jobs_sub.add_parser("retry", help="重试失败任务")
     p_jobs_retry.add_argument("job_id")
     jobs_sub.add_parser("expire", help="回收过期租约")
+    p_sync = sub.add_parser("sync-once", help="执行已领取租约的后台同步工作")
+    p_sync.add_argument("--remote", required=True)
+    p_sync.add_argument("--branch", required=True)
+    p_sync.add_argument("--lease-token", required=True)
     args = parser.parse_args(argv)
+
+    if args.cmd == "sync-once":
+        from .refresh import run_once
+        result = run_once(config.repo_path(), args.remote, args.branch, args.lease_token)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if result["state"] in ("completed", "cancelled") else 2
 
     if args.cmd == "init":
         return cmd_init(args.import_from, args.scope, args.type)

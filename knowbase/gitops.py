@@ -155,6 +155,8 @@ def _rebase_onto(repo: Path, remote_ref: str) -> None:
             try:
                 # 检查是否仍在 rebase 状态（.git/rebase-merge 或 .git/rebase-apply 存在）
                 git_dir = Path(_run(repo, "rev-parse", "--git-dir", timeout=2))
+                if not git_dir.is_absolute():
+                    git_dir = Path(repo) / git_dir
                 in_rebase = (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
             except Exception:
                 pass
@@ -352,182 +354,198 @@ def record_sync_attempt(repo: Path, remote: str, branch: str, target_sha: str,
         return ""
 
 
-def _check_sync_lease(repo: Path, remote: str, branch: str, ttl_seconds: float) -> tuple[bool, str]:
-    """检查跨进程同步租约，返回 (是否可执行, telemetry_warning)。
+def _lease_connection(repo: Path):
+    import sqlite3
+    from .index import db_path
+    conn = sqlite3.connect(db_path(repo), timeout=0.05)
+    conn.execute("PRAGMA busy_timeout=50")
+    return conn
 
-    使用 sync_lease 表进行跨进程协调，替代纯进程内 _LAST_FETCH_MONO。
-    """
+
+def sync_target_hash(repo: Path, git_cfg: dict, remote: str, branch: str) -> str:
+    """绑定本机可观察的远端配置/分支版本，不在日志中暴露 URL 凭据。"""
+    import hashlib
+    import json
+    git_dir = Path(repo) / ".git"
+    if git_dir.is_file():
+        git_dir = (Path(repo) / git_dir.read_text().strip().removeprefix("gitdir: ")).resolve()
+    common = git_dir
+    if (git_dir / "commondir").is_file():
+        common = (git_dir / (git_dir / "commondir").read_text().strip()).resolve()
+    data = {"remote": remote, "branch": branch, "declared":git_cfg.get("remote", {}),
+            "allowed":git_cfg.get("allowed_remote_prefixes", []),
+            "head":(git_dir/"HEAD").read_text(), "git_config":(common/"config").read_text()}
+    return hashlib.sha256(json.dumps(data,sort_keys=True).encode()).hexdigest()
+
+
+def acquire_sync_lease(repo: Path, remote: str, branch: str, *,
+                       duration: float = 120.0, respect_cooldown: bool = True,
+                       target_hash: str = "") -> tuple[str | None, str]:
+    """原子领取同一同步目标。数据库异常时不执行无协调同步。"""
+    conn = None
     try:
-        from . import index
-        conn = index.connect(repo)
+        conn = _lease_connection(repo)
+        conn.execute("BEGIN IMMEDIATE")
         now = datetime.now(timezone.utc)
-        now_str = now.isoformat(timespec="seconds")
-        expires_str = (now + timedelta(seconds=ttl_seconds)).isoformat(timespec="seconds")
-
-        # 检查现有租约
-        row = conn.execute(
-            "SELECT lease_owner, lease_until FROM sync_lease WHERE repo=? AND remote=? AND branch=?",
-            (str(Path(repo).resolve()), remote, branch),
-        ).fetchone()
-
-        if row:
-            owner, until = row
-            if until and until > now_str:
-                # 租约未过期，其他进程持有
-                conn.close()
-                return False, f"同步租约由 {owner} 持有至 {until}"
-
-        # 获取或更新租约
-        lease_owner = f"pid-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-        conn.execute(
-            "INSERT OR REPLACE INTO sync_lease(repo,remote,branch,lease_owner,lease_until,last_attempt) "
-            "VALUES(?,?,?,?,?,?)",
-            (str(Path(repo).resolve()), remote, branch, lease_owner, expires_str, now_str),
-        )
+        stamp = now.isoformat(timespec="seconds")
+        row = conn.execute("SELECT lease_owner,lease_until,next_check_at,target_hash FROM sync_lease "
+                           "WHERE repo=? AND remote=? AND branch=?", (str(Path(repo).resolve()), remote, branch)).fetchone()
+        if row and row[0] and row[1] and row[1] > stamp:
+            conn.rollback()
+            return None, "同步租约已被占用"
+        if respect_cooldown and row and row[2] and row[2] > stamp and row[3] == target_hash:
+            conn.rollback()
+            return None, "同步检查仍在冷却期"
+        owner = "sync-" + uuid.uuid4().hex
+        expires = (now + timedelta(seconds=max(30, duration))).isoformat(timespec="seconds")
+        conn.execute("INSERT INTO sync_lease(repo,remote,branch,lease_owner,lease_until,last_attempt,target_hash) "
+                     "VALUES(?,?,?,?,?,?,?) ON CONFLICT(repo,remote,branch) DO UPDATE SET "
+                     "lease_owner=excluded.lease_owner,lease_until=excluded.lease_until,last_attempt=excluded.last_attempt,"
+                     "target_hash=excluded.target_hash,last_success=CASE WHEN sync_lease.target_hash=excluded.target_hash "
+                     "THEN sync_lease.last_success ELSE NULL END",
+                     (str(Path(repo).resolve()), remote, branch, owner, expires, stamp, target_hash))
         conn.commit()
-        conn.close()
-        return True, ""
-    except Exception as e:
-        # 数据库不可用时退化为允许执行，但返回告警
-        return True, f"同步租约检查失败（数据库不可用？）: {e}"
+        return owner, ""
+    except Exception as exc:
+        if conn:
+            conn.rollback()
+        return None, "同步租约不可用：" + type(exc).__name__
+    finally:
+        if conn:
+            conn.close()
 
 
-def _release_sync_lease(repo: Path, remote: str, branch: str, success: bool):
-    """释放同步租约，更新 last_success 或 next_check_at。"""
+def _owns_sync_lease(repo: Path, remote: str, branch: str, owner: str) -> bool:
+    conn = None
     try:
-        from . import index
-        conn = index.connect(repo)
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        if success:
-            conn.execute(
-                "UPDATE sync_lease SET last_success=?, lease_owner='', lease_until='' "
-                "WHERE repo=? AND remote=? AND branch=?",
-                (now, str(Path(repo).resolve()), remote, branch),
-            )
-        else:
-            # 失败时设置下次检查时间（指数退避）
-            row = conn.execute(
-                "SELECT next_check_at FROM sync_lease WHERE repo=? AND remote=? AND branch=?",
-                (str(Path(repo).resolve()), remote, branch),
-            ).fetchone()
-            # 简单实现：清空租约，让下次请求重新竞争
-            conn.execute(
-                "UPDATE sync_lease SET lease_owner='', lease_until='' WHERE repo=? AND remote=? AND branch=?",
-                (str(Path(repo).resolve()), remote, branch),
-            )
-        conn.commit()
-        conn.close()
+        conn = _lease_connection(repo)
+        row = conn.execute("SELECT lease_owner,lease_until FROM sync_lease WHERE repo=? AND remote=? AND branch=?",
+                           (str(Path(repo).resolve()), remote, branch)).fetchone()
+        return bool(row and row[0] == owner and row[1] and row[1] > datetime.now(timezone.utc).isoformat(timespec="seconds"))
     except Exception:
-        pass
+        return False
+    finally:
+        if conn:
+            conn.close()
 
 
-def sync_before_read(repo: Path, cfg: dict) -> tuple[bool, str | None]:
-    """TTL 到期时安全 fetch/ff/rebase；返回 (是否更新, 告警)。
+def _check_sync_lease(repo: Path, remote: str, branch: str, ttl_seconds: float) -> tuple[bool, str]:
+    owner, warning = acquire_sync_lease(repo, remote, branch, duration=max(120, ttl_seconds))
+    return bool(owner), warning
 
-    M0.5: 使用跨进程 sync_lease 协调，记录 sync_attempts，返回 telemetry_warning。
-    """
+
+def _release_sync_lease(repo: Path, remote: str, branch: str, success: bool, *,
+                        owner: str | None = None, cooldown: float = 0):
+    conn = None
+    try:
+        conn = _lease_connection(repo)
+        now = datetime.now(timezone.utc)
+        next_at = (now + timedelta(seconds=max(0, cooldown))).isoformat(timespec="seconds")
+        where = "repo=? AND remote=? AND branch=?" + (" AND lease_owner=?" if owner else "")
+        params = [str(Path(repo).resolve()), remote, branch] + ([owner] if owner else [])
+        conn.execute("UPDATE sync_lease SET lease_owner='',lease_until='',next_check_at=?,"
+                     "last_success=CASE WHEN ? THEN ? ELSE last_success END WHERE " + where,
+                     [next_at, int(success), now.isoformat(timespec="seconds"), *params])
+        conn.commit()
+    except Exception:
+        if conn:
+            conn.rollback()  # 无法持久释放时保留旧租约，过期后才能接管。
+    finally:
+        if conn:
+            conn.close()
+
+
+def sync_before_read(repo: Path, cfg: dict, *, lease_owner: str | None = None,
+                     target_remote: str | None = None, target_branch: str | None = None) -> tuple[bool, str | None]:
+    """同步内核：网络不持仓库锁，正式索引重建仍受同一锁保护。"""
     import time
     gcfg = cfg.get("git", {})
     if not gcfg.get("auto_pull", True) or not is_repo(repo):
+        if lease_owner and target_remote and target_branch:
+            _release_sync_lease(repo, target_remote, target_branch, False, owner=lease_owner)
         return False, None
-    key = str(Path(repo).resolve())
+    remote, branch = target_remote or "origin", target_branch or "unknown"
     ttl = max(10.0, float(gcfg.get("pull_ttl_seconds", 60)))
-
-    # 进程内快速路径：跳过未过期的
-    now_mono = time.monotonic()
-    if now_mono - _LAST_FETCH_MONO.get(key, 0.0) < ttl:
-        return False, None
-
-    # 跨进程租约检查
-    remote_name = str((gcfg.get("remote", {}) or {}).get("name") or "origin")
-    branch = str((gcfg.get("remote", {}) or {}).get("branch") or "")
+    owner = lease_owner
+    lease_target = (remote, branch) if lease_owner else None
+    started = time.monotonic()
+    updated, success, push_needed = False, False, False
+    target_sha, warning = "", None
     try:
-        remote_name_check, branch_check, _ = _remote_target(repo, gcfg)
-        remote_name = remote_name_check
-        branch = branch_check
-    except Exception:
-        pass
-
-    can_sync, lease_warning = _check_sync_lease(repo, remote_name, branch, ttl)
-    if not can_sync:
-        # 其他进程正在同步，跳过本次
-        return False, lease_warning or "同步已由其他进程执行"
-
-    _LAST_FETCH_MONO[key] = now_mono
-    start_time = time.monotonic()
-    push_needed = False
-    updated = False
-    telemetry_warnings: list[str] = []
-    if lease_warning:
-        telemetry_warnings.append(lease_warning)
-
-    try:
+        actual_remote, actual_branch, actual_url = _remote_target(repo, gcfg)
+        if lease_owner and (actual_remote != remote or actual_branch != branch):
+            raise RuntimeError("同步目标已变化，未执行旧任务")
+        remote, branch = actual_remote, actual_branch
+        prefixes = gcfg.get("allowed_remote_prefixes", [])
+        declared_url = str((gcfg.get("remote", {}) or {}).get("url") or "")
+        if prefixes and not any(actual_url.startswith(prefix) for prefix in prefixes):
+            raise RuntimeError("实际 remote 不在白名单")
+        if declared_url and declared_url != actual_url:
+            raise RuntimeError("配置 remote.url 与实际远端不一致")
+        fingerprint = sync_target_hash(repo,gcfg,remote,branch)
+        if not owner:
+            owner, lease_warning = acquire_sync_lease(repo, remote, branch,target_hash=fingerprint)
+            if not owner:
+                return False, lease_warning if "不可用" in lease_warning else None
+            lease_target = (remote, branch)
+        if not _owns_sync_lease(repo, remote, branch, owner):
+            return False, "同步租约失效，未执行"
+        from contextlib import closing
+        with closing(_lease_connection(repo)) as lease_conn:
+            frozen = lease_conn.execute("SELECT target_hash FROM sync_lease WHERE repo=? AND remote=? AND branch=?",
+                                       (str(Path(repo).resolve()),remote,branch)).fetchone()[0]
+        if frozen and frozen != fingerprint:
+            raise RuntimeError("同步配置版本已变化，未执行旧任务")
+        target_sha = _run(repo, "rev-parse", "HEAD", timeout=3)
+        # Fetch 只更新远端跟踪引用；慢网络不得阻塞本机卡片写入/读取。
+        _run(repo, "fetch", remote, branch, timeout=10)
         with RepoLock(repo, float(cfg.get("lock_timeout", 10.0))):
-            remote_name, branch, actual_url = _remote_target(repo, gcfg)
-            prefixes = gcfg.get("allowed_remote_prefixes", [])
-            if prefixes and not any(actual_url.startswith(p) for p in prefixes):
-                raise RuntimeError(f"实际 remote {actual_url} 不在白名单")
+            if not _owns_sync_lease(repo, remote, branch, owner):
+                raise RuntimeError("同步租约失效，未合入远端")
+            if lease_owner:
+                current_cfg = app_config.load_config().get("git", {})
+                if (not current_cfg.get("auto_pull", True) or
+                        sync_target_hash(repo,current_cfg,remote,branch) != fingerprint):
+                    raise RuntimeError("同步配置已变化，未合入旧结果")
+            if _remote_target(repo, gcfg) != (remote, branch, actual_url):
+                raise RuntimeError("同步目标已变化，未合入旧结果")
+            if sync_target_hash(repo,gcfg,remote,branch) != fingerprint:
+                raise RuntimeError("同步配置版本已变化，未合入旧结果")
+            if _run(repo,"symbolic-ref","--quiet","--short","HEAD",timeout=3) != branch:
+                raise RuntimeError("当前工作分支与同步目标不同，未改写工作树")
             dirty = _run(repo, "status", "--porcelain", timeout=3)
-            target_sha = _run(repo, "rev-parse", "HEAD", timeout=3)
-            _run(repo, "fetch", remote_name, branch, timeout=10)
-            if _has_user_changes(dirty):
-                local = _run(repo, "rev-parse", "HEAD", timeout=3)
-                remote_rev = _run(repo, "rev-parse", f"{remote_name}/{branch}", timeout=3)
-                if local == remote_rev:
-                    _record_sync(repo, remote_name, branch, "ok", fetch=True)
-                    duration_ms = int((time.monotonic() - start_time) * 1000)
-                    record_sync_attempt(repo, remote_name, branch, target_sha, "ok",
-                                        duration_ms, confirmed_revision=local)
-                    _release_sync_lease(repo, remote_name, branch, success=True)
-                    return False, "; ".join(telemetry_warnings) if telemetry_warnings else None
-                warning = "远端有更新，但本地工作区非干净状态；保留 last-known-good，未自动合并"
-                _record_sync(repo, remote_name, branch, "blocked", error=warning, fetch=True)
-                duration_ms = int((time.monotonic() - start_time) * 1000)
-                record_sync_attempt(repo, remote_name, branch, target_sha, "blocked",
-                                    duration_ms, error=warning)
-                _release_sync_lease(repo, remote_name, branch, success=False)
-                return False, warning
-            changed, push_needed = _integrate_remote(repo, remote_name, branch)
-            if not changed and not push_needed:
-                _record_sync(repo, remote_name, branch, "ok", fetch=True)
-                duration_ms = int((time.monotonic() - start_time) * 1000)
-                record_sync_attempt(repo, remote_name, branch, target_sha, "ok",
-                                    duration_ms, confirmed_revision=_run(repo, "rev-parse", "HEAD", timeout=3))
-                _release_sync_lease(repo, remote_name, branch, success=True)
-                return False, "; ".join(telemetry_warnings) if telemetry_warnings else None
-            if changed:
-                from . import index
-                index.rebuild(repo)
-                updated = True
-            if push_needed:
-                _record_sync(repo, remote_name, branch, "pending", fetch=True)
-            else:
-                _record_sync(repo, remote_name, branch, "ok", fetch=True)
-            duration_ms = int((time.monotonic() - start_time) * 1000)
-            new_sha = _run(repo, "rev-parse", "HEAD", timeout=3)
-            record_sync_attempt(repo, remote_name, branch, target_sha, "updated",
-                                duration_ms, confirmed_revision=new_sha,
-                                pending_push_count=1 if push_needed else 0)
-            _release_sync_lease(repo, remote_name, branch, success=True)
-    except GitSyncConflict as exc:
-        warning = str(exc)
-        _record_sync(repo, remote_name, branch or "unknown", "conflict", error=warning, fetch=True)
-        duration_ms = int((time.monotonic() - start_time) * 1000)
-        record_sync_attempt(repo, remote_name, branch or "unknown", "", "conflict",
-                            duration_ms, error=warning)
-        _release_sync_lease(repo, remote_name, branch or "unknown", success=False)
-        return False, warning
+            local = _run(repo, "rev-parse", "HEAD", timeout=3)
+            remote_rev = _run(repo, "rev-parse", f"{remote}/{branch}", timeout=3)
+            if _has_user_changes(dirty) and local != remote_rev:
+                raise RuntimeError("工作区有未提交内容，保留 last-known-good，未自动合并")
+            if not _has_user_changes(dirty):
+                changed, push_needed = _integrate_remote(repo, remote, branch)
+                if changed:
+                    from . import index
+                    index.rebuild(repo)
+                    updated = True
+            success = True
+        if push_needed and gcfg.get("auto_push", False):
+            warning = push(repo, declared_url, prefixes)
+            success = warning is None
+        status = "error" if warning else "pending" if push_needed and not gcfg.get("auto_push", False) else "ok"
+        if _owns_sync_lease(repo, remote, branch, owner):
+            _record_sync(repo, remote, branch, status, error=warning or "", fetch=True)
+        record_sync_attempt(repo, remote, branch, target_sha, "updated" if updated else "ok",
+            int((time.monotonic()-started)*1000), confirmed_revision=_run(repo,"rev-parse","HEAD",timeout=3),
+            pending_push_count=int(push_needed and not gcfg.get("auto_push",False)))
+        return updated, warning
     except Exception as exc:
-        warning = f"远程同步检查失败，继续使用 last-known-good: {exc}"
-        _record_sync(repo, remote_name, branch or "unknown", "error", error=warning, fetch=True)
-        duration_ms = int((time.monotonic() - start_time) * 1000)
-        record_sync_attempt(repo, remote_name, branch or "unknown", "", "error",
-                            duration_ms, error=warning)
-        _release_sync_lease(repo, remote_name, branch or "unknown", success=False)
+        warning = "远程同步检查失败，继续使用 last-known-good: " + str(exc)
+        # 迟到工作不能覆盖新持有者的当前同步状态。
+        if not owner or (lease_target == (remote,branch) and _owns_sync_lease(repo, remote, branch, owner)):
+            _record_sync(repo, remote, branch, "conflict" if isinstance(exc, GitSyncConflict) else "error",
+                         error=warning, fetch=True)
+        record_sync_attempt(repo, remote, branch, target_sha, "error",
+                            int((time.monotonic()-started)*1000), error=warning)
         return False, warning
-    if push_needed:
-        warning = push(repo, str((gcfg.get("remote", {}) or {}).get("url") or ""),
-                       gcfg.get("allowed_remote_prefixes", []))
-        if warning:
-            telemetry_warnings.append(warning)
-    return updated, "; ".join(telemetry_warnings) if telemetry_warnings else None
+    finally:
+        if owner and lease_target:
+            _release_sync_lease(repo, *lease_target,
+                                success and _owns_sync_lease(repo,*lease_target,owner),
+                                owner=owner, cooldown=ttl)

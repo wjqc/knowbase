@@ -112,3 +112,5 @@
 - 测试须设置 KNOWBASE_CONFIG=/Users/qc/.knowbase/dev/inflight-contracts/config.json 及 KNOWBASE_REPO_PATH=/Users/qc/.knowbase/dev/inflight-contracts/memory。数据是私有本地快照，auto_pull/auto_push/auto_commit均关闭，不提交数据文件。
 - 新工作树基线全套401 passed/1 skipped（49.29s）；代码图谱索引79文件/1546节点/2898边，后续查询projectPath必须传本工作树。
 - 下一批C1：先通过codegraph核对context.execute、sync_before_read、跨进程同步租约调用链，补非阻塞刷新与last-known-good新鲜度；再C2/C3、C4。Mac锁屏不阻止这些后台代码工作，不能提前标整个目标blocked。
+
+- C1已在隔离工作树实现并定向66项通过，整套411 passed/1 skipped；不代表固定运行包已升级或三人使用通过。下一步C2版本关联的采纳记录、C3任务结果反馈、C4只读统计导出。

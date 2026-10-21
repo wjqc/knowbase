@@ -238,6 +238,9 @@ MIGRATIONS: list[tuple[int, str]] = [
     (14, """
     ALTER TABLE context_events ADD COLUMN observation_json TEXT NOT NULL DEFAULT '{}';
     """),
+    (15, """
+    ALTER TABLE sync_lease ADD COLUMN target_hash TEXT NOT NULL DEFAULT '';
+    """),
 ]
 
 

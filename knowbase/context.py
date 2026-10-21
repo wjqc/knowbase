@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timezone
 
 from . import config, index, materials, store
+from .locking import RepoLock, LockTimeout
 
 STAGES = {"task_plan", "subtask_start", "new_failure", "decision", "verified_result",
           "checkpoint", "before_compact", "recover", "observe"}
@@ -35,6 +36,21 @@ def _summary(body: str) -> str:
             return ("旧卡原文（" + heading + "）：" + sanitize(existing))[:500]
     excerpt = "\n".join(line for line in body.splitlines() if line.strip() and not line.lstrip().startswith("#"))
     return ("旧卡原文片段：" + sanitize(excerpt))[:500] if excerpt else "unknown"
+
+
+def _candidate(repo, mid, scope, automatic, timeout):
+    from .mutations import _compute_revision
+    with RepoLock(repo, timeout=timeout):
+        meta, body, path = store.load(repo, mid)
+        if (not meta or path.parent.name == "staging" or meta.get("type") == "reference"
+                or meta.get("status") != "active" or meta.get("scope") not in (scope,"global")
+                or (automatic and meta.get("confidence") != "verified")
+                or any(r.get("type")=="contradicts" for r in meta.get("relations",[]))):
+            return None
+        return {"id":mid,"scope":meta["scope"],"content_revision":_compute_revision(meta,body),
+                "title":meta.get("title", ""),"summary":_summary(body),
+                "applicable_when":_section(body,"适用条件")[:300],
+                "confidence":meta.get("confidence", "once"),"status":meta["status"]}
 
 
 def execute(repo, *, session_id: str, event_id: str, scope: str = "",
@@ -96,6 +112,10 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                 result.update(error="SCOPE_UNRESOLVED", retrieval_status="scope_unresolved")
         if not result.get("error"):
             result["scope"] = scope
+            from .refresh import request as request_refresh
+            result["freshness"] = request_refresh(repo,cfg)
+            if result["freshness"].get("warning"):
+                result["warnings"].append(result["freshness"]["warning"])
             if not task_revision and prior:
                 task_revision = prior[1]
             if not topics and prior:
@@ -114,6 +134,7 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                 "JOIN meta m ON m.id=e.memory_id LEFT JOIN entity_heads h ON h.entity_id=m.id "
                 "WHERE m.scope IN (?, 'global') ORDER BY e.memory_id", (scope,))))
             seen, found = set(), []
+            deferred_sync = False
             performed = 0
             limit = max(1, min(20, int(options["max_queries_per_event"])))
             per_topic = max(1, min(6, int(options["max_queries_per_topic"])))
@@ -150,19 +171,21 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                     topic_performed += 1
                     completed.add(query)
                     for hit in hits:
-                        if automatic and hit.get("confidence") != "verified":
-                            continue
-                        meta, body, _ = store.load(repo, hit["id"])
-                        if not meta or any(r.get("type") == "contradicts" for r in meta.get("relations", [])):
-                            continue
                         if hit["id"] in seen:
                             continue
+                        remaining_time = options["fast_path_timeout_ms"]/1000 - (time.monotonic()-started)
+                        try:
+                            if remaining_time <= 0:
+                                raise LockTimeout("读取预算耗尽")
+                            candidate = _candidate(repo,hit["id"],scope,automatic,min(0.02,remaining_time))
+                        except LockTimeout:
+                            completed.discard(query)
+                            deferred_sync = True
+                            break
+                        if not candidate:
+                            continue
+                        candidate["topic_ids"] = [tid]
                         seen.add(hit["id"])
-                        row = conn.execute("SELECT content_revision FROM entity_heads WHERE entity_id=?", (hit["id"],)).fetchone()
-                        candidate = {"id": hit["id"], "scope": hit["scope"], "content_revision": row[0] if row else materials.digest(body),
-                                     "title": hit["title"], "summary": _summary(body),
-                                     "applicable_when": _section(body, "适用条件")[:300],
-                                     "confidence": hit["confidence"], "status": hit["status"], "topic_ids": [tid]}
                         size = len(json.dumps(candidate, ensure_ascii=False))
                         if len(found) < options["max_candidates"] and size <= remaining:
                             found.append(candidate)
@@ -175,7 +198,7 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
             result["next_topics"] = deferred
             result["budget_used"] = {"queries": performed, "tokens_estimated": (budget_chars - remaining + 1) // 2}
             if not result.get("error"):
-                result["retrieval_status"] = ("deferred_budget" if any(t.get("status") == "deferred" for t in deferred)
+                result["retrieval_status"] = ("deferred_sync" if deferred_sync else "deferred_budget" if any(t.get("status") == "deferred" for t in deferred)
                     else "executed" if found else "no_hit" if performed else "skipped_cache")
             result["job_ids"] = [r[0] for r in conn.execute(
                 "SELECT job_id FROM jobs WHERE scope=? AND state IN ('awaiting_agent','validating') "
