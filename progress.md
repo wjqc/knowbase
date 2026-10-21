@@ -788,3 +788,9 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - 真实 core 配置开启检索/观察试用，capture_enabled=false；显式阶段capture引用观察仍可用，旧收尾提醒保留但不强制自动入队。医生核对191/191索引与embedding，待办0；普通网络fetch仍有超时告警，受限手动同步成功不等于网络永久修复，C1需继续。
 - Mac锁屏，CUA无法复核新路径的连接；未尝试绕过锁屏，已发解锁请求。manifest=pilot-configured/native_ui_pending，不标整个E4/E5通过。
 - 当前源码仅docs/test的-I部署说明待提交，产品模块保持32ad7f0固定发行版本；下一批C1–C4在隔离工作树继续，避免源码开发影响仍缓存旧路径的客户端。
+
+### 隔离开发基线
+- 创建并附加工作树inflight-contracts，分支codex/inflight-contracts，起点5e060ca。
+- 开发env及私有测试数据快照已准备，测试网络/自动写均关闭；全套401 passed,1 skipped。
+- Codegraph已初始化（79/1546/2898），未提交派生索引。生产固定发行版不受后续源码修改影响。
+- 下一轮从C1调用链开始实际实现，不重新解释方案，不以外部解锁等待代替本地可做工作。

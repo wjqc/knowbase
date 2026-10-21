@@ -104,3 +104,11 @@
 本地最近全套401 passed/1 skipped；0.2.0rc1 wheel 已构建，43模块与提交32ad7f0逐字节核对；固定环境在源码工作目录下以-I启动的stdio smoke通过。异步协作问题尚无回复，不视为许可或验收通过；但C1–C4可独立实施，不能据此标整个目标blocked。
 
 本机试用已配置：原库不变，ZCode/Claude/Trae 的MCP和Hook均指向 ~/.knowbase/runtime/releases/32ad7f0/venv/bin/python，以-I启动；enabled=true、capture_enabled=false。界面最终复核被Mac锁屏阻断，已请求用户解锁；不绕过登录/审批。后续开发转隔离工作树，继续C1–C4，不能把预览包当完整目标完成。
+
+## 当前开发工作区（2026-10-22）
+
+- 工作树：/Users/qc/.codex/worktrees/inflight-contracts/knowbase，分支codex/inflight-contracts。
+- 开发解释器：本工作树/.venv/bin/python，editable导入已确认指向本工作树；生产MCP/Hook使用固定wheel解释器，不使用此环境。
+- 测试须设置 KNOWBASE_CONFIG=/Users/qc/.knowbase/dev/inflight-contracts/config.json 及 KNOWBASE_REPO_PATH=/Users/qc/.knowbase/dev/inflight-contracts/memory。数据是私有本地快照，auto_pull/auto_push/auto_commit均关闭，不提交数据文件。
+- 新工作树基线全套401 passed/1 skipped（49.29s）；代码图谱索引79文件/1546节点/2898边，后续查询projectPath必须传本工作树。
+- 下一批C1：先通过codegraph核对context.execute、sync_before_read、跨进程同步租约调用链，补非阻塞刷新与last-known-good新鲜度；再C2/C3、C4。Mac锁屏不阻止这些后台代码工作，不能提前标整个目标blocked。
