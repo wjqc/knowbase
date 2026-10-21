@@ -31,7 +31,7 @@ from pathlib import Path
 from . import config, gitops, index, jobs, lifecycle, sources, store
 from .locking import RepoLock
 
-GITIGNORE = "memory.db\nmemory.db-wal\nmemory.db-shm\n.lock\n*.log\n.idea/\n.vscode/\n.DS_Store\n"
+GITIGNORE = "memory.db\nmemory.db-wal\nmemory.db-shm\n.lock\n*.log\n.idea/\n.vscode/\n.DS_Store\nINDEX.md\n.knowbase/local/\n"
 
 REPO_README = """# 薪火（knowbase）经验记忆库
 
@@ -41,6 +41,31 @@ REPO_README = """# 薪火（knowbase）经验记忆库
 - standards/（人员标准）与 preferences/ 只能由人直接写或经 staging/ 提案激活
 - memory.db 包含派生索引与不可重建的本地运行日志，请一起备份；reindex 保留运行日志
 """
+
+
+def _retire_shared_index(repo: Path, cfg: dict) -> str | None:
+    """显式 init 升级时退役派生 INDEX；保留物理文件和用户改动。"""
+    tracked = bool(gitops._run(repo, "ls-files", "--", "INDEX.md"))
+    ignore = repo / ".gitignore"
+    previous = ignore.read_text() if ignore.exists() else ""
+    missing = [line for line in ("INDEX.md", ".knowbase/local/") if line not in previous.splitlines()]
+    if not tracked and not missing:
+        return None
+    staged = gitops._run(repo, "diff", "--cached", "--name-only").splitlines()
+    if staged or (ignore.exists() and gitops._run(repo, "diff", "--", ".gitignore")):
+        return "INDEX 退役未执行：保留已有暂存内容/.gitignore 修改，请处理后再次 init"
+    if missing:
+        ignore.write_text(previous.rstrip() + "\n" + "\n".join(missing) + "\n")
+    if tracked:
+        gitops._run(repo, "rm", "--cached", "--", "INDEX.md")
+        if cfg["git"].get("auto_commit", True):
+            gitops._run(repo, "add", "--", ".gitignore")
+            staged = gitops._run(repo, "diff", "--cached", "--name-only").splitlines()
+            if set(staged) - {".gitignore", "INDEX.md"}:
+                return "INDEX 已退役待提交：检测到并行暂存，未卷入其他修改"
+            gitops._run(repo, "commit", "-m", "chore: keep generated INDEX and local materials out of shared Git", timeout=15)
+        return "INDEX 已退役为本地视图，原文件保留" + ("（待人工提交）" if not cfg["git"].get("auto_commit", True) else "")
+    return None
 
 
 def cmd_init(import_from=None, scope=None, dtype="workflow") -> int:
@@ -90,10 +115,16 @@ def cmd_init(import_from=None, scope=None, dtype="workflow") -> int:
                 print(f"✓ 已配置远端 {url}")
         print("✓ git 仓库已初始化")
     else:
-        print("✓ git 仓库已存在（不动）")
+        print("✓ git 仓库已存在（保留已有仓库与业务文件）")
 
     # 4. 派生索引 + INDEX.md（全量重建，天然幂等）
     with RepoLock(rp, 10.0):
+        try:
+            note = _retire_shared_index(rp, cfg)
+            if note:
+                print(f"○ {note}")
+        except Exception as exc:
+            print(f"⚠ INDEX 本地视图迁移未完成：{type(exc).__name__}，原内容保留")
         n = index.rebuild(rp)
     print(f"✓ 索引就绪：{n} 条记忆，INDEX.md 已生成")
 
@@ -611,6 +642,13 @@ def cmd_doctor(json_output: bool = False) -> int:
             emb_n = conn.execute("SELECT COUNT(*) FROM embedding_index").fetchone()[0]
             checks.append({"name": "embedding_index", "level": "pass" if emb_n == meta_n else "fail",
                            "message": f"embedding={emb_n} meta={meta_n}"})
+            if config.load_config()["inflight"]["enabled"]:
+                pending = conn.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('awaiting_agent','validating','blocked')").fetchone()[0]
+                unapplied = conn.execute("SELECT COUNT(*) FROM job_submissions WHERE state!='done'").fetchone()[0]
+                checks.append({"name": "inflight_queue", "level": "warn" if pending or unapplied else "pass",
+                               "message": f"pending_jobs={pending} unapplied_receipts={unapplied}; 入队不代表成卡"})
+                events = dict(conn.execute("SELECT status,COUNT(*) FROM context_events GROUP BY status"))
+                checks.append({"name": "inflight_events", "level": "pass", "message": json.dumps(events, ensure_ascii=False)})
             sync_row = conn.execute(
                 "SELECT status,error,last_fetch_at,last_push_at FROM sync_state "
                 "ORDER BY COALESCE(last_fetch_at,last_push_at) DESC LIMIT 1"
@@ -759,7 +797,7 @@ def main(argv=None):
     p_alerts.add_argument("--dry-run", action="store_true",
                           help="不实际派发 webhook/文件，仅 stdout 打印事件清单")
     p_hook = sub.add_parser("hook", help="Agent hook 入口")
-    p_hook.add_argument("event", choices=["session-start", "user-prompt", "stop"])
+    p_hook.add_argument("event", choices=["session-start", "user-prompt", "stop", "tool-before", "tool-after", "tool-failure", "before-compact"])
     p_hook.add_argument("--style", choices=["claude", "zcode"], default="claude")
     p_imp = sub.add_parser("import", help="批量导入为 source artifact（不产生知识卡、不进默认检索）")
     p_imp.add_argument("directory")
@@ -827,6 +865,12 @@ def main(argv=None):
                          mode=getattr(args, "mode", "source"))
     if args.cmd == "hook":
         from . import hooks
+        if args.event == "before-compact":
+            hooks.cmd_before_compact(style=args.style)
+            return 0
+        if args.event in {"tool-before", "tool-after", "tool-failure"}:
+            hooks.cmd_tool_event(style=args.style, event=args.event)
+            return 0
         {"session-start": hooks.cmd_session_start,
          "user-prompt": hooks.cmd_user_prompt,
          "stop": hooks.cmd_stop}[args.event](style=args.style)

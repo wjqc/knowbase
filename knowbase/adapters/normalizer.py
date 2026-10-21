@@ -34,9 +34,19 @@ def normalize_event(raw: dict, *, default_session_id: str = "",
     - ZCode: {"role": "user", "content": "..."}
     - 通用: {"session_id": "...", "role": "...", "text": "..."}
     """
+    if (raw.get("type") in ("thinking", "reasoning", "analysis")
+            or raw.get("channel") == "analysis"):
+        return NormalizedEvent(session_id=default_session_id or "unknown", message_id=raw.get("id", ""),
+                               role="system", text="", project_scope=default_scope)
     session_id = (raw.get("session_id") or raw.get("sessionId")
                   or default_session_id or "unknown")
     message_id = raw.get("message_id") or raw.get("id") or ""
+    # Claude transcript 的 message 信封也必须保留全部内容。
+    if isinstance(raw.get("message"), dict):
+        raw = {**raw, **raw["message"]}
+        if raw.get("channel") == "analysis":
+            return NormalizedEvent(session_id=session_id, message_id=message_id, role="system", text="",
+                                   project_scope=default_scope)
     role = raw.get("role", "")
     text = ""
     tool_call_id = ""
@@ -52,7 +62,7 @@ def normalize_event(raw: dict, *, default_session_id: str = "",
         tool_name = raw.get("name", "")
         tool_call_id = raw.get("tool_call_id") or raw.get("id", "")
         tool_input = raw.get("input") or {}
-        text = json.dumps(tool_input, ensure_ascii=False)[:2000]
+        text = json.dumps(tool_input, ensure_ascii=False)
     elif event_type == "tool_result":
         role = "tool"
         tool_call_id = raw.get("tool_call_id", "")
@@ -62,7 +72,7 @@ def normalize_event(raw: dict, *, default_session_id: str = "",
                 item.get("text", "") if isinstance(item, dict) else str(item)
                 for item in tool_result
             )
-        text = tool_result[:4000]
+        text = str(tool_result)
     elif role in ("user", "assistant", "system"):
         content = raw.get("content") or raw.get("text") or ""
         if isinstance(content, list):
@@ -74,7 +84,7 @@ def normalize_event(raw: dict, *, default_session_id: str = "",
                     elif item.get("type") == "tool_use":
                         tool_name = item.get("name", "")
                         tool_call_id = item.get("id", "")
-                        parts.append(f"[tool:{tool_name}]")
+                        parts.append(f"[tool:{tool_name}] " + json.dumps(item.get("input", {}), ensure_ascii=False))
                     elif item.get("type") == "tool_result":
                         parts.append(str(item.get("content", "")))
                 else:
@@ -83,16 +93,16 @@ def normalize_event(raw: dict, *, default_session_id: str = "",
         else:
             text = str(content)
     else:
-        text = json.dumps(raw, ensure_ascii=False)[:2000]
+        text = json.dumps(raw, ensure_ascii=False)
 
     return NormalizedEvent(
         session_id=session_id,
         message_id=message_id,
         role=role,
-        text=text[:8000],  # 截断过长内容
+        text=text,
         tool_call_id=tool_call_id,
         tool_name=tool_name,
-        tool_result=tool_result[:4000] if tool_result else "",
+        tool_result=str(tool_result) if tool_result else "",
         timestamp=timestamp,
         project_scope=project_scope,
     )
@@ -123,7 +133,7 @@ def parse_transcript_file(path: str, *, default_session_id: str = "",
 
 
 def parse_transcript_auto(path: str, *, default_session_id: str = "",
-                          default_scope: str = "") -> list[NormalizedEvent]:
+                          default_scope: str = "", strict: bool = False) -> list[NormalizedEvent]:
     """M3-5: 自动检测格式并解析 transcript 文件。
 
     支持格式：
@@ -140,10 +150,30 @@ def parse_transcript_auto(path: str, *, default_session_id: str = "",
         with open(path, encoding="utf-8", errors="ignore") as f:
             content = f.read()
     except OSError:
+        if strict:
+            raise
         return []
 
     if not content.strip():
         return []
+
+    if strict:
+        stripped = content.strip()
+        if stripped.startswith("["):
+            rows = json.loads(stripped)
+            if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+                raise ValueError("INCOMPLETE_TRANSCRIPT: expected an array of events")
+        elif "," in content.split("\n", 1)[0] and _looks_like_csv_header(content.split("\n", 1)[0]):
+            list(csv.reader(io.StringIO(content), strict=True))
+        else:
+            for number, line in enumerate(content.splitlines(), 1):
+                if line.strip():
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise ValueError(f"INCOMPLETE_TRANSCRIPT: invalid event on line {number}") from exc
+                    if not isinstance(row, dict):
+                        raise ValueError(f"INCOMPLETE_TRANSCRIPT: invalid event on line {number}")
 
     # 检测格式
     stripped = content.strip()

@@ -28,6 +28,16 @@ DEFAULTS = {
     "scope_map": {},
     "stats": {"enabled": True},
     "hooks": {"enabled": True, "inject_min_confidence": "verified"},
+    "inflight": {
+        "enabled": False, "mode": "assisted", "protocol_version": 2,
+        "checkpoint_work_ops": 6, "checkpoint_minutes": 10,
+        "max_queries_per_topic": 3, "max_queries_per_event": 6,
+        "max_candidates": 3, "context_token_budget": 800,
+        "material_page_chars": 8000, "max_batches_per_opportunity": 2,
+        "fast_path_timeout_ms": 1000, "max_pending_jobs": 200,
+        "host_profile": "", "member_label": "unknown",
+        "device_label": "unknown",
+    },
 }
 
 
@@ -59,3 +69,18 @@ def repo_path(cfg: dict | None = None) -> Path:
 def agent_name() -> str:
     """调用方身份：各 Agent 的 MCP 配置通过 env KNOWBASE_AGENT_NAME 声明。"""
     return os.environ.get("KNOWBASE_AGENT_NAME") or "unknown"
+
+
+def mapped_scope(project_dir: str, cfg: dict | None = None) -> str | None:
+    """接受配置中的原路径和规范路径别名（macOS /var 与 /private/var 等）。"""
+    cfg = cfg or load_config()
+    path = Path(project_dir).expanduser()
+    canonical = path.resolve()
+    mapping = cfg.get("scope_map", {}) or {}
+    direct = mapping.get(str(path)) or mapping.get(str(canonical)) or mapping.get(canonical.name)
+    if direct:
+        return str(direct)
+    for key, value in mapping.items():
+        if (str(key).startswith(("/", "~")) and Path(key).expanduser().resolve() == canonical):
+            return str(value)
+    return None

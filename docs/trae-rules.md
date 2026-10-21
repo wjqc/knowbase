@@ -14,6 +14,13 @@
 4. stale / once 状态的记忆采信前先在当前环境验证；不要整读 INDEX.md，检索一律走 memory_search；
 5. standard / preference / bizrule 保存时强制进 staging 待人审；正式规则 Agent 不可 memory_update，人工使用 promote/revise CLI；
 6. body 里不要出现明文密钥。
+7. 长任务先列目标、约束、子任务；进入新子任务、新错误和重要决策前主动调用 memory_context，
+   指定 session_id/event_id/scope/stage/topics（当前主题+短查询），不要等下一条用户输入。
+8. 阶段结束同时识别技术经验及业务规则。材料较多时 memory_capture → memory_job_claim(protocol_version=2)，
+   has_more 时 memory_job_material 续页；查重、按八项结构 memory_job_submit 后核对实际 memory_id/保存状态。
+9. 业务规则记录条件、结果、例外、provenance 和 rule_context，确认/激活/实现状态分开；
+   代码推断无业务确认时保留待确认候选，不伪造出处，不自动激活 staging。
+10. 只处理已读完整的片段；无可复用结论给明确理由。候选已提交或任务入队不代表知识卡已保存。
 ```
 
 ---
@@ -22,10 +29,11 @@
 
 | 能力 | Claude Code | ZCode | Trae |
 |---|---|---|---|
-| MCP 6 工具 | ✅ | ✅ | ✅ |
+| MCP 14 工具（重连新版本后） | 支持 | 支持 | 支持 |
 | 会话开始规则注入 | ✅ hook | ✅ hook | ❌ 靠本规则 |
 | 每条输入自动检索注入 | ✅ hook（本地检索） | ✅ hook（本地检索） | ❌ 靠模型自觉 search |
 | 会话结束漏存再判断 | ✅ Stop hook | ✅ Stop hook* | ❌ 无 |
 | 来源标识 | claude-code | zcode | trae |
+| 执行中使用 | 工具事件适配待真实验收 | 工具事件注入/消费局部通过，提炼待验 | 主动工作流，待真实验收 |
 
 \* ZCode Stop 钩子依赖 stdin 载荷里的 transcript 路径；若 ZCode 不提供该字段，该钩子会静默放行（不报错），此时任务后沉淀退回"靠规则第 2 条"。

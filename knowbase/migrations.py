@@ -163,6 +163,81 @@ MIGRATIONS: list[tuple[int, str]] = [
     CREATE INDEX IF NOT EXISTS idx_segment_job ON segment_results(job_id);
     CREATE INDEX IF NOT EXISTS idx_segment_decision ON segment_results(decision);
     """),
+    # v9: 执行中上下文。运行状态不是检索投影，重建索引不能清空。
+    (9, """
+    CREATE TABLE IF NOT EXISTS context_sessions(
+      host_profile TEXT NOT NULL, session_id TEXT NOT NULL, scope TEXT NOT NULL,
+      task_revision TEXT NOT NULL DEFAULT '', topics_json TEXT NOT NULL DEFAULT '[]',
+      observed_cursor TEXT NOT NULL DEFAULT '', settled_cursor TEXT NOT NULL DEFAULT '',
+      coverage_json TEXT NOT NULL DEFAULT '{}', last_checkpoint_at TEXT,
+      updated_at TEXT NOT NULL, PRIMARY KEY(host_profile,session_id)
+    );
+    CREATE TABLE IF NOT EXISTS context_events(
+      host_profile TEXT NOT NULL, session_id TEXT NOT NULL, event_id TEXT NOT NULL,
+      task_id TEXT NOT NULL DEFAULT '', trigger TEXT NOT NULL, payload_hash TEXT NOT NULL,
+      status TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+      segment_refs_json TEXT NOT NULL DEFAULT '[]', job_ids_json TEXT NOT NULL DEFAULT '[]',
+      result_json TEXT NOT NULL DEFAULT '{}', latency_ms REAL NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL, PRIMARY KEY(host_profile,session_id,event_id)
+    );
+    """),
+    # v10: 完整材料 manifest、实际领取批次、跨任务片段隔离。
+    (10, """
+    CREATE TABLE IF NOT EXISTS job_segments(
+      job_id TEXT NOT NULL, segment_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
+      source_version TEXT NOT NULL, text_hash TEXT NOT NULL, original_length INTEGER NOT NULL,
+      locator_json TEXT NOT NULL DEFAULT '{}', start_offset INTEGER NOT NULL DEFAULT 0,
+      end_offset INTEGER NOT NULL DEFAULT 0, evidence_group_id TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY(job_id,segment_id), UNIQUE(job_id,ordinal)
+    );
+    CREATE TABLE IF NOT EXISTS job_batches(
+      batch_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, input_version TEXT NOT NULL,
+      manifest_hash TEXT NOT NULL, segment_ids_json TEXT NOT NULL,
+      delivered_json TEXT NOT NULL DEFAULT '[]', owner TEXT NOT NULL,
+      lease_token TEXT NOT NULL, fencing_token INTEGER NOT NULL, expires_at TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'claimed', read_cursor TEXT NOT NULL DEFAULT '0:0'
+    );
+    CREATE INDEX IF NOT EXISTS idx_batches_job ON job_batches(job_id);
+    ALTER TABLE segment_results RENAME TO segment_results_legacy_v8;
+    CREATE TABLE segment_results(
+      segment_id TEXT NOT NULL, job_id TEXT NOT NULL, batch_id TEXT NOT NULL,
+      decision TEXT NOT NULL DEFAULT 'pending', reason TEXT NOT NULL DEFAULT '',
+      candidate_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      settlement_state TEXT NOT NULL DEFAULT 'pending', receipt_id TEXT NOT NULL DEFAULT '',
+      linked_ids_json TEXT NOT NULL DEFAULT '[]', PRIMARY KEY(job_id,segment_id)
+    );
+    INSERT INTO segment_results(segment_id,job_id,batch_id,decision,reason,candidate_id,
+      created_at,updated_at,settlement_state)
+      SELECT segment_id,job_id,batch_id,decision,reason,candidate_id,created_at,updated_at,
+      'legacy_unverified' FROM segment_results_legacy_v8;
+    DROP TABLE segment_results_legacy_v8;
+    CREATE INDEX IF NOT EXISTS idx_segment_job ON segment_results(job_id);
+    CREATE INDEX IF NOT EXISTS idx_segment_decision ON segment_results(decision);
+    """),
+    # v11: 完整候选与可重放的批次提交回执。
+    (11, """
+    ALTER TABLE candidates ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}';
+    ALTER TABLE candidates ADD COLUMN payload_hash TEXT NOT NULL DEFAULT '';
+    ALTER TABLE candidates ADD COLUMN materialization_state TEXT NOT NULL DEFAULT 'legacy_unverified';
+    ALTER TABLE candidates ADD COLUMN memory_id TEXT NOT NULL DEFAULT '';
+    ALTER TABLE candidates ADD COLUMN memory_revision TEXT NOT NULL DEFAULT '';
+    CREATE TABLE IF NOT EXISTS job_submissions(
+      job_id TEXT NOT NULL, request_id TEXT NOT NULL, batch_id TEXT NOT NULL,
+      payload_hash TEXT NOT NULL, state TEXT NOT NULL, result_json TEXT NOT NULL DEFAULT '{}',
+      payload_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      PRIMARY KEY(job_id,request_id)
+    );
+    """),
+    (12, """
+    ALTER TABLE job_submissions ADD COLUMN application_owner TEXT NOT NULL DEFAULT '';
+    ALTER TABLE job_submissions ADD COLUMN application_until TEXT NOT NULL DEFAULT '';
+    """),
+    (13, """
+    ALTER TABLE job_batches ADD COLUMN similar_json TEXT NOT NULL DEFAULT '{}';
+    """),
+    (14, """
+    ALTER TABLE context_events ADD COLUMN observation_json TEXT NOT NULL DEFAULT '{}';
+    """),
 ]
 
 
@@ -206,9 +281,10 @@ def pending(conn: sqlite3.Connection) -> list[tuple[int, str]]:
     """返回尚未执行的迁移列表。"""
     conn.execute(MIGRATION_TABLE)
     conn.commit()
-    applied = set(
-        row[0] for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
-    )
+    applied = dict(conn.execute("SELECT version,checksum FROM schema_migrations").fetchall())
+    for version, sql in MIGRATIONS:
+        if version in applied and applied[version] != _checksum(sql):
+            raise ValueError(f"迁移 checksum 不匹配：v{version}，停止升级；请恢复对应版本源码")
     return [(v, sql) for v, sql in MIGRATIONS if v not in applied]
 
 

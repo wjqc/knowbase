@@ -316,11 +316,13 @@ def normalize_title(t: str) -> str:
     return re.sub(r"[^\w\u4e00-\u9fff]+", "", t or "").lower()
 
 
-def find_similar(repo: Path, title: str, threshold: float = 0.82):
+def find_similar(repo: Path, title: str, threshold: float = 0.82, scope: str | None = None):
     """标题归一化相似查重。返回 (ratio, meta, path) 或 None。"""
     nt = normalize_title(title)
     best = None
     for meta, _body, path in iter_all(repo, include_staging=True):
+        if scope is not None and meta.get("scope") != scope:
+            continue
         ratio = SequenceMatcher(None, nt, normalize_title(meta.get("title", ""))).ratio()
         if ratio >= threshold and (best is None or ratio > best[0]):
             best = (ratio, meta, path)
@@ -380,6 +382,54 @@ def card_v2_errors(body: str) -> list[str]:
 
 # ---------- lint ----------
 
+def source_refs_errors(meta: dict, repo: Path | None = None) -> list[str]:
+    refs = meta.get("source_refs") or []
+    if not isinstance(refs, list):
+        return ["source_refs 必须为列表"]
+    errors = []
+    for ref in refs:
+        if not isinstance(ref, dict) or not ref.get("source_id"):
+            errors.append("source_refs 每项必须包含 source_id")
+            continue
+        if repo is None:
+            continue
+        from . import sources
+        import hashlib
+        manifest = sources.load_manifest(repo, ref["source_id"])
+        if not manifest or manifest.get("scope") not in (meta.get("scope"), "global"):
+            errors.append("source_refs 来源不存在或项目不匹配")
+            continue
+        root = (Path(repo) / sources.OBJECTS_DIR).resolve()
+        path = (Path(repo) / str(manifest.get("object", ""))).resolve()
+        if root not in path.parents or not path.is_file():
+            errors.append("source_refs 来源对象不存在或路径越界")
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            errors.append("source_refs 来源对象无法读取")
+            continue
+        sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if manifest.get("sha256") != sha or ref.get("sha256", sha) != sha:
+            errors.append("source_refs 来源对象哈希不匹配")
+            continue
+        fragment = text
+        if ref.get("segment_id"):
+            from .extraction.segmenter import segment_text
+            segments = {s.segment_id: s for s in segment_text(text, source_format=manifest.get("format", "markdown"))}
+            segment = segments.get(ref["segment_id"])
+            if not segment:
+                errors.append("source_refs segment_id 不存在")
+                continue
+            fragment = segment.text
+        expected_hash = ref.get("text_hash")
+        if expected_hash:
+            actual = hashlib.sha256(fragment.encode("utf-8")).hexdigest()
+            if expected_hash not in (actual, actual[:16]):
+                errors.append("source_refs text_hash 不匹配")
+    return errors
+
+
 def lint(meta: dict, body: str, repo: Path | None = None) -> list[str]:
     errs = []
     t = meta.get("type")
@@ -413,11 +463,24 @@ def lint(meta: dict, body: str, repo: Path | None = None) -> list[str]:
                 errs.append(f"缺少必填小节: {sec}")
     if t == "bizrule" and not str(meta.get("provenance", "")).strip():
         errs.append("业务规则必须带出处 provenance（PRD 编号/条款/业务方确认记录），无出处的规则不入库")
+    rule = meta.get("rule_context")
+    if rule is not None:
+        if not isinstance(rule, dict):
+            errs.append("rule_context 必须为对象")
+        else:
+            for key in ("business_object", "trigger", "required_or_forbidden", "exceptions", "applicable_version"):
+                if not str(rule.get(key, "")).strip():
+                    errs.append(f"rule_context.{key} 必填；未知项需明确标注")
+            if rule.get("business_confirmation") not in ("explicit_source", "code_inferred", "unconfirmed"):
+                errs.append("rule_context.business_confirmation 非法")
+            if rule.get("implementation_status") not in ("not_implemented", "implemented_unverified", "verified", "unknown"):
+                errs.append("rule_context.implementation_status 非法")
     leaks = find_secrets(_all_text(meta, body))
     if leaks:
         sample = "、".join(leaks[:2])
         errs.append(f"疑似包含明文密钥(password/token/Authorization 等): {sample}，请脱敏后再存")
     errs.extend(code_refs_errors(meta))
+    errs.extend(source_refs_errors(meta, repo))
     errs.extend(reference_errors(meta, body, repo))
     return errs
 

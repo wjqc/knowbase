@@ -47,6 +47,9 @@ def _compute_revision(meta: dict, body: str) -> str:
         "relations": sorted(meta.get("relations", []), key=lambda r: r.get("id", "")),
         "code_refs": sorted(meta.get("code_refs", []), key=lambda r: (r.get("repo", ""), r.get("path", ""))),
         "body": body.strip(),
+        "source_refs": meta.get("source_refs", []),
+        "provenance": meta.get("provenance", ""),
+        "rule_context": meta.get("rule_context", {}),
     }
     raw = json.dumps(content_fields, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
@@ -190,14 +193,15 @@ def update_card(repo: Path, conn, mid: str, *,
         return {"error": REVISION_CONFLICT, "current_governance_revision": current_gov_rev}
 
     # 应用更新
-    content_fields = {"title", "body", "tags", "scope", "relations", "code_refs", "source_refs"}
+    content_fields = {"title", "body", "tags", "scope", "relations", "code_refs", "source_refs",
+                      "provenance", "rule_context", "evidence"}
     gov_fields = {"status", "confidence", "last_verified"}
 
     for key, value in updates.items():
         if key in content_fields:
             if key == "body":
                 body = value
-            elif key in meta:
+            else:
                 meta[key] = value
         elif key in gov_fields:
             meta[key] = value

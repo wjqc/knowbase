@@ -86,3 +86,32 @@
 41. 实现同步收敛并更新 README/同步设计说明（完成）
 42. 运行定向、全量与真实临时远端并发验证（完成：定向 15/15、全量 130/130、compileall 与 diff-check 通过）
 43. 同步独立知识文档并提交必要变更（完成：knowledge commit 92187b1；保留其他既有未跟踪内容）
+
+
+## 执行中知识使用实施（2026-10-21，active goal）
+
+目标：完整执行 docs/knowbase-inflight-memory-implementation-plan.md，保留 U1–U6 的真实验收，不以局部测试代替宿主/团队验收。
+- E0 宿主能力探针、冻结基线与独立样本：in_progress。codegraph 未初始化，转直接源码；pytest 基线运行中。
+- E1 原文保真、分页、片段覆盖与迁移：pending。
+- E2 memory_context 执行中任务检索：pending。
+- E3 技术经验/业务规则候选到真实卡片、恢复：pending。
+- E4 正式 Hook/主动工作流接线：pending。
+- E5 全量回归、升级备份、知识文档、团队试点：pending。
+约束：不用独立模型/第二套 DB/队列；现有 memory.db 不删；不改旧迁移；staging 不自动生效；只有真实运行证据才能标 event_driven。
+
+### 当前批次状态（2026-10-21 实施持续中）
+- E0：宿主文档及 CLI 可执行入口已确认（ZCode 0.17.0）；真实下一步消费探针仍 external_pending。
+- E1：capture 路径已实现保真/分页/租约/manifest/覆盖内核，旧 import 路径和自动 Hook 路径仍需切换；不标整批完成。
+- E2：memory_context 已实现并有独立测试；新主题过预算继续调度、宿主消费/真实事件待完成。
+- E3：共享 writer、候选到卡、规则 staging、提交/应用恢复已实现；需补并发/版本复查/正式 stdio 综合验收。
+- E4/E5：尚未开始正式配置切换、团队试点；不得宣布目标完成。
+下一步：先修复完整回归保留的显示契约，再审查 E3 应用恢复与 E1 import，接入 E4。
+
+### 本地交付审计（2026-10-21）
+- E0 PARTIAL：ZCode 0.17.0 真实工具事件→候选→后续回复消费通过（预置任务主题夹具）；headless build 的 MCP 被 No permission client configured 拒绝，未更改/绕过许可策略。
+- E1 本地 PASS：完整材料、续页、持久观察、范围游标、压缩后已观察材料恢复、迁移/校验和与旧统计保留。
+- E2 本地 PASS + 宿主递送局部 PASS：14 个正式 MCP 工具注册，memory_context 分阶段/错误查询、预算续做、缓存失效、scope 绑定；任意真实长方案规划未验收。
+- E3 本地/正式 stdio PASS：候选→共享 writer→卡片/索引读回；业务规则 staging、无出处 review；租约/fencing/重放与重复复查；宿主实际自主提炼未验收。
+- E4 PARTIAL：ZCode 用户级三工具事件、Claude 工具事件/PreCompact 均已备份注册；Trae 规则和 MCP instructions 已更新；真实 inflight.enabled 仍 false，等待重连及许可验收。
+- E5 PARTIAL：387 passed, 1 skipped；stdio、双 Git 克隆、备份、真实 schema14、INDEX 派生视图退役验证；191 卡/668 usage/24 feedback 保留。内网 push 返回 Empty reply from server，未推送成功；三人真实任务/净 token/用时测量尚缺。
+- 目标保持 active：已发异步问题请求普通 ZCode 会话配合重连验收，未获回复不视为授权/验收完成。无 live exec 遗留（最终 tests/probe 均已结束）。

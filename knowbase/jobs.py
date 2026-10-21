@@ -81,10 +81,12 @@ def enqueue(conn, kind: str, scope: str, payload: dict, *,
 
     # 幂等检查
     existing = conn.execute(
-        "SELECT job_id, state, result, error FROM jobs WHERE idempotency_key=?",
+        "SELECT job_id, state, result, error, input_hash FROM jobs WHERE idempotency_key=?",
         (idempotency_key,),
     ).fetchone()
     if existing:
+        if existing[4] != _input_hash(payload):
+            return {"error": IDEMPOTENCY_CONFLICT, "job_id": existing[0], "created": False}
         return {"job_id": existing[0], "state": existing[1], "created": False,
                 "result": existing[2], "error": existing[3]}
 
@@ -185,6 +187,14 @@ def claim(conn, job_id: str, host_session_id: str, *,
     retry_due = state == STATE_RETRY_WAIT and (not next_run_at or next_run_at <= now_str)
 
     if state == STATE_AWAITING or (state == STATE_CLAIMED and lease_expired) or retry_due:
+        from .materials import payload_for_job
+        try:
+            materials_payload = payload_for_job(conn, job_id)
+        except (ValueError, TypeError):
+            conn.execute("UPDATE jobs SET state=?,error=?,updated_at=? WHERE job_id=?",
+                         (STATE_BLOCKED, "MATERIAL_CORRUPT: needs_input", now_str, job_id))
+            conn.commit()
+            return {"error": "MATERIAL_CORRUPT", "state": STATE_BLOCKED}
         # 可领取（首次、租约过期、退避到期）
         new_fencing = fencing + 1
         # 租约过期只是换宿主，不算新尝试；awaiting / retry 到期是新尝试
@@ -209,11 +219,7 @@ def claim(conn, job_id: str, host_session_id: str, *,
         conn.commit()
 
         # 加载 spool 材料
-        spool = conn.execute(
-            "SELECT input_json FROM job_spool WHERE job_id=? ORDER BY created_at DESC LIMIT 1",
-            (job_id,),
-        ).fetchone()
-        materials = json.loads(spool[0]) if spool else {}
+        materials = materials_payload
 
         return {
             "batch_id": batch_id,

@@ -111,6 +111,14 @@ def upsert(conn: sqlite3.Connection, meta: dict, body: str, path: Path, staging:
          meta.get("updated", ""), int(meta.get("helpful_count", 0)),
          int(meta.get("unhelpful_count", 0)), meta["id"], str(path), int(staging)),
     )
+    # 卡片是内容权威；Git 克隆/同步后也要能读取版本并进行 CAS。
+    from .mutations import _compute_revision, _compute_governance_revision
+    conn.execute("INSERT INTO entity_heads(entity_id,content_revision,governance_revision,updated_at) "
+                 "VALUES(?,?,?,?) ON CONFLICT(entity_id) DO UPDATE SET "
+                 "content_revision=excluded.content_revision,governance_revision=excluded.governance_revision,"
+                 "updated_at=excluded.updated_at",
+                 (meta["id"], _compute_revision(meta, body), _compute_governance_revision(meta),
+                  datetime.now().isoformat(timespec="seconds")))
     if commit:
         conn.commit()
 

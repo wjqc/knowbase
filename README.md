@@ -1,5 +1,7 @@
 # knowbase（薪火）
 
+执行中检索与增量沉淀已进入实现验证：新增 `memory_context` 和 `memory_job_material`，支持分阶段查询、完整材料分页、技术经验/业务规则候选成卡与回执恢复。新机制默认关闭；升级与宿主配置见 [接入和回滚说明](docs/inflight-rollout.md)，真实验收边界见 [宿主能力记录](docs/host-capabilities.md)。
+
 跨 Agent 共享的经验记忆库 MCP 服务：踩坑 / 决策 / 流程 / 偏好 / 业务规则沉淀为一个本地 git 知识库，
 供本机所有 AI Agent 检索复用。**一个人的坑，所有 Agent 的经验。**
 原始材料（文档/代码/日志）以 source artifact 分层保真留存，不混入知识检索（ADR-0002）。

@@ -131,7 +131,8 @@ def adapter_create(repo: Path, conn, dtype: str, title: str, body: str, *,
     或 {"error": IDEMPOTENCY_CONFLICT}（同 request_id 不同 payload）。
     """
     # 计算 payload 哈希
-    payload = {"type": dtype, "title": title, "body": body, "scope": scope, **extra_meta}
+    payload = {"type": dtype, "title": title, "body": body, "scope": scope,
+               "tags": tags or [], "source": source, **extra_meta}
     phash = _payload_hash(payload)
 
     # 检查是否已完成（崩溃恢复）
@@ -154,8 +155,12 @@ def adapter_create(repo: Path, conn, dtype: str, title: str, body: str, *,
     # 短 RepoLock 内执行
     try:
         with RepoLock(repo, lock_timeout):
+            # 等锁期间另一进程可能已完成相同写入，先重放再查相似标题。
+            completed = _check_intent_completed(conn, request_id, "", phash)
+            if completed:
+                return completed
             # 锁内查重
-            sim = store.find_similar(repo, title)
+            sim = store.find_similar(repo, title, scope=scope)
             if sim:
                 _, smeta, spath = sim
                 _fail_intent(conn, intent_id, f"similar:{smeta['id']}")
@@ -254,8 +259,8 @@ def adapter_update(repo: Path, conn, mid: str, *,
                 "SELECT content_revision, governance_revision FROM entity_heads WHERE entity_id=?",
                 (mid,),
             ).fetchone()
-            current_content_rev = row[0] if row else _compute_revision(meta, body)
-            current_gov_rev = row[1] if row else _compute_governance_revision(meta)
+            current_content_rev = _compute_revision(meta, body)
+            current_gov_rev = _compute_governance_revision(meta)
 
             # CAS 检查
             if expected_content_revision and expected_content_revision != current_content_rev:
@@ -267,14 +272,15 @@ def adapter_update(repo: Path, conn, mid: str, *,
 
             # 应用更新
             from datetime import date
-            content_fields = {"title", "body", "tags", "scope", "relations", "code_refs", "source_refs"}
+            content_fields = {"title", "body", "tags", "scope", "relations", "code_refs", "source_refs",
+                              "provenance", "rule_context", "evidence"}
             gov_fields = {"status", "confidence", "last_verified"}
 
             for key, value in updates.items():
                 if key in content_fields:
                     if key == "body":
                         body = value
-                    elif key in meta:
+                    else:
                         meta[key] = value
                 elif key in gov_fields:
                     meta[key] = value

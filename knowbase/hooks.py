@@ -35,7 +35,12 @@ def session_start() -> str:
         "整篇文档等原始材料不入 memory_save，走 CLI knowbase import 导入为 source；\n"
         "3. 按记忆行动或验证后 → 必须回填 memory_feedback（helpful/not_helpful/outdated/incorrect）；"
         "once→verified 晋升与 active→stale 淘汰只认反馈，不回填状态机不转；\n"
-        "4. stale/once 状态的记忆采信前先在当前环境验证。"
+        "4. stale/once 状态的记忆采信前先在当前环境验证。\n"
+        "5. 执行中进入新子任务/模块、发现新错误、重要决策前，调用 memory_context 提交本阶段主题和具体查询；"
+        "无需等待下一条用户消息。长方案逐阶段查，不整篇只查一次；阶段完成同时检查技术经验与业务规则。\n"
+        "6. 提炼使用 memory_job_claim(protocol_version=2)，材料未读完用 memory_job_material 续页；"
+        "候选注明 type/title/scope/八项 body/segment_ids/evidence_refs，业务规则含 provenance 和 rule_context；"
+        "memory_job_submit 后核对 memory_id/保存状态，queued 和 accepted 不代表已成卡。"
     )
 
 
@@ -48,8 +53,7 @@ def _infer_scope(conn) -> str | None:
     if not project_dir:
         return None
     resolved = str(Path(project_dir).expanduser().resolve())
-    scope_map = config.load_config().get("scope_map", {}) or {}
-    mapped = scope_map.get(resolved) or scope_map.get(Path(resolved).name)
+    mapped = config.mapped_scope(project_dir)
     if mapped:
         return str(mapped)
     name = Path(resolved).name.lower()
@@ -274,7 +278,8 @@ def _try_enqueue_capture(session_id: str, transcript_path: str, cfg: dict) -> st
 
 def _read_stdin() -> dict:
     try:
-        return json.load(sys.stdin)
+        data = json.load(sys.stdin)
+        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
@@ -287,28 +292,84 @@ def _first(d: dict, *keys) -> str:
 
 
 def cmd_session_start(style: str = "claude"):
-    _emit(session_start(), style)
+    os.environ.setdefault("KNOWBASE_AGENT_NAME", style)
+    data = _read_stdin()
+    text = session_start()
+    if config.load_config()["inflight"]["enabled"] and (data.get("session_id") or data.get("sessionId")):
+        from .adapters import host_events
+        result = host_events.handle(data, event="recover", style=style)
+        text += "\n" + host_events.render(result)
+    _emit(text, style)
 
 
 def cmd_user_prompt(style: str = "claude"):
+    os.environ.setdefault("KNOWBASE_AGENT_NAME", style)
     data = _read_stdin()
     prompt = _first(data, "prompt", "prompt_text", "user_prompt", "input")
     # M3-2: 中途检查点触发（不阻断，异步入队）
     sid = _first(data, "session_id", "sessionId")
     transcript = _first(data, "transcript_path", "transcriptPath", "transcript")
-    if sid and transcript:
+    if sid and transcript and not config.load_config()["inflight"]["enabled"]:
         _maybe_trigger_mid_session_capture(sid, transcript)
-    _emit(user_prompt(prompt), style)
+    text = user_prompt(prompt)
+    if config.load_config()["inflight"]["enabled"]:
+        from .adapters import host_events
+        observation = host_events.handle(data, event="user-prompt", style=style)
+        extra = host_events.render(observation)
+        text = "\n".join(part for part in (text, extra) if part)
+    _emit(text, style)
 
 
 def cmd_stop(style: str = "claude"):
+    os.environ.setdefault("KNOWBASE_AGENT_NAME", style)
     data = _read_stdin()
+    if config.load_config()["inflight"]["enabled"]:
+        from .adapters import host_events
+        from .materials import digest
+        result = host_events.handle(data, event="stop", style=style)
+        rendered = host_events.render(result)
+        sid = str(data.get("session_id") or data.get("sessionId") or "unknown")
+        flag = _flag_path(digest({"session_id": sid, "jobs": result.get("job_ids", [])}))
+        if result.get("job_ids") and not flag.exists():
+            flag.write_text("1", encoding="utf-8")
+            print(json.dumps({"decision": "block", "reason": rendered}, ensure_ascii=False))
+        elif result.get("error"):
+            _emit(rendered, style)
+        return
     sid = _first(data, "session_id", "sessionId") \
         or os.environ.get("CLAUDE_SESSION_ID") or os.environ.get("ZCODE_SESSION_ID") or "unknown"
     tp = _first(data, "transcript_path", "transcript", "transcriptPath")
     out = stop_event(sid, tp)
     if out:
         print(out)  # 顶层 decision/reason：claude 与 zcode 同形
+
+
+def cmd_tool_event(style: str = "claude", event: str = "tool-after"):
+    os.environ.setdefault("KNOWBASE_AGENT_NAME", style)
+    from .adapters import host_events
+    data = _read_stdin()
+    try:
+        result = host_events.handle(data, event=event, style=style)
+        text = host_events.render(result)
+    except Exception as exc:
+        text = "[knowbase] 执行中处理失败：" + type(exc).__name__ + "；原任务可继续，知识处理尚未完成。"
+    if not text:
+        return
+    if style == "claude":
+        external = {"tool-before": "PreToolUse", "tool-after": "PostToolUse", "tool-failure": "PostToolUseFailure"}[event]
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": external, "additionalContext": text}}, ensure_ascii=False))
+    else:
+        _emit(text, style)
+
+
+def cmd_before_compact(style: str = "claude"):
+    if style != "claude":
+        _emit("[knowbase] unsupported_event：此宿主未验证支持压缩前 Hook，未执行。", style)
+        return
+    from .adapters import host_events
+    result = host_events.handle(_read_stdin(), event="before-compact", style=style)
+    if result.get("error"):
+        print("[knowbase] 压缩前材料处理未完成：" + str(result["error"]), file=sys.stderr)
 
 
 def _emit(text: str, style: str):

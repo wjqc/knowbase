@@ -725,3 +725,43 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - 已更新 README 和原地升级方案中的多人同步语义。
 - 全量 pytest 130/130、compileall、git diff --check 通过。
 - 独立知识文档已更新并单独提交为 92187b1；未纳入 knowledge 仓库中原有的其他未跟踪内容。
+
+
+## 2026-10-21 开始实施执行中知识使用
+- 已核对 git、目标、全局指令、相关知识和实施方案。
+- 启动 .venv/bin/python -m pytest -q 基线（session 53764）。
+- 正在完成 E0 证据调查并实现 E1，不对真实会话内容进行批量扫描。
+
+### E1/E2 与 E3 进展
+- 基线 pytest：345 passed, 1 skipped（23.38s）。
+- E0 静态能力：本机 zcode-guide 0.3.0 明确 PreToolUse/PostToolUse/PostToolUseFailure；不支持 PreCompact。真实宿主尚待探针，不升级 event_driven。
+- E1 新增同库 v9–v12 迁移、完整材料 manifest 与批次分页；保留旧日志和 legacy 未验证状态。
+- 新增 memory_context、memory_job_material，执行阶段/错误检索、候选限额、scope 绑定、缓存与恢复注入。
+- E3 提取 writer 共享写服务，候选物化和回执恢复已接入；业务规则落 staging，未确认规则可只留 review 候选。
+- 当前针对性：长材料/队列 70 passed；上下文/分页/实际成卡 24 passed；写服务相关 71 passed。全套 session 54463 运行中。
+- 尚未修改真实 Hook 配置/真实 memory.db；代码仍在验证与收敛阶段。
+
+- 新增正式调用链集成测试：候选生成 staging/active 卡、默认检索隔离、幂等重放、错误不推进、实际写成后丢响应恢复、无出处留 review；24 项新测试通过。
+- 首次全量：368 passed、1 skipped、1 failed。唯一失败为原 E2E 要求告警带“写作规范建议”，共享 writer 重构后漏了该展示前缀，已恢复，正在重跑脚本及新功能测试（session 见工具记录）。
+- ZCode bundle 可通过 node 执行 --help，版本 0.17.0；尚未调用模型，也未修改真实用户配置。
+
+### E0/E4 真实宿主探针
+- 临时工程：/var/folders/gs/nf9vymjn2ws125k928bj3n2m0000gn/T/knowbase-host-probe-ps7tno5b；定位文件 /tmp/knowbase-active-probe.json。
+- 已完成两个 live CLI 探针（session 20123 与 52534 均终态退出 0）。第二次实际工具事件注入 KB_PROBE_RULE_7C2A，宿主报告该值；检索/消费局部通过。
+- 用户级 ZCode 三个执行中工具 Hook 已备份注册；backup 记录在 /tmp/knowbase-active-probe.json，真实 inflight.enabled 仍默认 false，未启用真实库自动写入。
+- 自动增量入队通过；headless build 无 permission client，领取/提交未完成，保留 awaiting_agent，不升级整体验收。
+- 最近全套：375 passed, 1 skipped（24.96s）；其后增加严格 transcript、scope 别名和应用 fencing，定向 64 passed, 1 skipped；需再次最终全套。
+
+### 数据备份与升级核对
+- 真实库在线备份：/Users/qc/.knowbase/backups/inflight-20261021-193930（SQLite backup API，含配置和 manifest）。备份时实际 schema 已为 13；因此此前“尚未修改真实 DB”的描述不能继续作为当前状态。原使用/反馈/卡数为 668/24/191。
+- 随后显式 doctor 升级至 schema14；usage=668、feedback=24、cards=191，Markdown/meta/FTS/embedding 均 191。没有自动生成真实业务卡；inflight 开关仍关闭。
+- doctor 显示既有 INDEX.md dirty、数据库 Git ahead 3，以及旧 sync error；发现 init 的 INDEX 忽略退役分支不可达，正在修补显式 init 迁移，保留物理 INDEX 与其他变更。
+- 最近全套 383 passed, 1 skipped；此后增加观察快照、版本读回、健康状态与迁移检查，最终全套尚待。
+
+### 本地实现交付检查
+- 最终运行：387 passed, 1 skipped（28.89s）；跳过为本环境 OCR 依赖项。其后仅补材料信任提示文字，不改变执行分支。compileall、diff-check 和本地文档链接/围栏检查通过。
+- 正式 MCP 注册实读为14工具；新增 memory_context 和 memory_job_material，stdio 贯通 capture/claim/submit/context/read。
+- 两临时 Git 克隆证明 staging 不默认检索、人工激活后传播、接收端版本可读；这是受控测试，不等于三人真实业务验收。
+- 真实数据仓库 INDEX.md 已在保留物理文件/备份的前提下退役跟踪；数据仓库本地提交 ed461d8，工作区干净。同步尝试失败：内网 origin 返回 Empty reply from server；本地提交保留。
+- 真实库为schema14，191卡/668 usage/24 feedback 与备份前一致；新 inflight 总开关仍关闭。
+- 已向用户发起普通 ZCode 会话验收协作问题；headless build 的 MCP 因没有 permission client 被拒，未绕过其审批/许可。待用户回复及三人真实任务。

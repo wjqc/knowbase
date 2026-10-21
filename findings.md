@@ -373,3 +373,34 @@ fi
 - `schedule_push` 只写 `sync_state=pending`，并不执行推送；因此“auto_push 开启”与 README 所写“释放锁后推送”不一致。
 - 正确收敛语义：干净工作区下 fetch → 判断拓扑 → diverged 时 `rebase remote/branch`；rebase 成功再 push；真正内容冲突时 `rebase --abort`，恢复调用前 HEAD/工作区并报告冲突文件；push race 做有界重试。
 - 远程网络失败与内容冲突必须区分：fetch timeout 只说明远端检查失败，不能称为 Git 内容冲突。
+
+
+## 2026-10-21 执行中使用实施取证
+- 当前代码基线 2049e1f；开工已有三份本次设计/实施方案文档变更，保留并纳入实施。
+- Codegraph 未初始化，使用源码；ZCode CLI 不在 PATH，先查本机 zcode-guide 插件文档和可执行入口。
+- 关键断点：job_submit 只登记候选，未调用写卡；单事件/capture/claim 多层截断；segment_results 单列 ID 和累加游标可能丢覆盖。
+- 测试与模型/真实团队验收分层，不把 hook 模板或配置存在当成下一行动消费成功。
+
+### 本轮实现与测试发现
+- 初次新测试错误假设卡 ID 为年号流水；当前代码使用 UUID，已改为从成功返回提取 ID，不放宽业务断言。
+- writer 重构丢失原 staging 提示中的 bizrules/ 目录，既有回归捕获后已恢复。
+- 同 scope 标题去重，避免跨项目同名规则误拒；候选完整 payload 不再丢 type/provenance/code_refs。
+- 提交回执先于租约检查；物化完成须读回文件和索引；候选数不作为片段进度。
+
+- 当前 schema 已新增 v12（应用回执租约），用于防止两个恢复者同时应用同一提交；后续文档需与实际迁移号对齐。
+- 共享 writer 的结构化结果已替代对 save 文本的内部解析；保留旧客户端展示契约（bizrules/ 和写作规范建议），避免通过改旧测试掩盖回归。
+- E3 仍需重点审查：应用租约失效后的写回 fencing；无永久重试的 needs_reassessment；全部字段/source_refs revision；跨机规则同步与审批保持隔离。
+
+- live probe 捕获的接线事实优于安装文档：本次工程级工具 Hook 没有运行，改用户级注册后实际 PreToolUse 才触发；不能仅凭配置存在声称已接线。
+- macOS /var 与 /private/var 是当前 scope 缺失原因之一；已统一 config.mapped_scope 给 Hook/context/adapter 使用。
+- headless build 的 knowbase MCP 工具调用需要许可客户端，实际出现 No permission client configured；检索注入局部通过不代表提炼提交通过。
+- 新增严格 transcript 校验，破损 JSONL 不允许静默跳行后标完整；应用回执在候选/覆盖写回前再次检查 owner 和到期时间，跨宿主恢复使用稳定候选 source 防幂等冲突。
+
+- git 源码远端为 GitHub，数据库远端为内网；不将本机原始日志/配置提交源码或向公网推送。
+- 真实库仅 dirty INDEX.md；该派生文件仍受 Git 跟踪会阻塞现有同步。init 先创建 .gitignore，随后仅“文件不存在”才写 INDEX 忽略的分支永远不执行；显式升级需修正，不能只改文案。
+- 已用 SQLite 在线 backup 备份当前真实状态；数据 counts 未变化。无法把 schema13 快照冒充开工前 v8 备份，升级记录明确实际版本。
+
+- index.upsert/rebuild 需同时投影 entity_heads；否则 Git 接收方虽有卡和索引，却不能可靠读取版本/做 CAS。已用双克隆测试追到消费端。
+- 开场缺项目时的空 global 占位需允许后续正规绑定；已有真实主题/覆盖的 scope 仍禁止静默切换。
+- 任意任务的使用率/净 token 收益仍未量化。真实探针证明有限的递送与消费，不据此关闭完整任务规划/业务验收。
+- 本轮一次 apply_patch 锚点不匹配，无文件写入；随后按精确 upsert 尾部锚点完成修改。源码探针 inspect 脚本一次产生转义 SyntaxWarning，未改变运行代码。
