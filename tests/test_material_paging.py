@@ -105,7 +105,7 @@ def test_upgrade_from_v8_preserves_local_logs_and_old_segment(tmp_path, monkeypa
     conn.execute("INSERT INTO usage_log VALUES('keep')")
     conn.execute("INSERT INTO segment_results VALUES('seg-0','old-job','b','distilled','','c','a','b')")
     conn.commit()
-    assert migrations.apply_all(conn) == [9, 10, 11, 12, 13, 14, 15, 16, 17]
+    assert migrations.apply_all(conn) == [9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
     assert conn.execute("SELECT detail FROM usage_log").fetchone()[0] == "keep"
     assert conn.execute("SELECT settlement_state FROM segment_results").fetchone()[0] == "legacy_unverified"
     assert migrations.apply_all(conn) == []

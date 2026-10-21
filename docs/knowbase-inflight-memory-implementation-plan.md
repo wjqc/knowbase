@@ -192,7 +192,7 @@ rule_context（bizrule 必填）包括 business_object、trigger、required_or_f
 
 ## 8. 数据迁移、幂等与兼容
 
-基线 schema 为 v8；实际采用 v9–v14：v12 增加应用回执租约、v13 保存相似卡快照、v14 持久化脱敏观察事件，补足表内恢复与压缩边界。其余字段见下表；禁止修改已运行的旧迁移。
+基线 schema 为 v8；固定rc1采用v9–v14，当前开发继续到v18：v12应用回执租约、v13相似卡快照、v14脱敏观察事件；v15同步指纹、v16消费回执、v17版本/任务结果反馈、v18命令遥测。禁止修改已运行的旧迁移，正式部署与开发状态分别记载。
 
 | 迁移 | 表/字段与约束 | 兼容策略 |
 |---|---|---|
@@ -200,6 +200,10 @@ rule_context（bizrule 必填）包括 business_object、trigger、required_or_f
 | v10 材料和批次覆盖 | job_segments：PK(job_id,segment_id)，UNIQUE(job_id,ordinal)，source_version/hash、定位/offset、evidence_group_id；job_batches：batch_id PK，job_id、input_version、manifest_hash、segment_ids_json、delivered_json、owner、fencing_token、expires_at、state | 从可完整还原的 spool 建 manifest；不能还原的旧截断材料标 legacy_incomplete/needs_input，不伪造原文 |
 | v10 覆盖修正 | 事务重建 segment_results，PK(job_id,segment_id)，增加 settlement_state/receipt_id/linked_ids_json；保留 decision/reason、旧时间字段 | 旧行原样保留；无法证明与 manifest 一致的旧 distilled 不自动算成已成卡，单列待对账 |
 | v11 应用与回执 | candidates 增 payload_json/payload_hash、materialization_state、memory_id、memory_revision；job_submissions：PK(job_id,request_id)，batch_id、payload_hash、state、result_json、created_at、updated_at | 旧候选不自动大批写卡；逐条显式复核恢复缺字段/证据，保留旧决策供审计 |
+| v15 刷新协调 | sync_lease.target_hash，明确绑定配置/HEAD，跨进程冷却与租约 | 本地检索不等网络；过期工作不能释放新租约，目标改变不采纳旧结果 |
+| v16 消费回执 | knowledge_uses，UNIQUE(host_profile,session_id,event_id)，任务/方案版本、实际递送事件、卡版本、使用状态 | 阅读与采纳分开；内容改版不得继续采纳旧候选；不自动helpful |
+| v17 反馈回执 | feedback_events及feedback_requests；版本+任务+稳定结果去重；before/after文件哈希 | 历史和旧调用仅作未绑定观察；新内容重新验证；回执恢复不重复累计，工具标签不当人工权限 |
+| v18 命令遥测 | command_calls，仅命令、传输、结果类别、时间与时长，不存参数 | 新旧日志并列不相加；metrics只读导出不迁移/触网，缺表为null |
 
 所有表位于原 memory.db，沿用迁移事务、WAL 与短写入；副作用锁顺序 RepoLock→SQLite。应用意图先独立提交，不持 SQLite 事务等待 RepoLock；后台网络和模型不持两种写锁。
 

@@ -25,7 +25,7 @@ def test_registered_mcp_pipeline_creates_and_consumes_knowledge(memory_repo):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 registered = {tool.name for tool in (await session.list_tools()).tools}
-                assert {"memory_context", "memory_job_material", "memory_job_submit", "memory_use"} <= registered
+                assert {"memory_context", "memory_job_material", "memory_job_submit", "memory_use", "memory_metrics"} <= registered
                 async def call(name, arguments):
                     result = await session.call_tool(name, arguments)
                     assert not result.isError, result
@@ -67,4 +67,9 @@ def test_registered_mcp_pipeline_creates_and_consumes_knowledge(memory_repo):
                 # 仅为隔离协议样本，不冒充真实业务质量或独立人工验收。
                 assert store.load(memory_repo,mid)[0]["helpful_count"]==1
                 assert store.load(memory_repo, mid)[0]["confidence"] == "once"
+                metrics=json.loads(await call("memory_metrics",{"source_label":"stdio-device"}))
+                assert metrics["schema"]=="knowbase.metrics.v1"
+                calls={r["command"]:r["count"] for r in metrics["counts"]["command_calls"]}
+                assert calls["memory_context"]==1 and calls["memory_feedback"]==1
+                assert "memory_metrics" not in calls
     asyncio.run(asyncio.wait_for(probe(), timeout=30))

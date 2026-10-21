@@ -264,6 +264,12 @@ MIGRATIONS: list[tuple[int, str]] = [
       WHERE binding='version_task';
     CREATE TABLE feedback_requests(request_id TEXT PRIMARY KEY,payload_hash TEXT NOT NULL,receipt_id TEXT NOT NULL);
     """),
+    (18, """
+    CREATE TABLE command_calls(
+      call_id TEXT PRIMARY KEY,ts TEXT NOT NULL,transport TEXT NOT NULL,
+      command TEXT NOT NULL,status TEXT NOT NULL,duration_ms REAL NOT NULL);
+    CREATE INDEX command_calls_time ON command_calls(ts);
+    """),
 ]
 
 

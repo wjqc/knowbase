@@ -18,7 +18,7 @@
 | C1 | 本地实现：context 非阻塞调度短生命周期刷新，跨进程租约与冷却期共用；fetch 不占 RepoLock，合并/索引重建持锁。候选读取遇锁返回 deferred_sync，不误记为检索完成 | context.py:execute；refresh.py；gitops.py:sync_before_read；迁移v15 | 双克隆实际提交/接收、慢fetch并发读取、租约争抢/过期接管、关闭auto_pull/目标改变、失败保留本地卡、auto_push=false均有回归。后台刷新只接收远端变更，推送仍走写入链路。仍未进入固定发行包/真实三机验收 |
 | C2 | 本地实现memory_use及v16 knowledge_uses；四态与阅读分别记录，绑定实际递送的context事件、会话、任务/方案版本、卡内容版本 | consumption.py；context.py；server.py:read_impl/use_impl | 定向25项通过；含跨会话/宿主隔离、未递送候选、内容变化、并发幂等与payload冲突。没有自动helpful；宿主实际采用链仍待真实任务验证 |
 | C3 | 本地实现v17版本/任务结果反馈，按卡内容版本+任务身份/方案版本+稳定结果ID去重；请求别名也保留payload冲突检测 | versioned_feedback.py；adapter_feedback；lifecycle；内容更新入口 | 定向44项通过（含正式stdio及脚本回归）。未绑定旧调用只记观察；本版本有效反馈参与治理，human前缀不是人工权限；改版清除旧验证。反馈落盘前/后中断可核对哈希恢复，冲突不假成功。尚未部署真实宿主 |
-| C4 | 团队统计应只读导出汇总而非复制原始数据库。当前 stats/doctor 可看本机，尚无稳定的隐私最小化导出协议 | __main__.py:cmd_stats/cmd_doctor；server.py:stats_impl | 提供不含查询/原文/业务正文的计数导出、范围及schema，支持三机收集；人数需真实使用者确认 |
+| C4 | 本地实现只读metrics.v1导出（CLI/MCP），v18补无参数MCP及CLI/Hook命令计数，旧日志单列不冒充完整调用 | metrics.py；telemetry.py；memory_metrics；knowbase metrics | 定向28项通过及全套429 passed/1 skipped，后补覆盖时间/库存后定向6再通过。实际schema14业务库只读导出成功、主库哈希未变，缺新表=null。三机分别收集并人工核对归属；不导出查询/原文/业务正文/项目名/原身份标签 |
 
 这些条款继续保留在原目标中，不能因本机先开检索/观察试用而删掉。开发中保持业务库和已部署运行版本隔离，完成后再切换发布。
 

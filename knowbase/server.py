@@ -348,6 +348,18 @@ def stats_impl():
     return "\n".join(lines)
 
 
+def metrics_impl(since: str = "", until: str = "", source_label: str = "unknown",
+                 naive_timezone: str = "local") -> str:
+    """只读导出本机计数，不包含查询、对话、卡片正文、项目/人员标签。"""
+    import json
+    from . import metrics
+    rp,err=_repo()
+    if err:
+        return err
+    return json.dumps(metrics.export(rp,since=since,until=until,source_label=source_label,
+                                     naive_timezone=naive_timezone),ensure_ascii=False)
+
+
 def json_counts(counts):
     return " ".join(f"{key}={count}" for key, count in sorted(counts.items())) or "0"
 
@@ -808,22 +820,25 @@ def import_impl(directory: str, scope: str = "global", mode: str = "extract") ->
 
 
 # ---------- 注册为 MCP 工具（显式命名） ----------
+from .telemetry import observe as _observe
 
-mcp.tool(name="memory_save", description="保存一条经验记忆。standard/preference 由 Agent 保存时自动进 staging 待人审")(save_impl)
-mcp.tool(name="memory_update", description="修改已有记忆的内容/标签/关系。confidence 与 status 由服务端状态机管理，不接受指定")(update_impl)
-mcp.tool(name="memory_read", description="按 id 读取记忆全文（自动累计 hit_count）")(read_impl)
-mcp.tool(name="memory_search", description="检索经验记忆：任务开始涉及具体项目/系统/报错时先调用。检索词建议 ≥3 字的具体名词或报错关键词")(search_impl)
-mcp.tool(name="memory_feedback", description="验证任务结果后回填helpful/not_helpful/outdated/incorrect；携带expected_content_revision、memory_use返回的use_id、稳定task_outcome_id。按卡版本+任务结果去重。旧调用仅保留未绑定观察，不改变治理状态")(feedback_impl)
-mcp.tool(name="memory_context", description="执行中知识检索：拆解长方案后、进入子任务、新错误和重要决策前调用；提供当前主题与查询，阶段结束检查技术经验及业务规则待办")(context_impl)
-mcp.tool(name="memory_use", description="记录已递送候选的实际使用状态：referenced参考/adopted采纳/irrelevant无关/unverified待验证。沿用memory_context的会话、event_id和卡片版本；不自动生成helpful。返回use_id供任务结果反馈使用")(use_impl)
-mcp.tool(name="memory_stats", description="记忆库统计：数量分布、使用漏斗、TOP 记忆")(stats_impl)
-mcp.tool(name="memory_capture", description="阶段完成时入队提炼任务。提供材料，或沿用 Hook 的 session_id/scope/host_profile 直接收集已持久化观察，避免复制长原文；返回 job_id，不代表已成卡")(capture_impl)
-mcp.tool(name="memory_job_claim", description="领取提炼批次。返回脱敏材料、相似卡引用、lease_token 和到期时间")(job_claim_impl)
-mcp.tool(name="memory_job_material", description="分页读取已领取批次材料，保留原文定位；返回 next_cursor，读完后再提交对应片段")(job_material_impl)
-mcp.tool(name="memory_job_renew", description="续租当前批次。延长 lease 到期时间")(job_renew_impl)
-mcp.tool(name="memory_job_submit", description="提交提炼结果（候选经验或 no_candidate）。宿主完成提炼后调用")(job_submit_impl)
-mcp.tool(name="memory_job_status", description="查询任务状态。返回 state/cursor/error 等信息")(job_status_impl)
-mcp.tool(name="memory_import", description="M4-5: 导入文档目录，入队 extract 任务供提炼。支持 Markdown/HTML/代码等多种格式")(import_impl)
+mcp.tool(name="memory_save", description="保存一条经验记忆。standard/preference 由 Agent 保存时自动进 staging 待人审")(_observe(save_impl,"memory_save"))
+mcp.tool(name="memory_update", description="修改已有记忆的内容/标签/关系。confidence 与 status 由服务端状态机管理，不接受指定")(_observe(update_impl,"memory_update"))
+mcp.tool(name="memory_read", description="按 id 读取记忆全文（自动累计 hit_count）")(_observe(read_impl,"memory_read"))
+mcp.tool(name="memory_search", description="检索经验记忆：任务开始涉及具体项目/系统/报错时先调用。检索词建议 ≥3 字的具体名词或报错关键词")(_observe(search_impl,"memory_search"))
+mcp.tool(name="memory_feedback", description="验证任务结果后回填helpful/not_helpful/outdated/incorrect；携带expected_content_revision、memory_use返回的use_id、稳定task_outcome_id。按卡版本+任务结果去重。旧调用仅保留未绑定观察，不改变治理状态")(_observe(feedback_impl,"memory_feedback"))
+mcp.tool(name="memory_context", description="执行中知识检索：拆解长方案后、进入子任务、新错误和重要决策前调用；提供当前主题与查询，阶段结束检查技术经验及业务规则待办")(_observe(context_impl,"memory_context"))
+mcp.tool(name="memory_use", description="记录已递送候选的实际使用状态：referenced参考/adopted采纳/irrelevant无关/unverified待验证。沿用memory_context的会话、event_id和卡片版本；不自动生成helpful。返回use_id供任务结果反馈使用")(_observe(use_impl,"memory_use"))
+mcp.tool(name="memory_stats", description="记忆库统计：数量分布、使用漏斗、TOP 记忆")(_observe(stats_impl,"memory_stats"))
+mcp.tool(name="memory_capture", description="阶段完成时入队提炼任务。提供材料，或沿用 Hook 的 session_id/scope/host_profile 直接收集已持久化观察，避免复制长原文；返回 job_id，不代表已成卡")(_observe(capture_impl,"memory_capture"))
+mcp.tool(name="memory_job_claim", description="领取提炼批次。返回脱敏材料、相似卡引用、lease_token 和到期时间")(_observe(job_claim_impl,"memory_job_claim"))
+mcp.tool(name="memory_job_material", description="分页读取已领取批次材料，保留原文定位；返回 next_cursor，读完后再提交对应片段")(_observe(job_material_impl,"memory_job_material"))
+mcp.tool(name="memory_job_renew", description="续租当前批次。延长 lease 到期时间")(_observe(job_renew_impl,"memory_job_renew"))
+mcp.tool(name="memory_job_submit", description="提交提炼结果（候选经验或 no_candidate）。宿主完成提炼后调用")(_observe(job_submit_impl,"memory_job_submit"))
+mcp.tool(name="memory_job_status", description="查询任务状态。返回 state/cursor/error 等信息")(_observe(job_status_impl,"memory_job_status"))
+mcp.tool(name="memory_import", description="M4-5: 导入文档目录，入队 extract 任务供提炼。支持 Markdown/HTML/代码等多种格式")(_observe(import_impl,"memory_import"))
+
+mcp.tool(name="memory_metrics", description="只读导出本机隐私最小化汇总（schema knowbase.metrics.v1）；UTC时间窗，缺数据返回null，不含查询/对话/业务正文，不自动上传。source_label只是操作者标签，不认证人数")(metrics_impl)
 
 
 def main():

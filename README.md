@@ -57,7 +57,7 @@ uv venv && uv pip install -e .
 **Trae CN**（`~/Library/Application Support/Trae CN/User/mcp.json` → mcpServers）：同上；
 并把 `docs/trae-rules.md` 内容贴进 Trae 用户规则（Trae 无 hook、不读 AGENTS.md）。
 
-**KNOWBASE_AGENT_NAME 约定：`工具-姓名`**（如 `trae-lisi`）——审计溯源和经验晋升统计都靠它区分人。
+**KNOWBASE_AGENT_NAME 约定：`工具-姓名`**（如 `trae-lisi`）——只作工具来源归因，不认证身份或计算真实人数。
 
 ```bash
 # 5. 验证：重启 Agent 后问一句 "搜下 EasyConnect"，应命中 P-2026-0001
@@ -75,6 +75,8 @@ uv venv && uv pip install -e .
 不同文件/可自动合并的修改会通过 rebase 重放并有限重试（默认 3 次）；只有真实内容冲突才停止，自动
 `rebase --abort` 并保留本地提交。网络超时只记录为同步失败，不会误报成内容冲突，也不会回滚本地保存。
 索引可随时重建。
+
+执行中检索、版本反馈与本机统计导出见[消费和统计协议](docs/inflight-consumption-metrics.md)。新版提供 `memory_use`、`memory_metrics` 和 `knowbase metrics`；历史本机日志不能代表全团队总量。
 
 ## 可选：任务前自动检索 / 任务后漏存兜底（hooks）
 
