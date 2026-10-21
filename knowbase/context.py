@@ -12,6 +12,11 @@ STAGES = {"task_plan", "subtask_start", "new_failure", "decision", "verified_res
 CAPTURE_STAGES = {"verified_result", "checkpoint", "before_compact"}
 
 
+def provisional_global(scope, topics_json, coverage_json):
+    bookkeeping = {"_hook_plan_notice", "_hook_notices"}
+    return scope == "global" and not json.loads(topics_json) and not (set(json.loads(coverage_json)) - bookkeeping)
+
+
 def _section(body: str, name: str) -> str:
     match = re.search(r"^#{1,4}\s*" + re.escape(name) + r"[^\n]*\n(.*?)(?=^#{1,4}\s|\Z)",
                       body, re.M | re.S)
@@ -50,7 +55,7 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                              "FROM context_sessions WHERE host_profile=? AND session_id=?",
                              (host, session_id)).fetchone()
         # 开场缺项目时建立的空 global 占位不应锁死稍后才出现的正式项目。
-        if (prior and prior[0] == "global" and not json.loads(prior[2]) and not json.loads(prior[3])
+        if (prior and provisional_global(prior[0], prior[2], prior[3])
                 and ((scope and scope != "global") or project_path)):
             prior = None
         result = {"event_id": event_id, "capability_mode": options.get("mode", "assisted"),

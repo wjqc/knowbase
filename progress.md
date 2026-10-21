@@ -765,3 +765,10 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - 真实数据仓库 INDEX.md 已在保留物理文件/备份的前提下退役跟踪；数据仓库本地提交 ed461d8，工作区干净。同步尝试失败：内网 origin 返回 Empty reply from server；本地提交保留。
 - 真实库为schema14，191卡/668 usage/24 feedback 与备份前一致；新 inflight 总开关仍关闭。
 - 已向用户发起普通 ZCode 会话验收协作问题；headless build 的 MCP 因没有 permission client 被拒，未绕过其审批/许可。待用户回复及三人真实任务。
+
+### 交接与背压补充收敛
+- 交付复核补齐 Hook→MCP 的真实 session_id/host_profile/scope/独立 event_id；避免查询计划存入其他会话。空 global 开场占位允许后续正规项目绑定，真实已用 scope 仍拒绝静默切换。
+- 队列幂等检查与 pending 上限同一个 BEGIN IMMEDIATE，新增并发反例证明相同请求只建一份、满队列不超限、不丢已接受 spool。capture/import 都返回明确背压。
+- 相同待办按状态/游标限频；规划提示限频；Hook 捕获失败状态落库。正常下一材料批次不消耗故障重试次数。
+- 一次新增测试补丁位置错误引入 first_count NameError，已将原断言移回原测试，并新增独立反例；不改变业务断言。
+- 最终全套 394 passed, 1 skipped（28.49s），compileall/diff-check 通过。尚未获得异步验收问题回复；所有 exec/probe 均结束，真实自动总开关仍关闭。

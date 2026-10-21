@@ -1,5 +1,5 @@
 import os
-import shutil
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -34,7 +34,10 @@ def _env_for(script: str, tmp_path: Path) -> dict:
     if not src_db.exists():
         pytest.skip("真实记忆库不存在，无法跑 golden set")
 
-    shutil.copy2(src_db, tmp_path / "memory.db")
+    # 在线一致性快照，不能遗漏仍在 WAL 中的元数据/迁移。
+    with sqlite3.connect(f"file:{src_db}?mode=ro", uri=True) as source:
+        with sqlite3.connect(tmp_path / "memory.db") as destination:
+            source.backup(destination)
     env["KNOWBASE_REPO_PATH"] = str(tmp_path)
     return env
 

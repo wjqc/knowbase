@@ -115,3 +115,5 @@
 - E4 PARTIAL：ZCode 用户级三工具事件、Claude 工具事件/PreCompact 均已备份注册；Trae 规则和 MCP instructions 已更新；真实 inflight.enabled 仍 false，等待重连及许可验收。
 - E5 PARTIAL：387 passed, 1 skipped；stdio、双 Git 克隆、备份、真实 schema14、INDEX 派生视图退役验证；191 卡/668 usage/24 feedback 保留。内网 push 返回 Empty reply from server，未推送成功；三人真实任务/净 token/用时测量尚缺。
 - 目标保持 active：已发异步问题请求普通 ZCode 会话配合重连验收，未获回复不视为授权/验收完成。无 live exec 遗留（最终 tests/probe 均已结束）。
+
+最终本地复核：394 passed, 1 skipped；新增并发背压/Hook-MCP 会话交接/待办限频永久测试。此更新不关闭正常宿主许可、三人业务试点与内网同步门槛。当前没有可据以宣布完整目标完成的证据。

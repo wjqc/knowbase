@@ -138,7 +138,7 @@ def handle(data: dict, *, event: str, style: str) -> dict:
                 mapped = path.name if known else ""
             if mapped:
                 scope = mapped
-            elif not row or (row[0] == "global" and not json.loads(row[1]) and not json.loads(row[3])):
+            elif not row or context.provisional_global(row[0], row[1], row[3]):
                 scope = ""
         if not scope and not project:
             scope = "global"
@@ -182,18 +182,58 @@ def handle(data: dict, *, event: str, style: str) -> dict:
                              observation=observation, project_path=str(project or ""))
     if result.get("error"):
         return result
+    if result.get("host_handled"):
+        return result
     due = event in ("stop", "before-compact") or event in ("tool-after", "tool-failure") and count - captured_count + 1 >= cfg["inflight"]["checkpoint_work_ops"]
     if last_at:
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(last_at)).total_seconds()
         due = due or age >= cfg["inflight"]["checkpoint_minutes"] * 60
     transcript = data.get("transcript_path") or data.get("transcriptPath")
     if due:
-        captured = capture_increment(repo, session, transcript, scope, host)
+        try:
+            captured = capture_increment(repo, session, transcript, scope, host)
+        except (OSError, ValueError, TypeError) as exc:
+            captured = {"error": "MATERIAL_PARSE_FAILED", "capture_status": "failed", "failure_class": type(exc).__name__}
         pending = result.get("job_ids", [])
         result.update(captured)
         result["job_ids"] = list(dict.fromkeys(pending + captured.get("job_ids", [])))[:cfg["inflight"]["max_batches_per_opportunity"]]
     prompt = data.get("prompt") or data.get("prompt_text") or ""
-    result["needs_query_plan"] = (event == "tool-before" and not row) or (event == "user-prompt" and len(prompt) > 2000)
+    result["needs_query_plan"] = (event == "tool-before" and (not row or not json.loads(row[1]))) or (event == "user-prompt" and len(prompt) > 2000)
+    result["planning_context"] = {"session_id": session, "host_profile": host, "scope": scope,
+                                  "event_id": "agent-plan:" + identity, "stage": "task_plan"}
+    result["host_handled"] = True
+    conn = index.connect(repo)
+    try:
+        current = conn.execute("SELECT coverage_json FROM context_sessions WHERE host_profile=? AND session_id=?",
+                               (host, session)).fetchone()
+        coverage = json.loads(current[0]) if current else {}
+        if result["needs_query_plan"]:
+            last = coverage.get("_hook_plan_notice", "")
+            now = datetime.now(timezone.utc)
+            if last and event != "user-prompt" and (now - datetime.fromisoformat(last)).total_seconds() < 60:
+                result["needs_query_plan"] = False
+            else:
+                coverage["_hook_plan_notice"] = now.isoformat(timespec="seconds")
+        notices = coverage.get("_hook_notices", {})
+        notifications = []
+        for job_id in result.get("job_ids", []):
+            job = jobs.status(conn, job_id)
+            signature = f"{job['state']}:{job['cursor']}:{job['attempt']}" if job else "missing"
+            if notices.get(job_id) != signature or event in ("stop", "recover"):
+                notifications.append(job_id)
+                notices[job_id] = signature
+        coverage["_hook_notices"] = notices
+        result["notify_job_ids"] = notifications
+        conn.execute("UPDATE context_sessions SET coverage_json=? WHERE host_profile=? AND session_id=?",
+                     (json.dumps(coverage), host, session))
+        status = str(result["error"]).lower() if result.get("error") else result.get("retrieval_status", "executed")
+        conn.execute("UPDATE context_events SET result_json=?,status=?,reason=?,job_ids_json=? "
+                     "WHERE host_profile=? AND session_id=? AND event_id=?",
+                     (json.dumps(result, ensure_ascii=False), status, result.get("error", ""),
+                      json.dumps(result.get("job_ids", [])), host, session, f"{event}:{identity}"))
+        conn.commit()
+    finally:
+        conn.close()
     return result
 
 
@@ -204,12 +244,16 @@ def render(result):
         return "[knowbase] 执行中知识处理未完成：" + str(result["error"]) + "；请核对 scope/待办，不把失败当作无知识。"
     lines = []
     if result.get("needs_query_plan"):
-        lines.append("[knowbase] 请用 memory_context 提交当前子任务的主题与短查询；执行中进入新子任务/新错误仍需补查，无需等待用户消息。")
+        identity = json.dumps(result.get("planning_context", {}), ensure_ascii=False)
+        lines.append("[knowbase] 请调用 memory_context，沿用以下实际会话身份：" + identity +
+                     "，并补齐当前任务的 current_goal/topics（主题与具体短查询）。后续阶段沿用同一 session_id/host_profile，"
+                     "使用新的 event_id；执行中进入新子任务/新错误仍需补查，无需等待用户消息。")
     if result.get("candidates"):
         lines.append("[knowbase 执行中候选] 先核对适用条件，再按需 memory_read；命中不代表已经验证：")
         for c in result["candidates"]:
             lines.append(f"- [{c['id']}] {c['summary']}；适用：{c['applicable_when']}；{c['confidence']}")
-    if result.get("job_ids"):
-        lines.append("[knowbase 增量提炼待办] " + ", ".join(result["job_ids"]) +
+    notifications = result.get("notify_job_ids", result.get("job_ids", []))
+    if notifications:
+        lines.append("[knowbase 增量提炼待办] " + ", ".join(notifications) +
             "。请 memory_job_claim(protocol_version=2) 领取，memory_job_material 续页，核对技术经验及业务规则，查重后提交；无价值片段给明确理由。")
     return "\n".join(lines)

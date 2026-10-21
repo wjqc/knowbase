@@ -72,46 +72,44 @@ def _input_hash(payload: dict) -> str:
 
 def enqueue(conn, kind: str, scope: str, payload: dict, *,
             idempotency_key: str = "", max_attempts: int = DEFAULT_MAX_ATTEMPTS) -> dict:
-    """入队一个任务。同 key 已存在则返回既有 job（幂等）。
-
-    返回 {"job_id", "state", "created"} — created=False 表示幂等命中。
-    """
+    """同库短事务内检查幂等和背压，再同时持久输入与任务。"""
+    from . import config
     if not idempotency_key:
         idempotency_key = _idempotency_key(kind, scope, _input_hash(payload))
-
-    # 幂等检查
-    existing = conn.execute(
-        "SELECT job_id, state, result, error, input_hash FROM jobs WHERE idempotency_key=?",
-        (idempotency_key,),
-    ).fetchone()
-    if existing:
-        if existing[4] != _input_hash(payload):
-            return {"error": IDEMPOTENCY_CONFLICT, "job_id": existing[0], "created": False}
-        return {"job_id": existing[0], "state": existing[1], "created": False,
-                "result": existing[2], "error": existing[3]}
-
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    job_id = f"J-{uuid.uuid4().hex[:12]}"
-    ih = _input_hash(payload)
-
-    # spool 持久化
-    spool_id = f"SP-{uuid.uuid4().hex[:12]}"
-    spool_json = json.dumps(payload, ensure_ascii=False)
-    spool_cs = hashlib.sha256(spool_json.encode("utf-8")).hexdigest()[:16]
-    conn.execute(
-        "INSERT INTO job_spool(spool_id,job_id,input_json,checksum,created_at) VALUES(?,?,?,?,?)",
-        (spool_id, job_id, spool_json, spool_cs, now),
-    )
-
-    conn.execute(
-        "INSERT INTO jobs(job_id,kind,scope,input_hash,idempotency_key,state,attempt,"
-        "max_attempts,next_run_at,fencing_token,batch_cursor,batch_total,"
-        "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (job_id, kind, scope, ih, idempotency_key, STATE_QUEUED, 0,
-         max_attempts, now, 0, 0, 0, now, now),
-    )
-    conn.commit()
-    return {"job_id": job_id, "state": STATE_QUEUED, "created": True}
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    try:
+        existing = conn.execute(
+            "SELECT job_id,state,result,error,input_hash FROM jobs WHERE idempotency_key=?",
+            (idempotency_key,)).fetchone()
+        if existing:
+            conn.commit()
+            if existing[4] != _input_hash(payload):
+                return {"error": IDEMPOTENCY_CONFLICT, "job_id": existing[0], "created": False}
+            return {"job_id": existing[0], "state": existing[1], "created": False,
+                    "result": existing[2], "error": existing[3]}
+        limit = max(0, int(config.load_config()["inflight"]["max_pending_jobs"]))
+        pending = conn.execute("SELECT COUNT(*) FROM jobs WHERE state NOT IN "
+                               "('succeeded','no_candidate','needs_review','failed')").fetchone()[0]
+        if pending >= limit:
+            conn.rollback()
+            return {"error": "BACKLOG_FULL", "created": False, "retryable": True}
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        job_id = f"J-{uuid.uuid4().hex[:12]}"
+        raw = json.dumps(payload, ensure_ascii=False)
+        conn.execute("INSERT INTO job_spool(spool_id,job_id,input_json,checksum,created_at) VALUES(?,?,?,?,?)",
+                     (f"SP-{uuid.uuid4().hex[:12]}", job_id, raw,
+                      hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16], now))
+        conn.execute("INSERT INTO jobs(job_id,kind,scope,input_hash,idempotency_key,state,attempt,"
+                     "max_attempts,next_run_at,fencing_token,batch_cursor,batch_total,created_at,updated_at) "
+                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (job_id, kind, scope, _input_hash(payload), idempotency_key, STATE_QUEUED,
+                      0, max_attempts, now, 0, 0, 0, now, now))
+        conn.commit()
+        return {"job_id": job_id, "state": STATE_QUEUED, "created": True}
+    except Exception:
+        conn.rollback()
+        raise
 
 
 # ---------- 状态转换 ----------
@@ -198,7 +196,7 @@ def claim(conn, job_id: str, host_session_id: str, *,
         # 可领取（首次、租约过期、退避到期）
         new_fencing = fencing + 1
         # 租约过期只是换宿主，不算新尝试；awaiting / retry 到期是新尝试
-        new_attempt = attempt if state == STATE_CLAIMED else attempt + 1
+        new_attempt = attempt + 1 if state == STATE_RETRY_WAIT else max(1, attempt)
         lease_token = uuid.uuid4().hex
         batch_id = f"B-{uuid.uuid4().hex[:8]}"
 

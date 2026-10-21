@@ -137,3 +137,44 @@ def test_observed_payload_survives_absent_transcript_and_stop_does_not_recur(mem
     conn = index.connect(memory_repo)
     assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == first_count
     conn.close()
+
+
+def test_capture_failure_is_recorded_and_not_reported_as_no_hit(memory_repo, tmp_path):
+    enable(memory_repo, tmp_path)
+    malformed = tmp_path / "bad.jsonl"
+    malformed.write_text('{"role":"user","text":"rule"}\ninvalid-json\n')
+    result = host_events.handle(event(tmp_path, malformed), event="tool-after", style="zcode")
+    assert result["error"] == "MATERIAL_PARSE_FAILED"
+    conn = index.connect(memory_repo)
+    assert conn.execute("SELECT status FROM context_events").fetchone()[0] == "material_parse_failed"
+    conn.close()
+
+
+def test_unchanged_pending_job_does_not_repeat_context_on_every_tool(memory_repo, tmp_path):
+    enable(memory_repo, tmp_path)
+    transcript = tmp_path / "pending.jsonl"
+    transcript.write_text(json.dumps({"role": "user", "text": "订单结算后禁止撤回。"}, ensure_ascii=False) + "\n")
+    first = host_events.handle(event(tmp_path, transcript, "a"), event="tool-after", style="zcode")
+    assert first["notify_job_ids"]
+    repeated = host_events.handle(event(tmp_path, transcript, "b"), event="tool-before", style="zcode")
+    assert repeated["job_ids"]
+    assert repeated["notify_job_ids"] == []
+    assert "增量提炼待办" not in host_events.render(repeated)
+
+
+def test_hook_query_plan_uses_same_real_session_as_mcp(memory_repo, tmp_path):
+    enable(memory_repo, tmp_path)
+    first = host_events.handle(event(tmp_path, tmp_path / "unused", "plan-before"), event="tool-before", style="zcode")
+    assert first["needs_query_plan"]
+    bridge = first["planning_context"]
+    assert bridge["session_id"] == "host-s1" and bridge["host_profile"] == "zcode"
+    from knowbase.server import context_impl
+    planned = json.loads(context_impl(**bridge, current_goal="订单撤回校验",
+        topics=[{"topic_id": "withdraw", "queries": ["订单 撤回"], "status": "active"}]))
+    assert not planned.get("error"), planned
+    next_event = host_events.handle(event(tmp_path, tmp_path / "unused", "next-before"), event="tool-before", style="zcode")
+    assert not next_event["needs_query_plan"]
+    conn = index.connect(memory_repo)
+    assert conn.execute("SELECT COUNT(*) FROM context_sessions").fetchone()[0] == 1
+    assert "withdraw" in conn.execute("SELECT topics_json FROM context_sessions").fetchone()[0]
+    conn.close()

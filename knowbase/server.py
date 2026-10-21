@@ -722,6 +722,7 @@ def import_impl(directory: str, scope: str = "global", mode: str = "extract") ->
     cfg = _cfg()
     enqueued = 0
     job_ids = []
+    enqueue_errors = []
     with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
         conn = index.connect(rp)
         try:
@@ -735,6 +736,9 @@ def import_impl(directory: str, scope: str = "global", mode: str = "extract") ->
                     conn, jobs.KIND_EXTRACT, scope, payload,
                     idempotency_key=idem_key,
                 )
+                if result.get("error"):
+                    enqueue_errors.append(f"{f.name}: {result['error']}")
+                    continue
                 if result["created"]:
                     material_store.register_manifest(conn, result["job_id"], payload)
                     jobs.set_preparing(conn, result["job_id"])
@@ -745,6 +749,8 @@ def import_impl(directory: str, scope: str = "global", mode: str = "extract") ->
             conn.close()
 
     lines = [f"完成：入队 {enqueued} 个 extract 任务，跳过 {skipped}。"]
+    if enqueue_errors:
+        lines.append("未入队（请处理后重试）：" + "；".join(enqueue_errors))
     if job_ids:
         lines.append(f"任务 ID：{', '.join(job_ids[:5])}{'...' if len(job_ids) > 5 else ''}")
         lines.append("使用 memory_job_claim 领取任务，memory_job_submit 提交提炼结果。")
