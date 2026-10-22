@@ -827,3 +827,11 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - 在release私有验证目录用原业务库SQLite在线备份及本地Git克隆做schema14→18：191卡/674旧usage/25feedback保持、191卡文件哈希不变；新增1条升级CLI遥测。验证Git网络/自动提交关闭，真实库未迁移。
 - 原生CUA再次检查Mac仍锁屏；不会输入密码/绕许可。manifest=validation-only；外部门槛仍是普通宿主整链、人工样本复核、3真实成员/跨成员复用和独立净效益对照。
 - 最终源码全套430 passed/1 skipped（41.72s）；安装包stdio2 passed，compileall/diff-check通过。测试新增1项正式后台刷新，无产品源码在打包后变更。
+
+### 2026-10-22 正常ZCode宿主继续验收（进行中）
+- 用户手动解锁，并明确允许新建专用验收会话、向其发送隔离任务。ZCode原生页确认主knowbase仍固定rc1且启用；仅新增knowbase-acceptance测试服务指向rc2独立库。
+- 测试profile位于 ~/.knowbase/runtime/releases/c88be4e/native-host-4p03ysy7；32,536字符输入（冻结长方案+明确合成订单PRD附录）。只对测试工程路由rc2 Hook，非测试工程仍走原rc1；原配置已私有备份，结束后恢复临时接线。
+- 普通会话已自主拆阶段、memory_context 5次、memory_use采纳2条、带版本/任务结果反馈2条；沿用实际Hook会话身份。已真实capture/claim/material续页和renew，提交/成卡仍进行中，不抢报完成。
+- 宿主完成的合成订单模块独立6项行为核对通过，限定为合成样本，不证明真实业务或三人净收益。
+- 实测暴露4次memory_read缺关联身份重试；随后自行恢复。现修复工具说明和明确缺参提示，并将成功阅读/hit记账移到校验成功后。命令遥测仍保留实际错误尝试，不能用错误读取抬高成功阅读量。
+- 修正后定向30通过、全套431 passed/1 skipped（46.84s）。准备rc3固定包，当前运行验收会话继续使用冻结rc2，不热改其代码。

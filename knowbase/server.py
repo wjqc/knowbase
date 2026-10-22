@@ -120,10 +120,20 @@ def update_impl(id: str, body: str | None = None, title: str | None = None,
 
 def read_impl(id: str, session_id: str = "", event_id: str = "",
               context_event_id: str = "", host_profile: str = ""):
-    """读取记忆（L1: 返回 content_revision 和 governance_revision 供 CAS 使用）。"""
+    """按id读全文。关联任务时同时传session_id/event_id/context_event_id，host_profile沿用检索。
+
+    event_id是本次阅读的新稳定事件ID；context_event_id是实际返回该候选的检索事件ID。
+    仅传id仍可普通读取，不会产生任务阅读回执。
+    """
     rp, err = _repo()
     if err:
         return err
+    identity={"session_id":session_id,"event_id":event_id,"context_event_id":context_event_id}
+    if any(identity.values()) and not all(identity.values()):
+        missing=", ".join(key for key,value in identity.items() if not value)
+        return (f"错误：INVALID_USE_IDENTITY；缺少 {missing}。关联阅读必须同时传session_id、"
+                "event_id（本次阅读的新事件ID）、context_event_id（实际返回候选的检索事件ID）；"
+                "host_profile沿用该检索。仅普通阅读可只传id。")
     meta, body, path = store.load(rp, id)
     if not meta:
         # 兼容兜底：旧服务进程的目录扫描范围可能不含新增类型目录，
@@ -136,17 +146,6 @@ def read_impl(id: str, session_id: str = "", event_id: str = "",
             path = Path(row[0])
     if not meta:
         return f"错误：未找到 {id}"
-    conn = index.connect(rp)
-    index.bump_hit(conn, id)
-    index.record_usage(conn, "read", id)
-
-    # 获取 revision 信息
-    row = conn.execute(
-        "SELECT content_revision, governance_revision FROM entity_heads WHERE entity_id=?",
-        (id,),
-    ).fetchone()
-    conn.close()
-
     from .mutations import _compute_revision, _compute_governance_revision
     content_rev = _compute_revision(meta, body)
     gov_rev = _compute_governance_revision(meta)
@@ -158,6 +157,12 @@ def read_impl(id: str, session_id: str = "", event_id: str = "",
             state="read",host_profile=host_profile,reading=True)
         if read_receipt.get("error"):
             return f"错误：{read_receipt['error']}；请重新检索/读取当前版本。"
+    conn=index.connect(rp)
+    try:
+        index.bump_hit(conn,id)
+        index.record_usage(conn,"read",id)
+    finally:
+        conn.close()
 
     head = (f"[{meta['id']}] {meta.get('title','')}"
             f" ｜ {meta.get('confidence')}·{meta.get('status')}"
@@ -824,7 +829,7 @@ from .telemetry import observe as _observe
 
 mcp.tool(name="memory_save", description="保存一条经验记忆。standard/preference 由 Agent 保存时自动进 staging 待人审")(_observe(save_impl,"memory_save"))
 mcp.tool(name="memory_update", description="修改已有记忆的内容/标签/关系。confidence 与 status 由服务端状态机管理，不接受指定")(_observe(update_impl,"memory_update"))
-mcp.tool(name="memory_read", description="按 id 读取记忆全文（自动累计 hit_count）")(_observe(read_impl,"memory_read"))
+mcp.tool(name="memory_read", description="按id读全文，成功读取才计hit。可只传id；若关联任务，session_id/event_id/context_event_id必须一起传，host_profile沿用检索。event_id为本次阅读新事件，context_event_id为实际返回候选的检索事件；返回read_use_id，阅读不等于采纳或helpful")(_observe(read_impl,"memory_read"))
 mcp.tool(name="memory_search", description="检索经验记忆：任务开始涉及具体项目/系统/报错时先调用。检索词建议 ≥3 字的具体名词或报错关键词")(_observe(search_impl,"memory_search"))
 mcp.tool(name="memory_feedback", description="验证任务结果后回填helpful/not_helpful/outdated/incorrect；携带expected_content_revision、memory_use返回的use_id、稳定task_outcome_id。按卡版本+任务结果去重。旧调用仅保留未绑定观察，不改变治理状态")(_observe(feedback_impl,"memory_feedback"))
 mcp.tool(name="memory_context", description="执行中知识检索：拆解长方案后、进入子任务、新错误和重要决策前调用；提供当前主题与查询，阶段结束检查技术经验及业务规则待办")(_observe(context_impl,"memory_context"))

@@ -55,6 +55,20 @@ def test_unknown_candidate_session_host_and_version_are_rejected(memory_repo):
     assert record(card,state="helpful")["error"]=="INVALID_USE_STATE"
 
 
+def test_partial_read_identity_is_actionable_and_does_not_inflate_successful_reads(memory_repo):
+    card=delivered(memory_repo)
+    error=read_impl(card["id"],session_id="task-session")
+    assert "INVALID_USE_IDENTITY" in error and "缺少 event_id, context_event_id" in error
+    conn=index.connect(memory_repo)
+    assert conn.execute("SELECT hit_count FROM meta WHERE id=?",(card["id"],)).fetchone()[0]==0
+    assert conn.execute("SELECT COUNT(*) FROM usage_log WHERE tool='read'").fetchone()[0]==0
+    conn.close()
+    assert "SSE 重连" in read_impl(card["id"])
+    conn=index.connect(memory_repo)
+    assert conn.execute("SELECT hit_count FROM meta WHERE id=?",(card["id"],)).fetchone()[0]==1
+    conn.close()
+
+
 def test_changed_content_cannot_be_adopted_as_delivered_version(memory_repo):
     card=delivered(memory_repo)
     meta,body,path=store.load(memory_repo,card["id"])

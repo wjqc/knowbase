@@ -16,7 +16,9 @@ def record(repo, *, session_id, event_id, context_event_id, memory_id,
         return {"error":"INVALID_USE_STATE"}
     fields = (session_id,event_id,context_event_id,memory_id,content_revision,host_profile)
     if not all(isinstance(v,str) and len(v)<=512 for v in fields) or not all(fields[:5]):
-        return {"error":"INVALID_USE_IDENTITY"}
+        names=("session_id","event_id","context_event_id","memory_id","content_revision")
+        return {"error":"INVALID_USE_IDENTITY","missing_fields":[name for name,value in zip(names,fields) if not value],
+                "required_fields":list(names),"hint":"event_id为本次使用新事件，context_event_id指向实际返回该候选的检索事件；host_profile沿用检索"}
     host = host_profile or config.load_config()["inflight"].get("host_profile") or config.agent_name()
     phash = materials.digest([context_event_id,memory_id,content_revision,state])
     conn = index.connect(repo)
