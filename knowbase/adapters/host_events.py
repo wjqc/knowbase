@@ -38,6 +38,106 @@ def _observed_events(conn, session_id, scope, host):
     return events
 
 
+def _enqueued_text_hashes(conn, host, session_id):
+    """同一宿主会话此前已入队片段的文本哈希集合。
+
+    会话标识可能含下划线，不能用 LIKE 匹配（通配符歧义），用字典序区间定位
+    该会话的全部 capture 任务，再取其片段哈希；input_version/source_kind 漂移
+    触发的整段重排在这里被内容级去重拦截。
+    """
+    prefix = f"capture:{host}:{session_id}:"
+    rows = conn.execute(
+        "SELECT js.text_hash FROM job_segments js JOIN jobs j ON js.job_id=j.job_id "
+        "WHERE j.kind=? AND j.idempotency_key >= ? AND j.idempotency_key < ?",
+        (jobs.KIND_CAPTURE, prefix, prefix[:-1] + ";"))
+    return {r[0] for r in rows}
+
+
+def _is_self_event(event) -> bool:
+    """knowbase 自身工具调用不作为提炼材料（观察层已跳过，transcript 路径在此过滤）。
+
+    归一化事件的 text 会把原始观察 JSON 作为转义字符串内嵌，工具名字段因此可能是
+    \"tool_name\" 形态，正则对引号前可选反斜杠兼容。
+    """
+    if getattr(event, "tool_name", "") and re.search(r"(?:^|[_:.])memory_", str(event.tool_name)):
+        return True
+    text = event.text or ""
+    for name in re.findall(r'\\?"(?:tool_name|toolName)\\?"\s*:\s*\\?"([^"\\]*)', text):
+        if re.search(r"(?:^|[_:.])memory_", name):
+            return True
+    return "-m knowbase" in text
+
+
+def _is_distiller_op(event) -> bool:
+    """会话是否在处理提炼作业本身（memory_job_* 调用）。
+
+    判据比 _is_self_event 窄：memory_search/save 等常规读写不算，只有
+    claim/material/submit/renew/status 序列才标志会话在跑提炼循环。
+    只认结构化工具名（tool_name 字段或转义 JSON 内的 tool_name 键），
+    不做裸子串匹配——催办提示等正文里也会出现 memory_job_ 字样，不能算数。
+    """
+    pattern = r"(?:^|[_:.])memory_job_"
+    if getattr(event, "tool_name", "") and re.search(pattern, str(event.tool_name)):
+        return True
+    text = event.text or ""
+    for name in re.findall(r'\\?"(?:tool_name|toolName)\\?"\s*:\s*\\?"([^"\\]*)', text):
+        if re.search(pattern, name):
+            return True
+    return False
+
+
+def _drop_distiller_echo(delta: list, events: list, coverage: dict) -> list:
+    """提炼会话的 assistant 回复段不入队（自回声源头过滤）。
+
+    背景：处理提炼作业的会话，每轮回复被 Stop 捕获成 1 段材料，形成
+    "处理→催办→回复→再入队"死循环。会话粘性标记 _distiller_session
+    （handle() 在 memory_job_* 调用时落标，transcript 路径兜底扫描），
+    标记后该会话 assistant 角色段全部丢弃，工具载荷照常采集。
+    """
+    distiller = bool(coverage.get("_distiller_session")) or any(_is_distiller_op(e) for e in events)
+    if not distiller:
+        return delta
+    coverage["_distiller_session"] = True
+    return [e for e in delta if getattr(e, "role", "") != "assistant"]
+
+
+def _mark_distiller_session(repo, host: str, session_id: str) -> None:
+    """memory_job_* 实调即粘性标记提炼会话；标记失败静默，不影响宿主调用。"""
+    try:
+        conn = index.connect(repo)
+        try:
+            row = conn.execute("SELECT coverage_json FROM context_sessions WHERE host_profile=? AND session_id=?",
+                               (host, session_id)).fetchone()
+            if not row:
+                return
+            coverage = json.loads(row[0]) if row[0] else {}
+            if coverage.get("_distiller_session"):
+                return
+            coverage["_distiller_session"] = True
+            conn.execute("UPDATE context_sessions SET coverage_json=?,updated_at=? WHERE host_profile=? AND session_id=?",
+                         (json.dumps(coverage), datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                          host, session_id))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def _save_capture_checkpoint(conn, host, session_id, scope, coverage, events, source_kind):
+    event_count = conn.execute("SELECT COUNT(*) FROM context_events WHERE host_profile=? AND session_id=? "
+                               "AND trigger IN ('observe','new_failure')", (host, session_id)).fetchone()[0]
+    coverage["_hook_capture"] = {"cursor": len(events), "prefix_hash": materials.digest([e.text for e in events]),
+                                  "event_count": event_count, "source_kind": source_kind}
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    conn.execute("INSERT INTO context_sessions(host_profile,session_id,scope,coverage_json,last_checkpoint_at,updated_at,observed_cursor) "
+                 "VALUES(?,?,?,?,?,?,?) ON CONFLICT(host_profile,session_id) DO UPDATE SET "
+                 "coverage_json=excluded.coverage_json,last_checkpoint_at=excluded.last_checkpoint_at,"
+                 "updated_at=excluded.updated_at,observed_cursor=excluded.observed_cursor",
+                 (host, session_id, scope, json.dumps(coverage), now, now, f"{source_kind}:{len(events)}"))
+    conn.commit()
+
+
 def capture_increment(repo, session_id, transcript_path, scope, host):
     """只从显式宿主 transcript 引用采集未入队增量，不扫描聊天目录。"""
     path = Path(transcript_path or "")
@@ -63,18 +163,27 @@ def capture_increment(repo, session_id, transcript_path, scope, host):
         if cursor > len(events) or (cursor and prefix_hash != checkpoint.get("prefix_hash")):
             events = _observed_events(conn, session_id, scope, host)
             source_kind, cursor = "observations", 0
-        delta = events[cursor:]
+        delta = [e for e in events[cursor:] if not _is_self_event(e)]
+        delta = _drop_distiller_echo(delta, events, coverage)
         if not delta:
+            # 增量全被过滤（自身调用/提炼会话回声）：推进游标避免每次钩子重算。
+            _save_capture_checkpoint(conn, host, session_id, scope, coverage, events, source_kind)
             return {"job_ids": [], "capture_status": "no_delta"}
         backlog = conn.execute("SELECT COUNT(*) FROM jobs WHERE state NOT IN "
                                "('succeeded','no_candidate','needs_review','failed')").fetchone()[0]
         if backlog >= config.load_config()["inflight"]["max_pending_jobs"]:
             return {"error": "BACKLOG_FULL"}
         payload = materials.capture_payload(delta, scope=scope, session_id=session_id)
+        seen = _enqueued_text_hashes(conn, host, session_id)
+        if seen:
+            payload["segments"] = [s for s in payload["segments"] if s["text_hash"] not in seen]
+            payload["total_segments"] = len(payload["segments"])
+        if not payload["segments"]:
+            # 全部为重复/自身调用：推进游标避免每次钩子重算，不产生新任务。
+            _save_capture_checkpoint(conn, host, session_id, scope, coverage, events, source_kind)
+            return {"job_ids": [], "capture_status": "no_delta"}
         payload.update(host_profile=host, capture_range={"source_kind": source_kind, "start": cursor, "end": len(events)},
                        coverage_scope="observed_host_events" if source_kind == "observations" else "provided_transcript")
-        if not payload["segments"]:
-            return {"job_ids": [], "capture_status": "no_delta"}
         queued = jobs.enqueue(conn, jobs.KIND_CAPTURE, scope, payload,
                               idempotency_key=f"capture:{host}:{session_id}:{scope}:{cursor}:{payload['input_version']}")
         if queued.get("error"):
@@ -84,20 +193,31 @@ def capture_increment(repo, session_id, transcript_path, scope, host):
             jobs.set_preparing(conn, queued["job_id"])
             jobs.set_awaiting(conn, queued["job_id"], len(payload["segments"]))
         # 这里只推进已持久入队游标；settled 仍由物化服务维护。
-        event_count = conn.execute("SELECT COUNT(*) FROM context_events WHERE host_profile=? AND session_id=? "
-                                   "AND trigger IN ('observe','new_failure')", (host, session_id)).fetchone()[0]
-        coverage["_hook_capture"] = {"cursor": len(events), "prefix_hash": materials.digest([e.text for e in events]),
-                                      "event_count": event_count, "source_kind": source_kind}
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        conn.execute("INSERT INTO context_sessions(host_profile,session_id,scope,coverage_json,last_checkpoint_at,updated_at,observed_cursor) "
-                     "VALUES(?,?,?,?,?,?,?) ON CONFLICT(host_profile,session_id) DO UPDATE SET "
-                     "coverage_json=excluded.coverage_json,last_checkpoint_at=excluded.last_checkpoint_at,"
-                     "updated_at=excluded.updated_at,observed_cursor=excluded.observed_cursor",
-                     (host, session_id, scope, json.dumps(coverage), now, now, f"{source_kind}:{len(events)}"))
-        conn.commit()
+        _save_capture_checkpoint(conn, host, session_id, scope, coverage, events, source_kind)
         return {"job_ids": [queued["job_id"]], "capture_status": "queued", "captured_events": len(delta)}
     finally:
         conn.close()
+
+
+def pending_notifications(conn, job_ids, notices: dict, *, force: bool = False) -> list:
+    """计算待推送的提炼待办：只推活跃态作业。
+
+    终态（succeeded/no_candidate/needs_review/failed）与 blocked/缺失的作业不再催办，
+    并清掉其历史签名，避免旧签名在作业复活（重开）前持续遮蔽新通知。
+    """
+    notifiable = {jobs.STATE_QUEUED, jobs.STATE_PREPARING, jobs.STATE_AWAITING,
+                  jobs.STATE_CLAIMED, jobs.STATE_VALIDATING, jobs.STATE_RETRY_WAIT}
+    notifications = []
+    for job_id in job_ids:
+        job = jobs.status(conn, job_id)
+        if job is None or job["state"] not in notifiable:
+            notices.pop(job_id, None)
+            continue
+        signature = f"{job['state']}:{job['cursor']}:{job['attempt']}"
+        if force or notices.get(job_id) != signature:
+            notifications.append(job_id)
+            notices[job_id] = signature
+    return notifications
 
 
 def handle(data: dict, *, event: str, style: str) -> dict:
@@ -116,6 +236,10 @@ def handle(data: dict, *, event: str, style: str) -> dict:
         return {"status": "failed", "error": "OBSERVATION_TOO_LARGE"}
     command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
     self_call = bool(re.search(r"(?:^|[_:.])memory_", tool)) or "-m knowbase" in str(command)
+    if self_call:
+        # 提炼作业工具实调：粘性标记该会话为提炼会话，其 assistant 回复不再入队
+        if re.search(r"(?:^|[_:.])memory_job_", tool):
+            _mark_distiller_session(config.repo_path(cfg), host, session)
     if self_call:
         return {"status": "skipped_self"}
     repo = config.repo_path(cfg)
@@ -221,15 +345,9 @@ def handle(data: dict, *, event: str, style: str) -> dict:
             else:
                 coverage["_hook_plan_notice"] = now.isoformat(timespec="seconds")
         notices = coverage.get("_hook_notices", {})
-        notifications = []
-        for job_id in result.get("job_ids", []):
-            job = jobs.status(conn, job_id)
-            signature = f"{job['state']}:{job['cursor']}:{job['attempt']}" if job else "missing"
-            if notices.get(job_id) != signature or event in ("stop", "recover"):
-                notifications.append(job_id)
-                notices[job_id] = signature
+        result["notify_job_ids"] = pending_notifications(
+            conn, result.get("job_ids", []), notices, force=event in ("stop", "recover"))
         coverage["_hook_notices"] = notices
-        result["notify_job_ids"] = notifications
         conn.execute("UPDATE context_sessions SET coverage_json=? WHERE host_profile=? AND session_id=?",
                      (json.dumps(coverage), host, session))
         status = str(result["error"]).lower() if result.get("error") else result.get("retrieval_status", "executed")
