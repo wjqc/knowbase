@@ -984,3 +984,27 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - 真实库已备份并清洗，备份根目录 ~/.knowbase/backups/credential-rc6-20261022-183843。
 - 原地安装 rc6，62 个模块一致；安装态正式 stdio 2 项通过。三宿主 MCP 实际配置初始化及脱敏交付通过，18 个 Hook 正在完成验证。
 - 最终全套复核（提交前独立复跑）：566 passed / 1 skipped（一次性 venv editable 安装，离线缓存；固定运行时未改动）。远端 411fec8 已确认同步。
+
+## 2026-10-22 捕获去重与自身调用排除（修复提炼队列自喂养循环）
+- 事故：同一宿主会话因 input_version/source_kind 漂移被整段重复入队（281/282 段两任务逐段同哈希）；transcript 路径把 knowbase 自身提炼调用当材料，20 个未终结任务积压（含自会话 39→64 段滚动捕获）。
+- 修复 adapters/host_events.py：capture_increment 对 delta 先过 _is_self_event（工具名 memory_* 规则兼容转义 JSON、-m knowbase 子串），capture_payload 后按 job_segments 历史片段 text_hash 内容级去重（同会话，经 idempotency_key 字典序区间定位避免 LIKE 通配歧义）；过滤后为空时推进 checkpoint 返回 no_delta。
+- 新增 tests/test_capture_dedup.py 3 项回归（checkpoint 重置重排去重 / 增量只入新事件 / MCP 自身调用与 -m knowbase 排除）；全套 569 passed / 1 skipped（一次性 venv editable，离线）。
+- 原地安装到 ~/.knowbase/runtime/venv（版本仍 0.2.0rc6），-I 固定路径导入验证新函数在位；备份 ~/.knowbase/backups/capture-dedup-20261022-193121（config + memory.db SQLite backup）。
+- 清积压：20 个未终结 capture 任务全部置 no_candidate（原材料保留 job_spool 可重开）；活库只读验证 _enqueued_text_hashes 正常。
+- 未做：代码未提交（工作区另有并行会话的 2 个 docs 改动未动）；长驻 MCP serve 进程需宿主重连后才载入新代码（hook 为逐次进程，即时生效）。
+
+## 2026-10-22 提炼管道三处修复（租约顺延/终态诊断/通知过滤）
+- 事故复盘更正：jobs.py 租约过期本就可重领（claim 对 lease_expired 放行、不增 attempt）；J-7a8e6d21609d 当日"no_candidate 终态"实为并行会话 11:30 清积压脚本批量置终态，与在途租约相撞，且旧版 submit 对终态作业误报 LEASE_EXPIRED 掩盖真相。
+- 修复：materials.page 前进读页自动顺延租约（now+300s，旧页重读不续）；jobs.submit 终态判错先于租约（返回 already_done+state）；host_events 新增 pending_notifications——待办通知只推活跃态（queued/preparing/awaiting_agent/claimed/validating/retry_wait），终态与 blocked 不催办并清历史签名。
+- 新增 tests/test_job_pipeline_polish.py 4 项回归（分页续租/旧页不续租/终态 already_done/通知过滤含去重保持）；全套 573 passed / 1 skipped（一次性 venv editable，离线）。
+- 原地安装至 ~/.knowbase/runtime/venv（版本仍 0.2.0rc6，uv --offline）；-I 固定路径导入验证新符号在位；备份 ~/.knowbase/backups/job-polish-20261022-195445（config + memory.db）。长驻 serve 需重连后生效，hook 即时生效。
+- 未提交（工作区仍有并行会话的 host_events.py 捕获去重改动与 docs 改动，一并待人工整理提交）；卡片 P-1aaa5795d07a 已更正根因并记录本次修复。
+- 运维：经用户确认，批量关闭 4 个提炼会话自回声作业（J-26e9f64367d7 49段 / J-5b2cda6c30a1 / J-f9b6eb7c1674 / J-465b95b63477）为 no_candidate；关闭前逐一核对无在途租约，job_spool 材料全部保留可重开。根因（提炼循环持续捕获活跃的 knowbase 作业会话自身）未做源头过滤，留待后续决策。
+
+## 2026-10-22 提炼会话自回声源头过滤（用户确认实施）
+- 根因：处理提炼作业的会话每轮 assistant 回复被 Stop 捕获成 1 段材料入队（工具路径已被 -m knowbase/memory_* 自调用排除覆盖，消息路径漏网），形成"处理→催办→回复→再入队"死循环，实测一条回复一个新作业。
+- 修复 host_events.py：handle() 在 memory_job_* 实调时粘性标记会话（context_sessions.coverage_json._distiller_session）；_drop_distiller_echo 在 capture_increment 对标记会话丢弃 assistant 角色段（工具载荷照常采集；transcript 路径兜底扫描 memory_job_ 结构化工具名，正文提及不算）；全被过滤的空增量也推进 checkpoint。判定刻意窄于 _is_self_event：memory_search/save 常规读写不触发。
+- 新增 tests/test_capture_distiller_echo.py 10 项回归（结构化判定/正文负例/粘性标记/handle 落标/标记会话工具材料照常采集）；全套 583 passed / 1 skipped（一次性 venv editable，离线）。测试坑：fixture 须显式 inflight.enabled=true（DEFAULTS 默认关，handle 会直接 disabled）。
+- 原地安装至 ~/.knowbase/runtime/venv（uv --offline，版本仍 0.2.0rc6），-I 固定路径导入验证。hook 逐次进程即时生效；长驻 serve 需重连。
+- 未提交（与捕获去重、管道三处修复一并待人工整理）。
+- 收尾：J-164a57a74046（修码会话 59 工具段+1 user 段，assistant 段已被新过滤器全数丢弃=过滤器生效验证）按同类理由关闭；至此修码会话自材料全部处置完毕。
