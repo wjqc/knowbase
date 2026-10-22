@@ -15,12 +15,19 @@
 
 | 编号 | 原契约/当前缺口 | 代码依据 | 后续落点与验收 |
 |---|---|---|---|
-| C1 | 执行中快路径不能因只读而长期看不到同事更新。当前 context 直接读取本地索引，没有非阻塞触发既有 TTL 同步；传统 memory_search 的同步不能代替新入口 | context.py:execute；server.py:search_impl；gitops.py:sync_before_read | 复用现有同步内核及跨进程租约；快路径不等网络；新卡到达后缓存失效，失败明确 last-known-good/新鲜度 |
-| C2 | 设计要求记录参考/采纳/无关/待验证并关联任务和卡版本。当前主要保留候选和反馈，尚不能独立统计完整任务采纳链 | context.py 返回和事件字段；index.py:feedback_log | 增加有界采纳记录/结果协议，不能命中即自动 helpful；用真实消费与反例验证 |
-| C3 | 设计要求按卡版本+任务结果去重反馈。当前只有 request_id 和 governance revision，未完整约束读后内容变更和跨请求重复；治理中的标签/内容版本也需核准 | server.py:feedback_impl；commit_adapter.py:adapter_feedback；lifecycle.py:apply_feedback | 增补版本/任务绑定、旧接口兼容和重放边界；旧版本反馈不能验证新内容；工具标签不能充当人工身份 |
-| C4 | 团队统计应只读导出汇总而非复制原始数据库。当前 stats/doctor 可看本机，尚无稳定的隐私最小化导出协议 | __main__.py:cmd_stats/cmd_doctor；server.py:stats_impl | 提供不含查询/原文/业务正文的计数导出、范围及schema，支持三机收集；人数需真实使用者确认 |
+| C1 | 本地实现：context 非阻塞调度短生命周期刷新，跨进程租约与冷却期共用；fetch 不占 RepoLock，合并/索引重建持锁。候选读取遇锁返回 deferred_sync，不误记为检索完成 | context.py:execute；refresh.py；gitops.py:sync_before_read；迁移v15 | 双克隆实际提交/接收、慢fetch并发读取、租约争抢/过期接管、关闭auto_pull/目标改变、失败保留本地卡、auto_push=false均有回归。后台刷新只接收远端变更，推送仍走写入链路。仍未进入固定发行包/真实三机验收 |
+| C2 | 本地实现memory_use及v16 knowledge_uses；四态与阅读分别记录，绑定实际递送的context事件、会话、任务/方案版本、卡内容版本 | consumption.py；context.py；server.py:read_impl/use_impl | 定向25项通过；含跨会话/宿主隔离、未递送候选、内容变化、并发幂等与payload冲突。没有自动helpful；宿主实际采用链仍待真实任务验证 |
+| C3 | 本地实现v17版本/任务结果反馈，按卡内容版本+任务身份/方案版本+稳定结果ID去重；请求别名也保留payload冲突检测 | versioned_feedback.py；adapter_feedback；lifecycle；内容更新入口 | 定向44项通过（含正式stdio及脚本回归）。未绑定旧调用只记观察；本版本有效反馈参与治理，human前缀不是人工权限；改版清除旧验证。反馈落盘前/后中断可核对哈希恢复，冲突不假成功。尚未部署真实宿主 |
+| C4 | 本地实现只读metrics.v1导出（CLI/MCP），v18补无参数MCP及CLI/Hook命令计数，旧日志单列不冒充完整调用 | metrics.py；telemetry.py；memory_metrics；knowbase metrics | 定向28项通过及全套429 passed/1 skipped，后补覆盖时间/库存后定向6再通过。实际schema14业务库只读导出成功、主库哈希未变，缺新表=null。三机分别收集并人工核对归属；不导出查询/原文/业务正文/项目名/原身份标签 |
 
-这些条款继续保留在原目标中，不能因本机先开检索/观察试用而删掉。开发中保持业务库和已部署运行版本隔离，完成后再切换发布。
+这些条款继续保留在原目标中，不能因本机先开检索/观察试用而删掉。C1–C4本地实现及测试现已完成；固定rc1与真实schema14业务库仍未切换，部署/实际使用证据单列。
+
+## rc2隔离安装与升级核对
+
+- 产品提交c88be4e、0.2.0rc2；wheel SHA256为997badd8e52932d9d2a43c542f9e54293b7da9fbf9a8efe00783d5432ff4febf。48个Python模块逐字节匹配该提交，独立环境以-I运行，源码目录不能覆盖发行包。
+- 已安装wheel的正式stdio验证2项：原文提炼/保存/检索/阅读/采纳/版本反馈/只读汇总；真实双克隆提交后由服务后台刷新接收、递送并读回新卡。
+- 使用真实schema14的SQLite在线备份和本地Git克隆进行离线升级：到schema18后191张卡、674条旧usage、25条feedback保留，191个卡文件哈希未变；新增1条升级CLI遥测。验证副本禁用自动Git网络/提交；真实业务库未迁移。
+- 本地发行目录 ~/.knowbase/runtime/releases/c88be4e，manifest状态validation-only。原MCP/Hook仍指向32ad7f0固定rc1。2026-10-22再次原生检查确认Mac仍锁屏，正常宿主验收需手动解锁；不绕过登录或许可客户端。
 
 ## 外部验收门槛
 
@@ -29,4 +36,4 @@
 3. 三位成员各自真实任务及跨成员消费证据；不能用三个工具标签或三个模拟身份代替。
 4. token/时长/质量净收益需独立对照；不把反馈条数折算为工时。
 
-目标保持未完成。先推进 C1–C4 的本地实现，同时收集本机试用数据；外部门槛只在本地依赖完成后成为最终阻塞，不能提前用“等用户验收”掩盖尚可实施的工作。
+目标保持未完成。C1–C4已实现且完成隔离安装/副本升级；当前剩余门槛是正常宿主的完整语义链路、人工样本复核、三位实际成员任务和净效果对照。没有这些证据不能宣布原目标全部完成，也不能伪造同事身份、人工确认或净收益。

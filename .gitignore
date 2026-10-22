@@ -7,3 +7,7 @@ knowbase-dashboard.html
 .idea/
 .trae/
 .pytest_cache/
+
+.codegraph/
+
+build/

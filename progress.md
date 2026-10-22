@@ -794,3 +794,63 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - 本机预览包路径 /Users/qc/.knowbase/runtime/releases/32ad7f0/knowbase-0.2.0rc1-py3-none-any.whl，安装的43模块与产品提交匹配；固定解释器和-I启动确保不加载工作目录源码。
 - 三客户端共用原默认配置/数据根已逐项核对；试用enabled=true/capture_enabled=false，explicit阶段捕获/原收尾提醒保留。新路径原生复核需解锁Mac，未越过锁屏/审批。
 - 下一轮在隔离工作树推进C1–C4，全部目标仍active；人工样本签核、真实宿主提炼与三人实际消费未冒充完成。
+### 隔离开发基线
+- 创建并附加工作树inflight-contracts，分支codex/inflight-contracts，起点5e060ca。
+- 开发env及私有测试数据快照已准备，测试网络/自动写均关闭；全套401 passed,1 skipped。
+- Codegraph已初始化（79/1546/2898），未提交派生索引。生产固定发行版不受后续源码修改影响。
+- 下一轮从C1调用链开始实际实现，不重新解释方案，不以外部解锁等待代替本地可做工作。
+
+### C1 本地实现与验证
+- 新增 refresh 短生命周期后台调度，共用原 SQLite sync_lease，v15只增加目标配置指纹。父进程不等待网络；共享冷却期减少多Hook进程重复拉取。
+- fetch移到RepoLock外；合并/重建索引持锁并复核租约、目标、配置及当前分支。过期工作不能释放新持有者；后台只接收远端变更，推送仍由写入链路处理。
+- context返回本地索引新鲜度、最后成功时间及失败告警；候选读锁超时标 deferred_sync，保留查询待重试。双克隆证明同事新卡到达后缓存失效。
+- 定向66 passed（含真实子进程/双克隆、慢网络、争抢/过期、失败本地卡、目标改变/禁用、锁延期）；全套411 passed/1 skipped，其后仅补租约释放保护与后台不推送，定向66再通过。固定rc1未切换、真实库未迁移v15，三人验收仍待。
+
+### C2 任务与知识版本消费链
+- v16新增本机knowledge_uses，memory_use只接受已实际递送候选，记录referenced/adopted/irrelevant/unverified并关联任务、方案版本和卡内容版本；read可选会话绑定独立阅读回执。工具/host标签只作归因，不声明真实人数。
+- 改版后拒绝旧内容采纳；未验证/无关可记录旧版本并标current_version=false；并发同事件只存一条，不同payload冲突。检索/阅读/采纳都不自动产生helpful。
+- 定向25 passed（消费反例、context、正式stdio、迁移/分页）。固定rc1未部署此新接口，C3继续实现版本和任务结果反馈，C4继续统计导出。
+
+### C3 版本与任务结果反馈
+- v17 feedback_events/feedback_requests共用原库，反馈绑定expected_content_revision/use_id/task_outcome_id。同版本同任务结果换请求/工具仍只应用一次，请求别名重用不同payload冲突。
+- 旧调用保留legacy_unbound观察及原反馈日志，不改变状态或有效验证计数；human前缀不再作为人工权限。可信人工确认继续CLI verify。历史日志未重写。
+- 内容更新/人工revise清除旧版本验证；新晋升和人工verify保存verified_content_revision，自动建议核对版本。旧版本反馈只可重放已有回执，不验证新内容。
+- 写前持久反馈回执，文件before/after哈希核对及索引/日志事务恢复；模拟文件写前/写后中断均不重复累加。回执恢复后可补当前版本Git提交，不提交已改版的旧结果。
+- 定向44 passed；全套424 passed/1 skipped（39.94s），包括真实stdio消费/反馈及更新后的旧脚本回归。首次全套的3个旧合同断言已修正：调用重试计数仍保留，治理测试改用版本/任务绑定协议。固定rc1与真实schema14不变。
+
+### C4 本机统计与安全导出
+- v18补command_calls；MCP注册入口与CLI/Hook记录命令、状态、时长，无参数/查询/正文/身份。旧usage单列，不能与新计数相加；进程死亡或遥测写入失败仍可能遗漏，不宣称完整聊天量。
+- knowbase metrics/memory_metrics只读SQLite快照导出schema knowbase.metrics.v1；含明确时窗/旧日志时区、阶段/采纳/反馈汇总、覆盖时间及库存类型数；缺表null，未知值other。不迁移、不触网、不自动上传，导出自身不记新遥测。
+- 三机同窗口/显式时区/独立标签分别收集，人工确认归属及同源副本；不传原始DB/对话，不把工具或设备标签当人数。文档包含实际协议及收集步骤。
+- 定向28 passed；全套429 passed/1 skipped（38.52s），随后增加覆盖时间/库存与遥测异常保护后定向6再通过；diff-check/文档链接和围栏通过。
+- 实际schema14业务库使用新导出器只读成功，主DB哈希未变；旧usage当前674条（包括历史重复，非全团队调用），new表均null而非零。原固定rc1未变、未向业务库迁移v15–18。
+
+### rc2安装与副本升级验证
+- 产品提交c88be4e、版本0.2.0rc2；已修正包内旧__version__不一致。wheel 48模块逐字节匹配提交，SHA256=997badd8e52932d9d2a43c542f9e54293b7da9fbf9a8efe00783d5432ff4febf。
+- 独立运行目录 ~/.knowbase/runtime/releases/c88be4e/venv，依赖与此前测试约束一致；从原源码目录用-I运行导入指向安装包。固定rc1的MCP/Hook路径未变。
+- 已安装rc2通过正式stdio2项：完整协议链及双克隆真实同事提交→后台刷新→候选递送/全文读回。新版消费/反馈/metrics均走正式注册入口，而非只调用impl。测试里的采纳/业务验证是受控协议资产，不冒充真实订单验收。
+- 在release私有验证目录用原业务库SQLite在线备份及本地Git克隆做schema14→18：191卡/674旧usage/25feedback保持、191卡文件哈希不变；新增1条升级CLI遥测。验证Git网络/自动提交关闭，真实库未迁移。
+- 原生CUA再次检查Mac仍锁屏；不会输入密码/绕许可。manifest=validation-only；外部门槛仍是普通宿主整链、人工样本复核、3真实成员/跨成员复用和独立净效益对照。
+- 最终源码全套430 passed/1 skipped（41.72s）；安装包stdio2 passed，compileall/diff-check通过。测试新增1项正式后台刷新，无产品源码在打包后变更。
+
+### 2026-10-22 正常ZCode宿主继续验收（进行中）
+- 用户手动解锁，并明确允许新建专用验收会话、向其发送隔离任务。ZCode原生页确认主knowbase仍固定rc1且启用；仅新增knowbase-acceptance测试服务指向rc2独立库。
+- 测试profile位于 ~/.knowbase/runtime/releases/c88be4e/native-host-4p03ysy7；32,536字符输入（冻结长方案+明确合成订单PRD附录）。只对测试工程路由rc2 Hook，非测试工程仍走原rc1；原配置已私有备份，结束后恢复临时接线。
+- 普通会话已自主拆阶段、memory_context 5次、memory_use采纳2条、带版本/任务结果反馈2条；沿用实际Hook会话身份。已真实capture/claim/material续页和renew，提交/成卡仍进行中，不抢报完成。
+- 宿主完成的合成订单模块独立6项行为核对通过，限定为合成样本，不证明真实业务或三人净收益。
+- 实测暴露4次memory_read缺关联身份重试；随后自行恢复。现修复工具说明和明确缺参提示，并将成功阅读/hit记账移到校验成功后。命令遥测仍保留实际错误尝试，不能用错误读取抬高成功阅读量。
+- 修正后定向30通过、全套431 passed/1 skipped（46.84s）。准备rc3固定包，当前运行验收会话继续使用冻结rc2，不热改其代码。
+
+### 正常宿主暴露的协议可用性修补
+- 首批实际保存3张bizrule（staging）+1张pitfall（active_once），普通宿主有4次submit校验重试。已观察到scope在顶层和body重复必填、code_refs形状说明不足；现在以顶层scope为候选范围，body.scope可省略但冲突仍拒绝，并明确code_refs对象示例。
+- 新卡读回多次缺关联参数，旧错误提示把模型引到反复检索。已在获授权专用会话内给出仅传id的纠正；真实读回后才报告成卡链路。增强实现允许完整任务身份下读取同scope新卡/待审卡，阅读不需要先作为默认候选；采纳仍须实际候选递送且不能采用staging。跨scope任务关联拒绝。
+- 新增真实API回归：顶层scope唯一事实/冲突拒绝；新staging卡可任务关联读回、不可借此adopt、跨scope拒绝。全量433 passed/1 skipped（47.52s），随后补跨scope断言的定向19再通过。
+- 此轮普通宿主为辅助纠错后通过首批，不宣称零干预；待办材料保留。已明确要求本轮按预算收尾，避免持续领取新job。
+
+### 正常宿主有界验收与临时接线清理
+- 普通ZCode长任务（32,536字符）分阶段MCP查询6次，实际2次采纳及版本反馈；首批32/70片段完成，3张bizrule待审+1张pitfall保存并读回。辅助纠正后新增单片段job结算，另存1张workflow并读回。未处理队列保留，不冒充全部完成。合成模块14项自测，独立6项行为核对通过。
+- 辅助介入：新卡读回参数纠正、预算终止指令；不能称零干预自动验收。旧服务统计14次失败读取、4次失败提交，后续旧会话rc3探针又3次返回旧行为；新服务名+全新会话下4次完整身份读取全部成功（context no_hit/零递送）。短探针另有1次INVALID_TOPICS重试，亦不隐瞒。
+- 模型把once·active误读为待审规则已激活。实际文件仍staging、索引staging=1，未发生激活；修正读取头增加staging=true/待人工审核未激活和runtime_version，避免把存活状态当治理生效。新正式stdio用例覆盖同scope新业务提案读回及明确治理头。
+- 433项全量通过后，显示头及正式stdio扩充定向39 passed。准备rc4；临时2个测试MCP服务已移除、6条Hook已逐项恢复，主knowbase配置与备份一致；只终止本次临时rc2/rc3测试服务，未动主rc1进程。原生设置页已恢复仅codegraph/knowbase。
+- 私有证据目录 ~/.knowbase/runtime/releases/c88be4e/native-host-4p03ysy7，含native-observer-summary.json、在线备份native-evidence.db、合成模块/RESULT.md；不提交原始会话/配置/DB到源码仓库。
+- 原会话上下文显示约301K/1M，不是总计费token；本次不能宣称净省token、工时或生产质量收益。三位实际成员与对照仍待。

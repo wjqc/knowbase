@@ -289,6 +289,12 @@ def adapter_update(repo: Path, conn, mid: str, *,
 
             # 重新计算 revision
             new_content_rev = _compute_revision(meta, body)
+            if new_content_rev != current_content_rev:
+                meta["confidence"] = "once"
+                meta["last_verified"] = ""
+                meta["verified_content_revision"] = ""
+                meta["helpful_count"] = 0
+                meta["unhelpful_count"] = 0
             new_gov_rev = _compute_governance_revision(meta)
 
             # 原子写文件
@@ -319,78 +325,15 @@ def adapter_update(repo: Path, conn, mid: str, *,
 
 def adapter_feedback(repo: Path, conn, mid: str, outcome: str, by: str, *,
                      expected_governance_revision: str = "",
-                     request_id: str = "",
-                     lock_timeout: float = 10.0) -> dict:
-    """记录反馈（带 governance_revision 检查和 intent 持久化）。
-
-    反馈属于治理操作，只检查 governance_revision。
-
-    返回 {"entity_id", "governance_revision", "events": [...]}
-    或 {"error": REVISION_CONFLICT / "not_found"}。
-    """
-    from . import lifecycle, index
-
-    # 计算 payload 哈希
-    phash = _payload_hash({"entity_id": mid, "outcome": outcome, "by": by})
-
-    # 检查是否已完成（崩溃恢复）
-    existing = _check_intent_completed(conn, request_id, mid, phash)
-    if existing:
-        return existing
-
-    # 持久化 intent
-    intent_id = _persist_intent(conn, OP_FEEDBACK, mid, "", request_id, phash)
-
-    try:
-        with RepoLock(repo, lock_timeout):
-            # 加载当前卡片
-            meta, body, path = store.load(repo, mid)
-            if not meta:
-                _fail_intent(conn, intent_id, "not_found")
-                return {"error": "not_found"}
-
-            # 读取当前 governance_revision
-            row = conn.execute(
-                "SELECT governance_revision FROM entity_heads WHERE entity_id=?",
-                (mid,),
-            ).fetchone()
-            current_gov_rev = row[0] if row else _compute_governance_revision(meta)
-
-            # CAS 检查
-            if expected_governance_revision and expected_governance_revision != current_gov_rev:
-                _fail_intent(conn, intent_id, "governance_revision_conflict")
-                return {"error": REVISION_CONFLICT, "current_governance_revision": current_gov_rev}
-
-            # 应用反馈
-            meta, events = lifecycle.apply_feedback(repo, mid, outcome, by, conn)
-
-            # 重新计算 governance_revision
-            new_gov_rev = _compute_governance_revision(meta)
-
-            # 更新 entity_heads
-            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            conn.execute(
-                "INSERT OR REPLACE INTO entity_heads(entity_id,content_revision,governance_revision,updated_at) "
-                "VALUES(?,?,?,?)",
-                (mid, _compute_revision(meta, body), new_gov_rev, now),
-            )
-
-            # 更新索引
-            staging = "staging" in str(path)
-            index.upsert(conn, meta, body, path, staging)
-            # 请求次数只在 MCP 入口记录；feedback_log 保留实际应用结果。
-
-            # 标记 intent 完成
-            _complete_intent(conn, intent_id, f"feedback:{mid}:{outcome}")
-
-        return {
-            "entity_id": mid,
-            "governance_revision": new_gov_rev,
-            "events": events,
-        }
-    except Exception as e:
-        _fail_intent(conn, intent_id, str(e))
-        raise
+                     request_id: str = "", lock_timeout: float = 10.0,
+                     expected_content_revision: str = "", use_id: str = "",
+                     task_outcome_id: str = "") -> dict:
+    """复用版本/任务结果反馈回执，支持精确重放与文件落盘恢复。"""
+    from . import versioned_feedback
+    return versioned_feedback.apply(repo,conn,mid,outcome,by,
+        expected_governance_revision=expected_governance_revision,request_id=request_id,
+        lock_timeout=lock_timeout,expected_content_revision=expected_content_revision,
+        use_id=use_id,task_outcome_id=task_outcome_id)
 
 
 def recover_intents(repo: Path, conn) -> dict:

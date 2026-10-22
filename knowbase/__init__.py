@@ -6,4 +6,4 @@
 3. Agent 提交 evidence，服务端决定 state（confidence/status 只能由状态机变更）。
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0rc4"

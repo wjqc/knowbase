@@ -64,6 +64,42 @@ def test_business_rule_becomes_staging_file_not_just_database_candidate(memory_r
     conn.close()
 
 
+def test_top_level_scope_is_sufficient_and_conflicting_body_scope_is_rejected(memory_repo):
+    job,claim=prepare()
+    c=candidate(claim)
+    c["body"]["scope"]="another-project"
+    wrong=submit(job,claim,[c],request="wrong-body-scope")
+    assert wrong["error"]=="VALIDATION_FAILED"
+    assert "SCOPE_MISMATCH" in json.dumps(wrong)
+    del c["body"]["scope"]
+    out=submit(job,claim,[c],request="canonical-scope")
+    assert out["saved_staging"]==1 and out["failed"]==0,out
+    meta,_,path=store.load(memory_repo,out["results"][0]["memory_id"])
+    assert meta["scope"]=="orders" and path.parent.name=="staging"
+
+
+def test_new_staging_card_can_be_read_in_task_without_becoming_adoptable(memory_repo):
+    from knowbase.server import read_impl,context_impl,use_impl
+    job,claim=prepare()
+    result=submit(job,claim,[candidate(claim)])
+    mid=result["results"][0]["memory_id"]
+    ctx=json.loads(context_impl(session_id="reader",event_id="lookup",scope="orders",
+        current_goal="订单结算",host_profile="native-test"))
+    assert not ctx["candidates"]
+    text=read_impl(mid,session_id="reader",event_id="read-new",context_event_id="lookup",host_profile="native-test")
+    assert "read_use_id=" in text and "已结算订单禁止撤回" in text
+    assert "staging=true" in text and "未激活" in text and "runtime_version=" in text
+    from knowbase.mutations import _compute_revision
+    meta,body,path=store.load(memory_repo,mid)
+    use=json.loads(use_impl(session_id="reader",event_id="adopt-new",context_event_id="lookup",id=mid,
+        content_revision=_compute_revision(meta,body),state="adopted",host_profile="native-test"))
+    assert use["error"]=="CANDIDATE_NOT_DELIVERED" and path.parent.name=="staging"
+    context_impl(session_id="other-scope",event_id="lookup",scope="unrelated",
+                 current_goal="其他任务",host_profile="native-test")
+    assert "SCOPE_MISMATCH" in read_impl(mid,session_id="other-scope",event_id="read-wrong-scope",
+        context_event_id="lookup",host_profile="native-test")
+
+
 def test_technical_experience_becomes_searchable_and_replays_after_lease_ends(memory_repo):
     job, claim = prepare()
     c = candidate(claim, dtype="pitfall")

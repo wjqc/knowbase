@@ -325,8 +325,15 @@ def cmd_revise(mid: str, body_file: str, title: str | None = None,
         if path.parent.name == "staging":
             print(f"错误：{mid} 仍在 staging，请使用 memory_update 后再 promote")
             return 1
+        prior_content_revision = _compute_revision(meta,_old_body)
+        if expect_revision and expect_revision != prior_content_revision:
+            print("错误：版本冲突（等待写锁期间内容已变化），未修改。")
+            return 1
         if title is not None:
             meta["title"] = title.strip()
+        if _compute_revision(meta,new_body) != prior_content_revision:
+            meta.update(confidence="once",last_verified="",verified_content_revision="",
+                        helpful_count=0,unhelpful_count=0)
         meta["updated"] = date.today().isoformat()
         errs = store.lint(meta, new_body, rp)
         if errs:
@@ -761,7 +768,7 @@ def cmd_jobs_expire() -> int:
     return 0
 
 
-def main(argv=None):
+def _main(argv=None):
     parser = argparse.ArgumentParser(prog="knowbase", description="薪火：跨 Agent 经验记忆库")
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_init = sub.add_parser("init", help="初始化/补全（幂等）")
@@ -791,6 +798,11 @@ def main(argv=None):
     p_list = sub.add_parser("list", help="列出记忆")
     p_list.add_argument("type", nargs="?", choices=store.TYPES)
     sub.add_parser("stats", help="统计")
+    p_metrics=sub.add_parser("metrics",help="只读导出本机隐私最小化计数JSON，不触网或迁移")
+    p_metrics.add_argument("--since",default="",help="UTC含起点，ISO日期/时间")
+    p_metrics.add_argument("--until",default="",help="UTC不含终点，ISO日期/时间")
+    p_metrics.add_argument("--source-label",default="unknown",help="自行填写的设备标签，仅字母数字._-，不证明人数")
+    p_metrics.add_argument("--naive-timezone",default="local",help="旧无时区日志解释，建议IANA名如Asia/Shanghai")
     p_doc = sub.add_parser("doctor", help="单库健康检查（memory.db/FTS/Git/治理）")
     p_doc.add_argument("--json", action="store_true", help="以 JSON 列表输出")
     p_alerts = sub.add_parser("alerts", help="输出单库异常状态，供调度器通知")
@@ -822,7 +834,24 @@ def main(argv=None):
     p_jobs_retry = jobs_sub.add_parser("retry", help="重试失败任务")
     p_jobs_retry.add_argument("job_id")
     jobs_sub.add_parser("expire", help="回收过期租约")
+    p_sync = sub.add_parser("sync-once", help="执行已领取租约的后台同步工作")
+    p_sync.add_argument("--remote", required=True)
+    p_sync.add_argument("--branch", required=True)
+    p_sync.add_argument("--lease-token", required=True)
     args = parser.parse_args(argv)
+
+    if args.cmd == "sync-once":
+        from .refresh import run_once
+        result = run_once(config.repo_path(), args.remote, args.branch, args.lease_token)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if result["state"] in ("completed", "cancelled") else 2
+
+    if args.cmd == "metrics":
+        from .metrics import export
+        result=export(config.repo_path(),since=args.since,until=args.until,source_label=args.source_label,
+                      naive_timezone=args.naive_timezone)
+        print(json.dumps(result,ensure_ascii=False,indent=2))
+        return 2 if result.get("error") else 0
 
     if args.cmd == "init":
         return cmd_init(args.import_from, args.scope, args.type)
@@ -890,6 +919,23 @@ def main(argv=None):
             return cmd_jobs_expire()
         return 1
     return 1
+
+
+def main(argv=None):
+    from time import monotonic
+    from . import telemetry
+    arguments=list(sys.argv[1:] if argv is None else argv)
+    command=arguments[0] if arguments else ""
+    if command=="hook" and len(arguments)>1:
+        command="hook."+arguments[1]
+    started=monotonic();status="raised"
+    try:
+        code=_main(arguments)
+        status="ok" if code==0 else "returned_error"
+        return code
+    finally:
+        # metrics导出及serve自身不落新日志；具体MCP调用单独记录。
+        telemetry.record("cli",command,status,(monotonic()-started)*1000)
 
 
 if __name__ == "__main__":
