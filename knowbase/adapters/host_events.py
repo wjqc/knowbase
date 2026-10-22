@@ -15,15 +15,8 @@ def _host(style):
 
 
 def _sanitize_observation(value):
-    from ..extraction.sanitizer import sanitize
-    if isinstance(value, str):
-        return sanitize(value)
-    if isinstance(value, dict):
-        return {k: "[REDACTED:credential]" if re.search(r"password|authorization|api[_-]?key|access[_-]?token", str(k), re.I)
-                else _sanitize_observation(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_sanitize_observation(v) for v in value]
-    return value
+    from ..extraction.sanitizer import sanitize_value
+    return sanitize_value(value)
 
 
 def _observed_events(conn, session_id, scope, host):

@@ -11,6 +11,8 @@ from pathlib import Path
 
 import yaml
 
+from .credentials import SECRET_PATTERNS, SECRET_RE, contains_credentials
+
 TYPES = ("pitfall", "standard", "decision", "workflow", "preference", "reference", "bizrule")
 TYPE_DIR = {
     "pitfall": "pitfalls",
@@ -49,58 +51,11 @@ _TEST_PASS_ONLY_RE = re.compile(r"^(?:测试通过|已测试|测试全部通过|
 RELATION_TYPES = ("related", "supersedes", "contradicts", "derived_from")
 SOURCE_RE = re.compile(r"^agent:[\w.\-]+:[\w.\-]+$|^human:.+$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-SECRET_RE = re.compile(
-    r"(?i)(password|passwd|secret|api[_-]?key|token)\s*[=:]\s*['\"]?[^\s'\"]{6,}"
-)
 ID_RE = re.compile(r"^[A-Z]{1,2}-\d{4}-\d{4}$|^[A-Z]{1,2}-[0-9a-f]{12}$")
 
-# 明文凭据识别：覆盖 JSON/引号包裹、Authorization 头、大写后缀键名、URL 内嵌密码。
-# 经验卡是多人共享资产，入库前必须拦住；宁可误报也不可漏报。
-_SECRET_KEYWORD = r"(?:pass(?:word|wd)?|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential)"
-_SECRET_PATTERN_SRCS = (
-    # key=value / "key": "value" / KEY_VALUE=...，键名允许前后缀与下划线分隔
-    rf"{_SECRET_KEYWORD}[a-z0-9_\-]*\s*[\"']?\s*[=:]\s*[\"']?[^\s'\"<>]{{6,}}",
-    # Authorization: Bearer <token> / Proxy-Authorization / Basic
-    r"(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic|token)\s+[\w.\-+/=]{8,}",
-    # 独立出现的 bearer <token>
-    r"\bbearer\s+[A-Za-z0-9\-._~+/]{16,}={0,2}",
-    # AWS 风格 access key id
-    r"(?:AKIA|ASIA)[A-Z0-9]{16}",
-    # URL 内嵌密码 scheme://user:pass@host（密码可含 @ 等特殊字符，取最后一个 @ 之前）
-    r"\b[a-z][a-z0-9+.\-]*://[^\s:/@]+:[^\s/]{3,}@[^\s/]+",
-)
-SECRET_PATTERNS = tuple(re.compile(src, re.I) for src in _SECRET_PATTERN_SRCS)
-SECRET_RE = re.compile("|".join(f"(?:{src})" for src in _SECRET_PATTERN_SRCS), re.I)
-
-
 def find_secrets(text) -> list[str]:
-    """返回文本/结构中疑似明文凭据的片段（已去重，供报错提示定位）。"""
-    values = [text] if isinstance(text, str) else []
-    if not isinstance(text, str):
-        collected: list[str] = []
-        _collect_strings(text, collected)
-        values = collected
-    found = []
-    for value in values:
-        for pattern in SECRET_PATTERNS:
-            found.extend(m.group(0) for m in pattern.finditer(value))
-    return list(dict.fromkeys(found))
-
-
-def _collect_strings(value, out: list[str], key_hint: str = "") -> None:
-    """递归收集任意嵌套结构里的字符串。
-
-    结构化数据里的凭据（如 {"api_key": "sk-xxx"}）键名是敏感词而值不含标识符，
-    因此把键名一并拼进待检文本，让 SECRET_PATTERNS 能按 key=value 语义命中。
-    """
-    if isinstance(value, str):
-        out.append(f"{key_hint}: {value}" if key_hint else value)
-    elif isinstance(value, dict):
-        for k, item in value.items():
-            _collect_strings(item, out, key_hint=str(k) if isinstance(k, str) else "")
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            _collect_strings(item, out, key_hint)
+    """返回安全的命中提示，拒绝时也不把原凭据回显给宿主。"""
+    return ["[REDACTED:credential]"] if contains_credentials(text) else []
 
 
 # 经验卡是共享资产，不能依赖作者机器上的文件。代码定位允许使用仓库相对路径；

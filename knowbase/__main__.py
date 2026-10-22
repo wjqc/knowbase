@@ -23,6 +23,7 @@
 
 import argparse
 import json
+import sqlite3
 import shutil
 import sys
 from datetime import date, datetime
@@ -791,6 +792,9 @@ def _main(argv=None):
     p_history = sub.add_parser("history", help="查看搜索命中记录 JSON")
     p_history.add_argument("--limit", type=int, default=100)
     sub.add_parser("reindex", help="全量重建索引")
+    p_privacy = sub.add_parser("privacy-scrub", help="只报告或备份后清洗观察/提炼队列中的凭据，不输出命中原文")
+    p_privacy.add_argument("--apply", action="store_true")
+    p_privacy.add_argument("--backup-dir", help="apply 必填：仓库外的新私有备份目录")
     p_verify = sub.add_parser("verify", help="人工确认有效")
     p_verify.add_argument("id")
     p_verify.add_argument("--expect-revision", default="", help="期望的 governance_revision（可选，用于 CAS 检查）")
@@ -901,6 +905,15 @@ def _main(argv=None):
 
     if args.cmd == "init":
         return cmd_init(args.import_from, args.scope, args.type)
+    if args.cmd == "privacy-scrub":
+        from .privacy import scrub
+        try:
+            result = scrub(config.repo_path(), apply=args.apply, backup_dir=args.backup_dir)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            # Exception arguments may contain source content; return only a fixed code/type.
+            result = {"error": type(exc).__name__}
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2 if result.get("error") else 0
     if args.cmd == "dashboard":
         from .dashboard import generate
         team_snapshot = None
@@ -1124,7 +1137,8 @@ def main(argv=None):
         return code
     finally:
         # metrics导出及serve自身不落新日志；具体MCP调用单独记录。
-        telemetry.record("cli",command,status,(monotonic()-started)*1000)
+        if command != "privacy-scrub":
+            telemetry.record("cli",command,status,(monotonic()-started)*1000)
 
 
 if __name__ == "__main__":

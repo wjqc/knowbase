@@ -2,9 +2,11 @@
 
 import hashlib
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 
 from .extraction.sanitizer import sanitize
+from .credentials import transform
 
 TERMINAL = frozenset({"saved", "updated", "linked_existing", "needs_review", "no_candidate"})
 
@@ -12,6 +14,54 @@ TERMINAL = frozenset({"saved", "updated", "linked_existing", "needs_review", "no
 def digest(value) -> str:
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def redact_payload(payload: dict) -> dict:
+    """Redact user content without treating protocol IDs/lease tokens as secrets.
+
+    Join each event before redaction: a credential can cross segment boundaries.
+    Retain segment identities/counts for settled audit history, and rebuild offsets,
+    hashes and input version. Callers must revoke existing leases after changing input.
+    """
+    clean = deepcopy(payload)
+    groups = {}
+    for segment in clean.get("segments", []):
+        locator = segment.get("locator") or {}
+        event = locator.get("event_index") if isinstance(locator, dict) else None
+        groups.setdefault(("event", event) if event is not None else ("segment", segment["segment_id"]), []).append(segment)
+    changed = False
+    for segments in groups.values():
+        original = "".join(s.get("text", "") for s in segments)
+        redacted = transform(original)
+        if redacted == original:
+            continue
+        changed = True
+        start = 0
+        for i, segment in enumerate(segments):
+            end = min(len(redacted), start + len(segment.get("text", ""))) if i < len(segments) - 1 else len(redacted)
+            segment.update(text=redacted[start:end], start_offset=start, end_offset=end, original_length=len(redacted))
+            start = end
+    for event in clean.get("checkpoint", {}).get("events", []):
+        text = event.get("text", "")
+        event["text"] = transform(text)
+        changed = changed or event["text"] != text
+    for key in ("text", "title", "messages", "events"):
+        if key in clean:
+            clean[key] = transform(clean[key])
+            changed = changed or clean[key] != payload[key]
+    if not changed:
+        return payload
+    if clean.get("protocol_version") == 2:
+        clean["redaction"] = {"policy": "credential-v2", "previous_input_version": payload.get("input_version", "")}
+        events = clean.get("checkpoint", {}).get("events")
+        clean["input_version"] = digest({"scope": clean.get("scope", ""), "session_id": clean.get("session_id", ""),
+                                         "events": events} if events is not None else clean["segments"])
+    for segment in clean.get("segments", []):
+        if clean.get("protocol_version") == 2:
+            segment.update(text_hash=digest(segment["text"]), source_version=clean["input_version"])
+        else:
+            segment["text_hash"] = hashlib.sha256(segment["text"].encode("utf-8")).hexdigest()
+    return clean
 
 
 def capture_payload(events, *, scope: str, session_id: str, segment_chars: int = 4000) -> dict:
@@ -71,7 +121,10 @@ def payload_for_job(conn, job_id: str) -> dict:
                        (job_id,)).fetchone()
     if row and row[1] and hashlib.sha256(row[0].encode("utf-8")).hexdigest()[:16] != row[1]:
         raise ValueError("MATERIAL_CHECKSUM_MISMATCH")
-    return json.loads(row[0]) if row else {}
+    payload = json.loads(row[0]) if row else {}
+    if redact_payload(payload) != payload:
+        raise ValueError("MATERIAL_REDACTION_REQUIRED")
+    return payload
 
 
 def manifest_for_job(conn, job_id: str) -> list[dict]:

@@ -6,11 +6,9 @@ MCP 脱敏不能追溯撤销宿主此前收到的内容（§5.3）。
 
 import re
 
-from ..store import SECRET_PATTERNS
+from ..credentials import contains_credentials, redact_text, transform
 
-# 凭据模式：与 store.SECRET_PATTERNS 共用同一份规则，
-# 避免"入库拦截"与"发往宿主前脱敏"两处规则漂移导致漏检。
-_CREDENTIAL_PATTERNS = SECRET_PATTERNS
+# 与入库检测共用 credentials 策略，避免写侧、交付和拒绝规则漂移。
 
 # 个人信息模式
 _PII_PATTERNS = [
@@ -28,17 +26,24 @@ _MACHINE_PATH_RE = re.compile(
 )
 
 
-def sanitize(text: str) -> str:
-    """去除凭据和个人信息。替换为 [REDACTED] 占位符。"""
-    result = text
-    for pattern in _CREDENTIAL_PATTERNS:
-        result = pattern.sub("[REDACTED:credential]", result)
+def _sanitize_text(text: str) -> str:
+    result = redact_text(text)
     for pattern in _PII_PATTERNS:
         result = pattern.sub("[REDACTED:pii]", result)
     result = _MACHINE_PATH_RE.sub("[REDACTED:path]", result)
     return result
 
 
+def sanitize_value(value):
+    """结构、argv 与 JSON 字符串使用同一脱敏策略。"""
+    return transform(value, text_filter=_sanitize_text)
+
+
+def sanitize(text: str) -> str:
+    """去除凭据和个人信息，递归处理多层 JSON 字符串。"""
+    return sanitize_value(text)
+
+
 def has_credentials(text: str) -> bool:
     """检测文本是否包含凭据（用于拦截入库）。"""
-    return any(p.search(text) for p in _CREDENTIAL_PATTERNS)
+    return contains_credentials(text)

@@ -942,6 +942,11 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - 回归：混合边界场景锁定（10-12 与 10-16 同属 W42，now=10-22T12:00Z 近 7 天 → 重聚后 W42=1、W40 不出现；周桶本身仍如实为整周 2）。全套 478 passed, 1 skipped；compileall/diff-check/node --check 通过。
 # 2026-10-22 统计卡片与自动演进交付
 
+## 全员统计方案交付（设计，未实施）
+- 用户需求为全员统计；确认仅成员电脑，无常驻汇总服务器/CI。使用 architecture-design 将现有 value/export/aggregate 能力收敛为 Git 独立统计分支+设备独占摘要+每台电脑自动汇总+单发布者更新 README。
+- 方案 docs/team-stats-git-plan.md 包含口径、身份/去重/断网补报、日志恢复/历史缺口、无原文上报、后台任务/频率与 Git 冲突隔离、代码落点、批次、反例和三台真实安装退出条件。
+- docs/design/team-stats-git-preview.html 是明确示例（2/3 人已上报），不是已部署团队数据。沿用现有卡片视觉，增加成员上报摘要；不修改真实本机看板或固定运行环境。
+
 ## 三宿主固定运行包接入更新（同日后续）
 - 构建 0.2.0rc5，wheel SHA256 364251318b8c…；60 个模块逐字节匹配工作区。安装于 ~/.knowbase/runtime/releases/rc5-364251318b8c/venv，使用 -I，依赖从本机 uv 缓存离线安装。
 - 备份 ~/.knowbase/backups/hosts-rc5-20261022-174641：六个配置路径、SQLite online backup、全局 AGENTS 与 Trae 旧规则/开关记录；原发行包保留。配置只合并 knowbase 相关入口，其他 MCP/权限保留。
@@ -968,3 +973,14 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 ## 2026-10-22 提交前验证：源码测试运行环境要求
 - 单版本运行时清理后，系统 python3（3.14）不再有 knowbase 安装副本；refresh 子进程以 `sys.executable -I -m knowbase` 运行，隔离模式不认 cwd 源码，导致 test_inflight_refresh/test_inflight_stdio 2 项环境性失败（子进程 exit 1，非代码回归）。
 - 源码全套需在带 editable 安装的 venv 中运行（如 `uv venv /tmp/kbtest-venv && uv pip install --offline -e ".[dev]"`）：pytest 导入 cwd 源码、`-I` 子进程经 editable 路径解析同一源码。本次验证 496 passed / 1 skipped，与 rc5 记录一致；固定运行时 venv（~/.knowbase/runtime）未改动。
+
+
+# 执行记录
+
+- 已读取项目/全局约束与相关知识库文档，确认唯一运行环境要求。
+- 源码工作区初始干净。正在构造不含真实密钥的回归用例。
+
+- 已完成凭据规则、写/读边界、历史清洗 CLI 与合成回归；最初全套 565 passed/1 skipped，新增只读 CLI 检查后正在最终全套复核。
+- 真实库已备份并清洗，备份根目录 ~/.knowbase/backups/credential-rc6-20261022-183843。
+- 原地安装 rc6，62 个模块一致；安装态正式 stdio 2 项通过。三宿主 MCP 实际配置初始化及脱敏交付通过，18 个 Hook 正在完成验证。
+- 最终全套复核（提交前独立复跑）：566 passed / 1 skipped（一次性 venv editable 安装，离线缓存；固定运行时未改动）。远端 411fec8 已确认同步。

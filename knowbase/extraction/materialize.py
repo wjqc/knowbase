@@ -152,7 +152,7 @@ def submit(repo, conn, job_id, batch_id, lease_token, request_id, candidates,
                     conn.rollback()
                     return {"error": "NEEDS_REASSESSMENT", "similar_cards": similar,
                             "similarity_snapshot": snapshot_hash,
-                            "message": "读取相似卡并判断相同/补充/独立/矛盾后，用新 request_id 提交 duplicate_evaluation"}
+                            "message": "读取相似卡并判断相同/补充/独立/矛盾后，用新 request_id 在每个 candidates[i].duplicate_evaluation 提交评估；不是 memory_job_submit 顶层参数"}
         linked = {sid for c in candidates if isinstance(c, dict) for sid in c.get("segment_ids", [])}
         segments_seen = set()
         for item in segment_results:

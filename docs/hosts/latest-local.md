@@ -1,6 +1,6 @@
 # 本机三宿主 knowbase 接入（唯一运行版本）
 
-已安装固定 wheel 0.2.0rc5，校验 60 个模块；不是 editable 安装。启动 Python：
+已原地安装 0.2.0rc6（凭据脱敏修复），62 个模块与源码一致；不是 editable 安装。启动 Python：
 
 `/Users/qc/.knowbase/runtime/venv/bin/python`
 
@@ -21,6 +21,8 @@ Trae 设置界面已确认：专用 Hook 开启，导入 Claude Hook 关闭，�
 2. 发现可复用信息后 capture→claim(protocol_version=2)→材料续页→submit→读回；Hook 自动观察和入队，宿主模型执行提炼。
 3. 业务规则 validation_candidates 只用于验证，关联 memory_read 获得 read_use_id 后根据实际结果回填；服务按当前版本的独立反馈自动晋升/失效，不能为了阈值编造任务。标准/全局偏好保持原权限。
 4. 现有会话保留旧 MCP 进程。任务结束后在宿主中重连 knowbase MCP；若宿主不支持单服务重连，重启该客户端后开启新会话。单纯改文件不证明旧会话已经加载新工具。
+
+rc6 修复、历史清洗和验证见 [凭据修复记录](../credential-redaction-2026-10-22.md)。`duplicate_evaluation` 必须放在每个 `candidates[i]` 内部，不是 `memory_job_submit` 顶层参数。历史清洗撤销了受影响材料的旧租约，未完成作业需重新领取。
 
 ## 验证及边界
 - 源码全套：496 passed、1 skipped；Trae/宿主/演进定向 28 passed。

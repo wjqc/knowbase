@@ -586,6 +586,9 @@ def job_material_impl(job_id: str, batch_id: str, lease_token: str,
         result = materials.page(conn, job_id, batch_id, lease_token, cursor=cursor,
                                 max_chars=max_chars, fencing_token=fencing_token)
         return json.dumps(result, ensure_ascii=False)
+    except ValueError as exc:
+        code = str(exc) if str(exc) in {"MATERIAL_REDACTION_REQUIRED", "MATERIAL_CHECKSUM_MISMATCH"} else "MATERIAL_CORRUPT"
+        return json.dumps({"error": code})
     finally:
         conn.close()
 
@@ -629,7 +632,7 @@ def _build_distillation_guide(events: list[dict], similar: list[dict], scope: st
         "implementation_status(not_implemented|implemented_unverified|verified|unknown)}；"
         "Agent 规则始终落 staging 待人审。无出处的推断用 action=review 保留待确认，禁止伪造出处。\n"
         "先 memory_search/read 查重；相同规则用 link_existing 附 target_id/expected_content_revision；"
-        "有 similar_cards 时须逐一读取，并提交 duplicate_evaluation={snapshot_hash:similarity_snapshot,"
+        "有 similar_cards 时须逐一读取，在每个 candidates[i] 对象内部提交 duplicate_evaluation（不是 memory_job_submit 顶层参数）={snapshot_hash:similarity_snapshot,"
         "evaluated_cards:[{id,content_revision}],rationale:相同/补充/独立/矛盾的理由}；提交时会复查变化。"
         "补充用 update 附 content/governance 两种期望 revision，已生效规则由人工修订。\n"
         "批次中的每个实际处理片段给 segment_results：distilled 须关联有效候选，"

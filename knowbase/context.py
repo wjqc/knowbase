@@ -61,6 +61,8 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
             request_id: str = "", host_profile: str = "", automatic: bool = False, project_path: str = "",
             observation: dict | None = None) -> dict:
     started = time.monotonic()
+    from .extraction.sanitizer import sanitize_value
+    observation = sanitize_value(observation)
     cfg = config.load_config()
     options = cfg["inflight"]
     host = host_profile or options.get("host_profile") or config.agent_name()

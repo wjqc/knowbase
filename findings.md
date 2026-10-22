@@ -406,7 +406,27 @@ fi
 - 本轮一次 apply_patch 锚点不匹配，无文件写入；随后按精确 upsert 尾部锚点完成修改。源码探针 inspect 脚本一次产生转义 SyntaxWarning，未改变运行代码。
 # 2026-10-22 统计卡片与自动演进
 
+## 全员统计设计取证
+- 用户确认只有各自电脑，故当前方案不依赖新 HTTP 服务或 CI；利用共享 Git 独立统计分支，每设备只写自己的日摘要，各电脑都可汇总；README 指定发布者离线时只保留更新时间，不阻断数据上报。
+- command_calls 目前含 installation_id，但没有明确宿主字段；value outbox 也没有完整调用/检索/更新摘要发射点。现有 export/import/snapshot 仅是可复用基础，不能直接宣布全员计数已齐。
+- 当前 Git 图谱未初始化，本轮通过定向源码核对。资料中 GitLab resource_groups 为 CI 可选路径，用户确认无 CI 后不纳入本期依赖。
+
 - 当前真实 HTML 高度约 24,579px；本机统计为 command_calls 1314、usage_log 761、知识 191，二者不能相加。
 - 本机 value_outbox 和版本反馈账本目前为 0；历史反馈不能追认成新版本有效证据。
 - 当前晋升条件依赖两个工具标签，阻碍同工具的独立任务验证；待审业务规则不能采纳，需要阅读后的显式验证通道。
 - Hermes 官方记忆文档描述任务后后台复盘、可配置预算/开关；技能按需加载。借鉴学习闭环，不声称其自带本项目的置信度统计算法。
+
+
+# 调查结论
+
+- Hook handle 写入前调用 _sanitize_observation，但 dict-only 键判断、逐元素列表处理及文本正则不足。
+- context.execute 还有直接 observation 写入路径；materials.capture_payload 文本脱敏后持久化。
+- materials.page 从旧 spool 直接交付，需保护历史输入且不得破坏分页/manifest/hash 协议。
+- 本项目无 CodeGraph 索引。内置工具没有 knowbase MCP，必要时通过本地实现进行 scope 检索。
+
+## rc6 修复收尾
+- 统一凭据识别/结构递归；Hook、context.execute、队列入库与旧材料读取均覆盖。
+- 真实清洗 53 条 observation、6 份 spool、候选/提交载荷各 1 份；原始备份权限 0700/0600，完整性、VACUUM、WAL 截断通过。
+- 运行包 rc6 安装到唯一解释器，62 个 Python 模块与源码逐字节一致；不声称旧连接已重载。
+- 新只读命令需跳过 telemetry，已补整库 dump 不变的 CLI 回归。
+- 宿主 smoke 最初错误地把 ZCode process/args 当单字符串命令、把 SessionStart 文本当 JSON；按实际协议修正探针，产品未因此改动。

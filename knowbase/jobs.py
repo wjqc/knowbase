@@ -74,6 +74,8 @@ def enqueue(conn, kind: str, scope: str, payload: dict, *,
             idempotency_key: str = "", max_attempts: int = DEFAULT_MAX_ATTEMPTS) -> dict:
     """同库短事务内检查幂等和背压，再同时持久输入与任务。"""
     from . import config
+    from .materials import redact_payload
+    payload = redact_payload(payload)
     if not idempotency_key:
         idempotency_key = _idempotency_key(kind, scope, _input_hash(payload))
     if not conn.in_transaction:
@@ -188,11 +190,12 @@ def claim(conn, job_id: str, host_session_id: str, *,
         from .materials import payload_for_job
         try:
             materials_payload = payload_for_job(conn, job_id)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as exc:
+            code = "MATERIAL_REDACTION_REQUIRED" if str(exc) == "MATERIAL_REDACTION_REQUIRED" else "MATERIAL_CORRUPT"
             conn.execute("UPDATE jobs SET state=?,error=?,updated_at=? WHERE job_id=?",
-                         (STATE_BLOCKED, "MATERIAL_CORRUPT: needs_input", now_str, job_id))
+                         (STATE_BLOCKED, code + ": needs_input", now_str, job_id))
             conn.commit()
-            return {"error": "MATERIAL_CORRUPT", "state": STATE_BLOCKED}
+            return {"error": code, "state": STATE_BLOCKED}
         # 可领取（首次、租约过期、退避到期）
         new_fencing = fencing + 1
         # 租约过期只是换宿主，不算新尝试；awaiting / retry 到期是新尝试
