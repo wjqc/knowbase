@@ -307,6 +307,11 @@ def submit(conn, job_id: str, batch_id: str, lease_token: str, request_id: str,
 
     state, owner, fencing, cursor, total = row
 
+    # 终态判错先于租约：作业已被外部清理/他人完成时返回 already_done，
+    # 避免把"作业没了"误报成 LEASE_EXPIRED，误导持有人反复续租重试。
+    if state in TERMINAL_STATES:
+        return {"error": "already_done", "state": state}
+
     # 验证租约
     if state != STATE_CLAIMED or not owner or not owner.endswith(f":{lease_token}"):
         return {"error": LEASE_EXPIRED}

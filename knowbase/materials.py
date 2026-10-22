@@ -3,7 +3,7 @@
 import hashlib
 import json
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .extraction.sanitizer import sanitize
 from .credentials import transform
@@ -183,7 +183,7 @@ def validate_batch(conn, job_id, batch_id, lease_token, fencing_token=None):
             or row[3] != row[8] or (fencing_token is not None and fencing_token != row[3])):
         return {"error": "LEASE_EXPIRED"}
     return {"segment_ids": json.loads(row[0]), "delivered": json.loads(row[1]),
-            "read_cursor": row[2], "fencing_token": row[3]}
+            "read_cursor": row[2], "fencing_token": row[3], "lease_owner": row[5]}
 
 
 def page(conn, job_id: str, batch_id: str, lease_token: str, *, fencing_token=None,
@@ -222,6 +222,13 @@ def page(conn, job_id: str, batch_id: str, lease_token: str, *, fencing_token=No
     if position == current:
         conn.execute("UPDATE job_batches SET delivered_json=?,read_cursor=? WHERE batch_id=?",
                      (json.dumps(sorted(delivered)), next_cursor, batch_id))
+        # 前进读页即续租：分页读取是持有人在活跃处理的信号，
+        # 避免协议要求的多页读完+查重期间租约到期，宿主被误判失联。
+        from .jobs import DEFAULT_LEASE_SECONDS
+        renewed = (datetime.now(timezone.utc)
+                   + timedelta(seconds=DEFAULT_LEASE_SECONDS)).isoformat(timespec="seconds")
+        conn.execute("UPDATE jobs SET lease_until=? WHERE job_id=? AND state='claimed' AND lease_owner=?",
+                     (renewed, job_id, batch["lease_owner"]))
         conn.commit()
     return {"materials": output, "next_cursor": next_cursor, "has_more": index < len(segments),
             "complete": index == len(segments), "truncated": index < len(segments),
