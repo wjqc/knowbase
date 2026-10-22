@@ -256,6 +256,14 @@ def cmd_promote(mid: str) -> int:
         target.write_text(store.render(meta, body), encoding="utf-8")
         conn = index.connect(rp)
         index.upsert(conn, meta, body, target, False)
+        # 人工激活是治理动作：审核者事件与索引更新同事务（CLI 为人工通道）。
+        from .mutations import _compute_revision
+        from .value.events import record as _record_value
+        _record_value(conn, "knowledge.activated",
+                      {"memory_id": mid, "content_revision": _compute_revision(meta, body),
+                       "scope": meta.get("scope", "")},
+                      source_key=f"knowledge:{mid}:activated", host="cli")
+        conn.commit()
         conn.close()
         index.build_index_md(rp, cfg)  # 本地重建，不提交
         # INDEX.md 已退役，不再提交到 Git
@@ -779,6 +787,7 @@ def _main(argv=None):
     p_dash = sub.add_parser("dashboard", help="生成本地 HTML 知识治理看板")
     p_dash.add_argument("--output", default="knowbase-dashboard.html")
     p_dash.add_argument("--open", action="store_true")
+    p_dash.add_argument("--team-data", default="", help="团队快照 JSON（knowbase value snapshot 生成）")
     p_history = sub.add_parser("history", help="查看搜索命中记录 JSON")
     p_history.add_argument("--limit", type=int, default=100)
     sub.add_parser("reindex", help="全量重建索引")
@@ -834,6 +843,43 @@ def _main(argv=None):
     p_jobs_retry = jobs_sub.add_parser("retry", help="重试失败任务")
     p_jobs_retry.add_argument("job_id")
     jobs_sub.add_parser("expire", help="回收过期租约")
+    p_value = sub.add_parser("value", help="团队价值事件文件汇总（显式导出/导入/快照，不自动上传）")
+    value_sub = p_value.add_subparsers(dest="value_cmd", required=True)
+    p_value_export = value_sub.add_parser("export", help="导出本机最小事件包（不改变事件状态）")
+    p_value_export.add_argument("--output", required=True)
+    p_value_export.add_argument("--since", default="", help="UTC 含起点")
+    p_value_export.add_argument("--until", default="", help="UTC 不含终点")
+    p_value_import = value_sub.add_parser("import", help="汇总机导入事件包并生成接收回执")
+    p_value_import.add_argument("package")
+    p_value_import.add_argument("--agg-db", default="")
+    p_value_import.add_argument("--team-id", default="default")
+    p_value_import.add_argument("--receipt-out", default="")
+    p_value_receipt = value_sub.add_parser("receipt", help="源端核对回执并确认已接收事件")
+    p_value_receipt.add_argument("receipt_file")
+    p_value_snapshot = value_sub.add_parser("snapshot", help="从汇总库生成最小团队快照")
+    p_value_snapshot.add_argument("--output", required=True)
+    p_value_snapshot.add_argument("--agg-db", default="")
+    p_value_snapshot.add_argument("--team-id", default="default")
+    p_value_snapshot.add_argument("--since", default="")
+    p_value_snapshot.add_argument("--until", default="")
+    p_value_member = value_sub.add_parser("register-member", help="登记团队成员（覆盖率分母权威）")
+    p_value_member.add_argument("--agg-db", default="")
+    p_value_member.add_argument("--member-id", required=True)
+    p_value_member.add_argument("--label", default="")
+    p_value_confirm = value_sub.add_parser("confirm-member", help="人工确认安装实例归属成员")
+    p_value_confirm.add_argument("--agg-db", default="")
+    p_value_confirm.add_argument("--installation", required=True)
+    p_value_confirm.add_argument("--member-id", required=True)
+    p_value_report = value_sub.add_parser("report", help="确定性生成周/月报告（Markdown，无模型润色）")
+    p_value_report.add_argument("--output", required=True)
+    p_value_report.add_argument("--agg-db", default="")
+    p_value_report.add_argument("--team-id", default="default")
+    p_value_report.add_argument("--since", default="")
+    p_value_report.add_argument("--until", default="")
+    p_value_report.add_argument("--personal", action="store_true", help="附带本机事件窗口摘要")
+    p_value_usage = value_sub.add_parser("usage", help="提取本机宿主请求级用量（当前支持 claude transcripts；zcode/trae 明确不支持）")
+    p_value_usage.add_argument("--source", default="claude", choices=["claude", "zcode", "trae"])
+    p_value_usage.add_argument("--path", default="", help="transcripts 根目录（默认 ~/.claude/projects）")
     p_sync = sub.add_parser("sync-once", help="执行已领取租约的后台同步工作")
     p_sync.add_argument("--remote", required=True)
     p_sync.add_argument("--branch", required=True)
@@ -857,7 +903,16 @@ def _main(argv=None):
         return cmd_init(args.import_from, args.scope, args.type)
     if args.cmd == "dashboard":
         from .dashboard import generate
-        output = generate(config.repo_path(), Path(args.output).expanduser().resolve())
+        team_snapshot = None
+        if getattr(args, "team_data", ""):
+            from .value.report import load_team_snapshot
+            try:
+                team_snapshot = load_team_snapshot(args.team_data)
+            except (ValueError, OSError) as exc:
+                print(f"错误：团队快照不可用（{exc}）；本次仅生成本机看板。")
+                return 2
+        output = generate(config.repo_path(), Path(args.output).expanduser().resolve(),
+                          team_snapshot=team_snapshot)
         print(f"✓ 看板已生成 {output}")
         if args.open:
             import webbrowser
@@ -904,6 +959,138 @@ def _main(argv=None):
          "user-prompt": hooks.cmd_user_prompt,
          "stop": hooks.cmd_stop}[args.event](style=args.style)
         return 0
+    if args.cmd == "value":
+        from .value import aggregate, exchange
+        agg_default = config.load_config().get("value", {}).get("aggregate_db",
+                                                                "~/.knowbase/value-aggregate.db")
+        if args.value_cmd == "export":
+            result = exchange.export_events(config.repo_path(), args.output,
+                                            since=args.since, until=args.until)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 2 if result.get("error") else 0
+        if args.value_cmd == "import":
+            agg_path = args.agg_db or agg_default
+            try:
+                agg_conn = aggregate.connect(agg_path)
+            except ValueError as exc:
+                print(f"错误：{exc}")
+                return 2
+            try:
+                receipt_out = args.receipt_out or (args.package + ".receipt.json")
+                result = exchange.import_package(agg_conn, args.package, team_id=args.team_id,
+                                                 receipt_out=receipt_out)
+            finally:
+                agg_conn.close()
+            summary = {k: v for k, v in result.items() if k != "receipt"}
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 2 if result.get("error") else 0
+        if args.value_cmd == "receipt":
+            receipt = json.loads(Path(args.receipt_file).expanduser().read_text(encoding="utf-8"))
+            result = exchange.acknowledge_receipt(config.repo_path(), receipt)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 2 if result.get("error") else 0
+        if args.value_cmd == "snapshot":
+            agg_conn = aggregate.connect(args.agg_db or agg_default)
+            try:
+                snap = aggregate.snapshot(agg_conn, team_id=args.team_id,
+                                          since=args.since, until=args.until)
+            finally:
+                agg_conn.close()
+            out = aggregate.write_snapshot(snap, args.output)
+            print(json.dumps({"output": str(out), "window": snap["window"],
+                              "events_total": snap["counts"]["events_total"],
+                              "members": snap["members"]}, ensure_ascii=False, indent=2))
+            return 0
+        if args.value_cmd == "register-member":
+            agg_conn = aggregate.connect(args.agg_db or agg_default)
+            try:
+                print(json.dumps(aggregate.register_member(agg_conn, args.member_id, args.label),
+                                 ensure_ascii=False))
+            finally:
+                agg_conn.close()
+            return 0
+        if args.value_cmd == "confirm-member":
+            agg_conn = aggregate.connect(args.agg_db or agg_default)
+            try:
+                print(json.dumps(aggregate.confirm_member(agg_conn, args.installation,
+                                                          args.member_id), ensure_ascii=False))
+            finally:
+                agg_conn.close()
+            return 0
+        if args.value_cmd == "report":
+            from .value import report as value_report
+            team = None
+            if args.agg_db:
+                agg_conn = aggregate.connect(args.agg_db)
+                try:
+                    team = aggregate.snapshot(agg_conn, team_id=args.team_id,
+                                              since=args.since, until=args.until)
+                finally:
+                    agg_conn.close()
+            personal = None
+            if args.personal:
+                pconn = index.connect(config.repo_path())
+                try:
+                    personal = value_report.personal_summary(pconn, since=args.since,
+                                                             until=args.until)
+                finally:
+                    pconn.close()
+            if not team and not personal:
+                print("错误：未指定 --agg-db 或 --personal，报告无内容。")
+                return 2
+            out = Path(args.output).expanduser()
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(value_report.render_markdown(team=team, personal=personal,
+                                                        title=f"knowbase 价值报告（{args.since or '开始'} ~ {args.until or '最新'}）"),
+                           encoding="utf-8")
+            print(f"✓ 报告已生成 {out}")
+            return 0
+        if args.value_cmd == "usage":
+            if args.source in ("zcode", "trae"):
+                print(json.dumps({"status": "not_supported", "source": args.source,
+                                  "reason": "H0 探针未发现稳定本机请求级用量来源（UI 统计不作为导出依据）；"
+                                            "不估算冒充实测"}, ensure_ascii=False))
+                return 0
+            from .value import host_usage
+            from .value.host_usage import claude as claude_usage
+            from .value.events import record as record_value
+            base = args.path or claude_usage.DEFAULT_PATH
+            if not config.load_config().get("value", {}).get("events_enabled"):
+                print(json.dumps({"error": "EVENTS_NOT_ENABLED",
+                                  "hint": "value.events_enabled=true 后重试"}, ensure_ascii=False))
+                return 2
+            records = host_usage.claude.extract_records(base)
+            counts = {"emitted": 0, "duplicate": 0, "skipped": 0}
+            pconn = index.connect(config.repo_path())
+            try:
+                pconn.execute("BEGIN IMMEDIATE")
+                for record in records:
+                    try:
+                        result = record_value(pconn, "model.usage",
+                                              claude_usage.to_event_payload(record),
+                                              source_key=claude_usage.source_key(record),
+                                              host="claude-code",
+                                              session_id=record["session_id"],
+                                              operation_id=record["request_id"],
+                                              occurred_at=record["occurred_at"] or None)
+                    except ValueError:
+                        counts["skipped"] += 1
+                        continue
+                    if result is None:
+                        counts["skipped"] += 1
+                    elif result.get("idempotent"):
+                        counts["duplicate"] += 1
+                    elif result.get("error"):
+                        counts["skipped"] += 1
+                    else:
+                        counts["emitted"] += 1
+                pconn.commit()
+            finally:
+                pconn.close()
+            print(json.dumps({"status": "ok", "source": "claude_transcripts",
+                              "path": str(base), **counts}, ensure_ascii=False))
+            return 0
+        return 1
     if args.cmd == "serve":
         from .server import main as serve
         serve()
@@ -928,6 +1115,8 @@ def main(argv=None):
     command=arguments[0] if arguments else ""
     if command=="hook" and len(arguments)>1:
         command="hook."+arguments[1]
+    if command=="value" and len(arguments)>1:
+        command="value."+arguments[1]
     started=monotonic();status="raised"
     try:
         code=_main(arguments)

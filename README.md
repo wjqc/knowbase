@@ -139,7 +139,7 @@ code_refs:
 `"verified"` 时任务前自动注入只取已验证经验（once 的新经验仍可被主动 search 检索到），
 默认 `"verified"`；已有配置显式 `"any"` 会保留兼容行为。MCP 主动检索不受置信度开关影响，但默认排除 staging/stale/reference。
 
-## 命令速查（全部 15 个）
+## 命令速查（全部 15 个 + value 汇总）
 
 未把虚拟环境加入 PATH 时，将 `knowbase` 替换为 `.venv/bin/python -m knowbase`。
 
@@ -172,6 +172,21 @@ code_refs:
 |---|---|
 | `knowbase serve` | 启动 MCP 服务（stdio，供各 Agent 配置） |
 | `knowbase hook <session-start\|user-prompt\|stop> [--style claude\|zcode]` | Agent 钩子入口（接线见上文 hooks 节） |
+
+**团队价值文件汇总（显式执行，不自动上传）**
+
+| 命令 | 用途 |
+|---|---|
+| `knowbase value export --output <包>` | 导出本机最小事件包（不改变事件状态；默认关闭发射，先在 `value.events_enabled` 开启） |
+| `knowbase value import <包> --agg-db <库>` | 汇总机按事件 ID 幂等导入独立分析库，生成含哈希的接收回执（拒绝把他人事件写进个人 memory.db） |
+| `knowbase value receipt <回执>` | 源端核对回执哈希，通过才把本机事件置 acknowledged |
+| `knowbase value snapshot --output <快照> --agg-db <库>` | 从汇总库生成最小团队快照（指标、来源覆盖、数据水位；覆盖率分母仅认登记名单） |
+| `knowbase value usage [--source claude\|zcode\|trae] [--path <目录>]` | 提取本机宿主请求级用量为 model.usage 事件（当前仅 claude transcripts 支持，不采对话正文；zcode/trae 明确 not_supported 不估算） |
+| `knowbase value report --output <报告> [--agg-db <库>] [--personal]` | 确定性生成周/月 Markdown 报告（无模型润色，数值与证据等级不可改写） |
+| `knowbase dashboard --team-data <快照>` | 原看板追加价值分区（本机事件窗口/采集健康/团队快照），个人与团队范围分开标注不相加 |
+| `knowbase value register-member / confirm-member` | 登记团队成员名单 / 人工确认安装实例归属（归并一人多宿主） |
+
+协议与口径见[价值事件协议](docs/value-events-protocol.md)；导出成功≠已接收，以回执核对为准。
 
 ## 已知边界（诚实版）
 

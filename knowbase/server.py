@@ -238,7 +238,8 @@ def search_impl(query: str, type: str | None = None, scope: str | None = None,
 def feedback_impl(id: str, outcome: str, context: str = "",
                   expected_governance_revision: str = "",
                   request_id: str = "", expected_content_revision: str = "",
-                  use_id: str = "", task_outcome_id: str = ""):
+                  use_id: str = "", task_outcome_id: str = "",
+                  task_result: str = "", verification_source: str = "agent_report"):
     """记录反馈（L1: 使用 commit_adapter 带 governance_revision 检查）。"""
     from . import commit_adapter
 
@@ -259,6 +260,7 @@ def feedback_impl(id: str, outcome: str, context: str = "",
             lock_timeout=cfg.get("lock_timeout", 10.0),
             expected_content_revision=expected_content_revision,
             use_id=use_id,task_outcome_id=task_outcome_id,
+            task_result=task_result,verification_source=verification_source,
         )
 
         # 处理适配器返回

@@ -198,6 +198,13 @@ def adapter_create(repo: Path, conn, dtype: str, title: str, body: str, *,
             )
 
             # 标记 intent 完成（同时更新 entity_id）
+            # 来源账本：创建事件与卡落库同事务（未启用 value 事件时为空操作）。
+            from .value.events import record as _record_value
+            _record_value(conn, "knowledge.created",
+                          {"memory_id": mid, "content_revision": content_rev, "scope": scope,
+                           "dtype": dtype, "staging": staging, "title": title},
+                          source_key=f"knowledge:{mid}:created",
+                          operation_id=request_id or f"card_create:{mid}")
             _complete_intent(conn, intent_id, f"created:{mid}", entity_id=mid)
 
         return {
@@ -309,6 +316,16 @@ def adapter_update(repo: Path, conn, mid: str, *,
                 (mid, new_content_rev, new_gov_rev, now),
             )
 
+            # 来源账本：内容版本变化才记修订事件（稳定键按 mid+新版本幂等）。
+            if new_content_rev != current_content_rev:
+                from .value.events import record as _record_value
+                _record_value(conn, "knowledge.revised",
+                              {"memory_id": mid, "content_revision": new_content_rev,
+                               "scope": meta.get("scope", ""),
+                               "staging": bool(path) and path.parent.name == "staging"},
+                              source_key=f"knowledge:{mid}:{new_content_rev}:revised",
+                              operation_id=request_id or f"card_update:{mid}")
+
             # 标记 intent 完成
             _complete_intent(conn, intent_id, f"updated:{mid}")
 
@@ -327,13 +344,15 @@ def adapter_feedback(repo: Path, conn, mid: str, outcome: str, by: str, *,
                      expected_governance_revision: str = "",
                      request_id: str = "", lock_timeout: float = 10.0,
                      expected_content_revision: str = "", use_id: str = "",
-                     task_outcome_id: str = "") -> dict:
+                     task_outcome_id: str = "", task_result: str = "",
+                     verification_source: str = "agent_report") -> dict:
     """复用版本/任务结果反馈回执，支持精确重放与文件落盘恢复。"""
     from . import versioned_feedback
     return versioned_feedback.apply(repo,conn,mid,outcome,by,
         expected_governance_revision=expected_governance_revision,request_id=request_id,
         lock_timeout=lock_timeout,expected_content_revision=expected_content_revision,
-        use_id=use_id,task_outcome_id=task_outcome_id)
+        use_id=use_id,task_outcome_id=task_outcome_id,task_result=task_result,
+        verification_source=verification_source)
 
 
 def recover_intents(repo: Path, conn) -> dict:

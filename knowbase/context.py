@@ -98,7 +98,8 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                   "capture_due": stage in CAPTURE_STAGES, "job_ids": [], "pending_segments": 0,
                   "resume_cursor": observed_cursor or (prior[4] if prior else ""),
                   "settled_cursor": prior[5] if prior else "",
-                  "budget_used": {"queries": 0, "tokens_estimated": 0}, "warnings": []}
+                  "budget_used": {"queries": 0, "tokens_estimated": 0}, "warnings": [],
+                  "coverage_summary": {}}
         if prior and scope and prior[0] != scope:
             result.update(error="SCOPE_MISMATCH", retrieval_status="scope_unresolved")
         else:
@@ -200,6 +201,15 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
             result["candidates"] = found
             result["next_topics"] = deferred
             result["budget_used"] = {"queries": performed, "tokens_estimated": (budget_chars - remaining + 1) // 2}
+            # 覆盖诊断：本任务主题/查询的已完成与未完成量；未完成项同时列在 next_topics。
+            result["coverage_summary"] = {
+                "topics": len(topics),
+                "topics_deferred": len(deferred),
+                "queries_completed": sum(len(v.get("queries", [])) for v in coverage.values()
+                                          if isinstance(v, dict)),
+                "queries_pending": sum(len(t.get("remaining_queries", [])) for t in deferred
+                                       if isinstance(t, dict)),
+            }
             if not result.get("error"):
                 result["retrieval_status"] = ("deferred_sync" if deferred_sync else "deferred_budget" if any(t.get("status") == "deferred" for t in deferred)
                     else "executed" if found else "no_hit" if performed else "skipped_cache")

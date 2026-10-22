@@ -145,6 +145,14 @@ def create_card(repo: Path, conn, dtype: str, title: str, body: str, *,
         "VALUES(?,?,?,?)",
         (mid, content_rev, gov_rev, now),
     )
+    # 来源账本：创建事件与卡落库同事务；未启用 value 事件时不影响业务。
+    from .value.events import record as _record_value
+    _record_value(conn, "knowledge.created",
+                  {"memory_id": mid, "content_revision": content_rev, "scope": scope,
+                   "dtype": dtype, "staging": meta.get("confidence") == "staging",
+                   "title": title},
+                  source_key=f"knowledge:{mid}:created",
+                  operation_id=request_id or f"card_create:{mid}")
     conn.commit()
 
     return {
@@ -235,6 +243,15 @@ def update_card(repo: Path, conn, mid: str, *,
         "VALUES(?,?,?,?)",
         (mid, new_content_rev, new_gov_rev, now),
     )
+    # 来源账本：内容版本变化才记修订事件（按 mid+新版本稳定键幂等）。
+    if new_content_rev != current_content_rev:
+        from .value.events import record as _record_value
+        _record_value(conn, "knowledge.revised",
+                      {"memory_id": mid, "content_revision": new_content_rev,
+                       "scope": meta.get("scope", ""),
+                       "staging": bool(path) and path.parent.name == "staging"},
+                      source_key=f"knowledge:{mid}:{new_content_rev}:revised",
+                      operation_id=request_id or f"card_update:{mid}")
     conn.commit()
 
     return {

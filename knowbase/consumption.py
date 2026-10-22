@@ -55,9 +55,28 @@ def record(repo, *, session_id, event_id, context_event_id, memory_id,
                          (use_id,host,session_id,event_id,phash,context_event_id,task,task_revision,
                           receipt["scope"],memory_id,content_revision,state,int(current),
                           datetime.now(timezone.utc).isoformat(timespec="seconds")))
+            # 价值事件与业务回执同事务：append 失败则整体回滚，不允许"回执在、事件丢"。
+            value_event=None
+            if config.load_config().get("value",{}).get("events_enabled"):
+                from .value import events as _ve,outbox as _vo,identity as _vi
+                ident=_vi.get(conn)
+                installation=ident["installation_id"] or _vi.install(conn)
+                event=_ve.build_event(
+                    "knowledge.read" if state=="read" else "knowledge.used",
+                    {"memory_id":memory_id,"content_revision":content_revision,
+                     "context_event_id":context_event_id,"use_id":use_id,"state":state,
+                     "task_id":task,"scope":receipt["scope"],
+                     "task_revision":task_revision,"current_version":bool(current)},
+                    host=host,session_id=session_id,operation_id=f"memory_use:{use_id}",
+                    task_id=task,installation_id=installation,
+                    member_binding_id=ident["member_binding_id"])
+                value_event=_vo.append(conn,event,source_key=f"knowledge_uses:{use_id}")
             conn.commit()
-            return {"use_id":use_id,"state":state,"task_id":task,"task_revision":task_revision,
+            result={"use_id":use_id,"state":state,"task_id":task,"task_revision":task_revision,
                     "id":memory_id,"content_revision":content_revision,"current_version":current,
                     "feedback_recorded":False,"identity_basis":"host_labels"}
+            if value_event is not None:
+                result["value_event"]=value_event
+            return result
     finally:
         conn.close()

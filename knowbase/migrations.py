@@ -270,6 +270,54 @@ MIGRATIONS: list[tuple[int, str]] = [
       command TEXT NOT NULL,status TEXT NOT NULL,duration_ms REAL NOT NULL);
     CREATE INDEX command_calls_time ON command_calls(ts);
     """),
+    # v19: 价值事件（knowbase.value.events.v1）。本地可靠记录，默认关闭发射；
+    # 运行记录不是可重建丢弃数据，不重置旧表。source_key 稳定业务键兜底
+    # 「同一关键业务记录只生成一个事件」（空串不参与唯一约束）。
+    (19, """
+    CREATE TABLE IF NOT EXISTS value_outbox(
+      event_id TEXT PRIMARY KEY,
+      schema_version TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      source_key TEXT NOT NULL DEFAULT '',
+      payload_json TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'pending',
+      attempt INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at TEXT NOT NULL DEFAULT '',
+      lease_owner TEXT NOT NULL DEFAULT '',
+      lease_until TEXT NOT NULL DEFAULT '',
+      last_error_code TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      acknowledged_at TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_value_outbox_source
+      ON value_outbox(source_key) WHERE source_key<>'';
+    CREATE INDEX IF NOT EXISTS idx_value_outbox_state ON value_outbox(state,created_at);
+    CREATE TABLE IF NOT EXISTS value_identity(
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT ''
+    );
+    ALTER TABLE command_calls ADD COLUMN installation_id TEXT NOT NULL DEFAULT '';
+    """),
+    # v20: 任务结果账本（V2）。任务结果可为完成/失败/放弃/未知；验证来源另列，
+    # Agent 报告不能伪装人工验收。同 task_outcome_id 幂等。
+    (20, """
+    CREATE TABLE IF NOT EXISTS task_outcomes(
+      task_outcome_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      task_run_id TEXT NOT NULL DEFAULT '',
+      result TEXT NOT NULL DEFAULT 'unknown',
+      verification_source TEXT NOT NULL DEFAULT 'agent_report',
+      host_profile TEXT NOT NULL DEFAULT '',
+      session_id TEXT NOT NULL DEFAULT '',
+      use_id TEXT NOT NULL DEFAULT '',
+      memory_id TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_outcomes_task ON task_outcomes(task_id);
+    """),
 ]
 
 

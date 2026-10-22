@@ -6,7 +6,7 @@ import json
 import uuid
 from datetime import date,datetime,timezone
 
-from . import index,materials,store
+from . import config,index,materials,store
 from .locking import RepoLock
 from .mutations import _compute_revision,_compute_governance_revision
 
@@ -16,7 +16,8 @@ def _file_hash(meta,body):
 
 
 def _finish(repo,conn,row,*,replaying):
-    (receipt,mid,before,after,meta_json,result_json,state,agent,outcome,stamp)=row
+    (receipt,mid,before,after,meta_json,result_json,state,agent,outcome,stamp,
+     use_id,task_outcome_id,binding)=row
     result=json.loads(result_json)
     if state=="applied":
         return {**result,"idempotent":True}
@@ -37,20 +38,54 @@ def _finish(repo,conn,row,*,replaying):
     conn.execute("INSERT INTO feedback_log(ts,memory_id,agent,outcome) VALUES(?,?,?,?)",
                  (stamp,mid,agent,outcome))
     conn.execute("UPDATE feedback_events SET state='applied' WHERE receipt_id=?",(receipt,))
+    # 价值事件与状态迁移同事务；崩溃恢复重放时按 source_key 幂等，不重复计一条。
+    value_event=None
+    if config.load_config().get("value",{}).get("events_enabled"):
+        from .value import events as _ve,outbox as _vo,identity as _vi
+        ident=_vi.get(conn)
+        installation=ident["installation_id"] or _vi.install(conn)
+        host=session_id=fb_task_id=""
+        if use_id:
+            use_row=conn.execute("SELECT host_profile,session_id,task_id FROM knowledge_uses "
+                                 "WHERE use_id=?",(use_id,)).fetchone()
+            if use_row:
+                host,session_id,fb_task_id=use_row
+        event=_ve.build_event(
+            "feedback.recorded",
+            {"memory_id":mid,"content_revision":result.get("content_revision",""),
+             "use_id":use_id,"task_outcome_id":task_outcome_id,"outcome":outcome,
+             "binding":binding,"receipt_id":receipt,"feedback_source":"agent",
+             **({"task_id":fb_task_id} if fb_task_id else {})},
+            host=host,session_id=session_id,operation_id=f"memory_feedback:{receipt}",
+            task_id=fb_task_id,installation_id=installation,
+            member_binding_id=ident["member_binding_id"])
+        value_event=_vo.append(conn,event,source_key=f"feedback_events:{receipt}")
     conn.commit()
-    return {**result,"idempotent":replaying}
+    out={**result,"idempotent":replaying}
+    if value_event is not None:
+        out["value_event"]=value_event
+    return out
 
 
 def _row(conn,where,params):
     return conn.execute("SELECT receipt_id,memory_id,before_hash,after_hash,after_meta_json,result_json,state,"
-                        "agent,outcome,created_at FROM feedback_events WHERE "+where,params).fetchone()
+                        "agent,outcome,created_at,use_id,task_outcome_id,binding "
+                        "FROM feedback_events WHERE "+where,params).fetchone()
 
 
 def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_governance_revision="",
-          use_id="",task_outcome_id="",request_id="",lock_timeout=10.0):
+          use_id="",task_outcome_id="",request_id="",lock_timeout=10.0,
+          task_result="",verification_source="agent_report"):
     from .lifecycle import OUTCOMES,PROMOTE_MIN_HELPFUL,PROMOTE_MIN_TOOLS
     if outcome not in OUTCOMES:
         return {"error":"INVALID_OUTCOME"}
+    from .value.events import TASK_RESULTS,VERIFICATION_SOURCES
+    if task_result and task_result not in TASK_RESULTS:
+        return {"error":"INVALID_TASK_RESULT","allowed":sorted(TASK_RESULTS)}
+    if verification_source not in VERIFICATION_SOURCES:
+        return {"error":"INVALID_VERIFICATION_SOURCE","allowed":sorted(VERIFICATION_SOURCES)}
+    if task_result and not task_outcome_id:
+        return {"error":"TASK_RESULT_REQUIRES_OUTCOME_ID"}
     if any(not isinstance(v,str) or len(v)>512 for v in
            (mid,by,expected_content_revision,expected_governance_revision,use_id,task_outcome_id,request_id)):
         return {"error":"INVALID_FEEDBACK_IDENTITY"}
@@ -134,5 +169,25 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
              json.dumps(result,ensure_ascii=False),stamp))
         if request_id:
             conn.execute("INSERT INTO feedback_requests VALUES(?,?,?)",(request_id,phash,receipt))
+        # 任务结果账本与反馈回执同事务；Agent 报告不能伪装人工验收（来源字段单列）。
+        if bound and task_result:
+            outcome_task = use[2] if use else ""
+            conn.execute(
+                "INSERT INTO task_outcomes(task_outcome_id,task_id,task_run_id,result,"
+                "verification_source,host_profile,session_id,use_id,memory_id,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(task_outcome_id) DO UPDATE SET "
+                "result=excluded.result,verification_source=excluded.verification_source,"
+                "updated_at=excluded.updated_at",
+                (task_outcome_id, outcome_task, "", task_result, verification_source,
+                 use[0] if use else "", use[1] if use else "", use_id, mid, stamp, stamp))
+            from .value.events import record as _record_value
+            _record_value(conn,
+                "task.completed" if task_result == "completed" else "task.abandoned",
+                {"task_id": outcome_task, "task_outcome_id": task_outcome_id,
+                 "result": task_result, "verification_source": verification_source,
+                 "use_id": use_id, "memory_id": mid},
+                source_key=f"task_outcomes:{task_outcome_id}",
+                host=use[0] if use else "", session_id=use[1] if use else "",
+                operation_id=f"task_outcome:{task_outcome_id}", task_id=outcome_task)
         conn.commit()  # 写前落回执；崩溃后核对before/after，不重复加计数。
         return _finish(repo,conn,_row(conn,"receipt_id=?",(receipt,)),replaying=False)

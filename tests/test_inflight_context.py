@@ -97,6 +97,19 @@ def test_topics_over_budget_remain_deferred(memory_repo):
     assert not next_result["next_topics"]
 
 
+def test_coverage_summary_reports_increment_and_pending(memory_repo):
+    seed(memory_repo)
+    result = run("cov-1", queries=["订单", "权限", "结算", "其他业务"])
+    assert result["retrieval_status"] == "deferred_budget"
+    summary = result["coverage_summary"]
+    assert summary["topics"] == 1 and summary["topics_deferred"] == 1
+    assert summary["queries_completed"] == 3 and summary["queries_pending"] == 1
+    resumed = run("cov-2", queries=["订单", "权限", "结算", "其他业务"])
+    assert resumed["coverage_summary"]["queries_pending"] == 0
+    assert resumed["coverage_summary"]["topics_deferred"] == 0
+    assert not resumed["next_topics"]
+
+
 def test_index_failure_is_recorded_not_reported_as_no_hit(memory_repo, monkeypatch):
     def fail(*args, **kwargs):
         raise RuntimeError("controlled failure")

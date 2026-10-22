@@ -14,7 +14,7 @@ def test_metrics_is_read_only_and_does_not_export_raw_context_or_labels(memory_r
     conn.execute("INSERT INTO usage_log VALUES(?,?,?,?,?)",("2026-10-22T00:30:00Z",secret,secret,secret,secret))
     conn.execute("INSERT INTO usage_log VALUES(?,?,?,?,?)",("2026-10-22T09:00:00",secret,"search",secret,secret))
     conn.execute("INSERT INTO usage_log VALUES(?,?,?,?,?)",("invalid-date",secret,"search",secret,secret))
-    conn.execute("INSERT INTO command_calls VALUES(?,?,?,?,?,?)",("private-id","2026-10-22T00:30:00Z",secret,secret,secret,0))
+    conn.execute("INSERT INTO command_calls(call_id,ts,transport,command,status,duration_ms) VALUES(?,?,?,?,?,?)",("private-id","2026-10-22T00:30:00Z",secret,secret,secret,0))
     conn.commit();conn.close()
     before=hashlib.sha256(index.db_path(memory_repo).read_bytes()).hexdigest()
     result=metrics.export(memory_repo,since="2026-10-22",until="2026-10-22T01:00:00Z",

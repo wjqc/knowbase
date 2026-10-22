@@ -854,3 +854,71 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - 433项全量通过后，显示头及正式stdio扩充定向39 passed。准备rc4；临时2个测试MCP服务已移除、6条Hook已逐项恢复，主knowbase配置与备份一致；只终止本次临时rc2/rc3测试服务，未动主rc1进程。原生设置页已恢复仅codegraph/knowbase。
 - 私有证据目录 ~/.knowbase/runtime/releases/c88be4e/native-host-4p03ysy7，含native-observer-summary.json、在线备份native-evidence.db、合成模块/RESULT.md；不提交原始会话/配置/DB到源码仓库。
 - 原会话上下文显示约301K/1M，不是总计费token；本次不能宣称净省token、工时或生产质量收益。三位实际成员与对照仍待。
+
+## 2026-10-22 团队价值方案 H0：三宿主探针与协议冻结
+- 按方案 §3 执行 H0，只读取证（Info.plist/--version/配置/目录 + 当前 ZCode 会话活体观察），未修改任何配置、会话或数据库；适配器统一为 runtime ef4189a。
+- 探针结论：ZCode 桌面 3.16.2 自动模式（六事件注册且本会话注入实证，压缩事件 unsupported，Token unknown）；Trae CN 3.3.103 辅助模式（MCP 已注册含 2026-09-17 备份，Hook 官方支持但本机未配置）；Claude Code 2.1.168 注册已证（七类 Hook + MCP，请求级 usage 键名在 transcripts 实证），真实会话消费未证。
+- 交付：更新 docs/host-capabilities.md（H0 快照矩阵与结论限制）、新增 docs/hosts/trae.md、增补 docs/hosts/zcode.md 与 docs/hosts/claude.md、新增 docs/value-events-protocol.md（knowbase.value.events.v1 字段/类型/状态机/文件汇总/S1 语义冻结，留 V1/V4 附件）。5 文档相对链接 0 broken。
+- 未证事项如实保留：三宿主真实任务贯通样本、Trae/Claude 消费链、PostToolUseFailure 在 Claude 2.1.168 的有效性、ZCode/Trae Token 粒度；均不宣称通过。V1 前置：公共字段已冻结，事务边界待 V1 契约测试落定。
+
+## 2026-10-22 团队价值方案 V1：事件、身份、可靠记录
+- 迁移 v19：`value_outbox`（source_key 稳定业务键部分唯一索引，空串不参与）、`value_identity`、`command_calls` 增 `installation_id` 列；不重置旧表。
+- 新增 `knowbase/value/{events,outbox,identity}.py`：15 类型中本构建启用 `knowledge.used/knowledge.read/feedback.recorded` 三个发射点（payload 白名单+条件必填，未启用类型构造即拒）；公共字段信封+规范化哈希；append 须在调用方事务内，event_id 同内容幂等/异内容冲突，source_key 兜底"同一关键业务记录一个事件"；acknowledged/quarantined 终态原语落地，接收回执生成与核对、发送租约属 A1/S1 未接线。
+- 身份：installation_id 首用生成持久化（不进知识 Git）；set_member 仅 manual_confirmed/device_confirmed，certified 中心认证等级拒绝自封；成员未确认时事件省略 member_binding_id，工具/宿主标签不冒充归属。
+- 同事务接入：consumption.record（knowledge.used/read，source_key=knowledge_uses:{use_id}）、versioned_feedback._finish（feedback.recorded，source_key=feedback_events:{receipt_id}，崩溃恢复重放按 source_key 幂等）；append 异常整体回滚，测试证明业务回执同滚不残留。
+- telemetry 命令记录 best-effort 携带 installation_id，迁移前旧库自动退回 6 列插入不丢命令行；config 新增 value.events_enabled 默认 false（默认关闭发射）。
+- 测试：新增 tests/test_value_events.py 8 项（迁移/构造校验/幂等与状态机/同事务与默认关闭/崩溃回滚/身份证据等级/反馈重放不重复/遥测身份）；随 v19 更新 material_paging 迁移断言与 metrics_export 种子列名。全套 441 passed, 1 skipped（44.45s）；compileall、diff-check 通过。
+- 副本演练：真实库（schema18，191 卡/704 旧 usage/25 反馈/355 命令）经 backup API 只读备份至 /tmp/knowbase-v19-drill，副本 18→19 迁移成功：业务行数不变、新表空、command_calls 旧行 identity 空、verify() 无 checksum 错误。真实库未迁移、未启用发射。
+
+## 2026-10-22 团队价值方案 E1：执行中检索与沉淀
+- 对照方案 §4 逐条审计：六类触发（含 new_failure 归一化与 self_call 排除）、签名缓存增量、deferred_budget/partial、长材料三游标、完成回执五态、规则 staging 均已在一期 inflight 实现并有测试；"冷却 30s"判定为由签名缓存+checkpoint 节流替代（不丢观察记录），试点后决定是否补独立配置。
+- 本轮唯一代码缺口：context.execute 新增 coverage_summary（topics/deferred/queries_completed/pending）补齐 §2"覆盖诊断"差距；新增 test_coverage_summary_reports_increment_and_pending。全套 442 passed, 1 skipped；compileall/diff-check 通过。
+- 新增 docs/team-value-real-acceptance.md：三宿主真实样本验收协议（前置/七步流程/通过判据）+ E1 契约对照审计表（条款→落点→测试证据→状态）；hosts/trae.md 已挂链接。
+- 剩余门槛为人工/跨机项，如实不宣称：Trae 首个完整真实样本（最高优先）、Claude 真实会话消费、三人 A→B→C 跨机复用链（V2）。ZCode 已有 10-22 有界验收样本（辅助纠错后通过，不称零干预）。
+
+## 2026-10-22 团队价值方案 A1：文件汇总与最小快照
+- 新增 knowbase/value/exchange.py：export 只读本机 outbox（quarantined 不导出、不改事件状态、包带来源身份与证据等级）；import 写独立汇总库，按 (team_id,event_id) 幂等（重复=不累计）、同 ID 异内容 conflict 隔离、payload 哈希不匹配 rejected；回执逐事件含 event_id/payload_hash；acknowledge_receipt 源端哈希核对通过才置 acknowledged（导出成功≠已接收闭环）。
+- 新增 knowbase/value/aggregate.py：独立 SQLite 分析库（连接守卫拒绝个人 memory.db 形态目标）；members 人工名单（覆盖率分母权威）/installations 归属确认/agg_events/imports 四表；snapshot 输出 knowbase.value.snapshot.v1——事件分类计数、observed/effective_consumers（一人多宿主按 member 归并不重计）、delivered/adopted 任务与采纳率、反馈按 outcome 与来源拆分、来源覆盖与数据水位；覆盖率未登记名单或存在无归属安装时显式 unknown；跨成员复用标记 not_available（贡献者事件 V2 才发射），不编造。
+- CLI：value export/import/receipt/snapshot/register-member/confirm-member 六子命令（默认汇总库 ~/.knowbase/value-aggregate.db，知识 Git 仓库外）；config 增加 value.aggregate_db。telemetry 记录 value 子命令，但 metrics 与 value.export 有意不落遥测（导出路径对 memory.db 只读，维持既有契约——本轮误加 metrics 后被 metrics 只读测试拦截，已修正）。
+- 测试：新增 tests/test_value_exchange.py 5 项（导出→导入→回执→acknowledged 闭环+伪回执不确认；幂等/冲突/坏 schema/哈希篡改/拒写个人库；同成员两安装 observed=1 任务不翻倍；名单+确认后覆盖率才可算且新库重导可重建同指标；CLI 全链路）。README 命令表补 value 节。全套 447 passed, 1 skipped；compileall/diff-check/文档链接通过。
+- 边界如实：默认 events_enabled=false（无事件可导出时包为空属正常）；文件哈希仅完整性不认证人员；三人真实分发/汇总演练待成员实操。
+
+## 2026-10-22 团队价值方案 V2：任务与跨成员消费
+- 迁移 v20：task_outcomes 任务结果账本（task_outcome_id 幂等；result=completed/failed/abandoned，verification_source=agent_report/user_confirmed/independent，Agent 报告不伪装人工验收）。
+- 来源账本发射（与业务同事务+稳定键）：knowledge.created（commit_adapter.adapter_create 与 mutations.create_card 两路写入口，source_key=knowledge:{mid}:created）、knowledge.revised（内容版本变化才发，键含新版本号）、knowledge.activated（CLI promote 人工通道，host=cli）。修复一处真实缺陷：promote 事件 INSERT 后漏 conn.commit 被 close 回滚，干净环境复现后补上。
+- 任务结果链：memory_feedback 新增可选 task_result/verification_source（server→commit_adapter→versioned_feedback 全链透传，MCP schema 随签名自动扩展）；绑定反馈携带 task_result 时同事务写 task_outcomes 并发射 task.completed/abandoned（键 task_outcomes:{id}，重放不重复）；非法值与缺 task_outcome_id 明确拒绝。
+- 汇总端跨成员复用：aggregate.snapshot 按内容版本建贡献者映射（创建/修订者，成员绑定或人工确认归属），adopted 任务按 task 去重——贡献者≠消费者且双方身份已知才算跨成员任务（收益只计一次），任一方未知单列 unattributed；反馈覆盖率/明确有帮助任务按跨成员任务集合计算；无贡献者事件时保持 not_available 不编造。
+- 测试：新增 tests/test_value_cross_member.py 3 项（卡生命周期 created→revised→promote activated 事件链；任务结果账本+事件+重放幂等+非法值拒绝；跨成员 A 创建→B 采纳+helpful 指标、同成员不计、未知单列）。迁移断言更新至 v20。全套 450 passed, 1 skipped；compileall/diff-check 通过。
+- 协议文档附件更新：本构建已启用 8 种发射点；native_call_id/model.usage 仍待 V4/S1。V2 退出条件中"A→B 链可还原"已具本地证据；真实跨机器 A→B→C 复用链仍待三人实操（不宣称已发生）。
+
+## 2026-10-22 团队价值方案 V3：dashboard 增强（本机部分先行）
+- 新增 knowbase/value/report.py 共享指标内核：personal_summary（本机 outbox 类型/状态/水位、消费回执、绑定反馈、任务结果、命令尽力口径 top20、身份证据等级；表缺失=unknown 不填零，历史累计与新事件窗口分开）；render_markdown 确定性报告（无模型润色；个人/团队范围不相加声明、迟到数据产生新版）；load_team_snapshot 校验裁剪（schema 白名单、10MiB 上限、未知顶层键丢弃）。
+- dashboard.py：原治理视图不动，追加三个同页分区——价值与使用（本机事件窗口）、采集健康（outbox 状态/成员归属 unknown 不冒充/安装实例）、团队快照（--team-data 注入；未提供时明确"仅展示本机"）；数据仍走单个转义 JSON+textContent 渲染，不执行任何正文 HTML；原命令/默认输出路径/打开方式保持不变。
+- CLI：dashboard --team-data（快照不可用 rc=2 且不产出半成品）；value report --personal/--agg-db 团队/本机确定性 Markdown。value.report 与 metrics/value.export 一样不落遥测（报告不改变其报告的口径）；dashboard 命令遥测维持既有行为。
+- 测试：新增 tests/test_value_dashboard.py 3 项（零/未启用/unknown 区分+原命令兼容+身份不冒充；团队快照校验裁剪+schema 拒绝+双范围并存标注；报告确定性——同数据二次生成除时间行外逐行一致；空报告 rc=2）。全套 453 passed, 1 skipped；compileall/diff-check 通过。README value 表更新。
+- V3 剩余门槛（如实）：方案 §11 要求"增量效果稿与评审完成"才算 V3 验收——代码与数据底座已就绪，效果稿制作与评审、真实浏览器交互验收（T15：无参数运行/离线打开/反复筛选/200% 缩放）待人工；三宿主真实数据进入看板待三人实操。
+
+## 2026-10-22 团队价值方案 V4：请求计量与任务成本
+- 新增 knowbase/value/host_usage/（claude.py）：从 ~/.claude/projects/**/*.jsonl assistant 行提取 message.usage（H0 已实证键名），同 message.id 去重，只取用量/标识/模型/时间字段不读正文；task_mapping 固定 session 级（transcript 无任务粒度，不冒充任务实测）。
+- events.py 启用 model.usage（第 9 种发射点）：payload 白名单含分列 token 字段，`*_tokens` 强制数值（非法整条 skip 不入库）；occurred_at 透传。CLI `value usage`：claude 支持且幂等（source_key=claude_usage:{file}:{msg_id}），zcode/trae 返回明确 not_supported（H0 结论：无稳定本机请求级来源，不估算冒充实测）；未启用 events 时 rc=2 拒绝。
+- 汇总端 snapshot 新增 cost 分区：按模型汇总 requests/input/output/cache_read/cache_creation（字段分列，缓存不并入输入重复计算），usage_sources 与 attribution=session 标注；无事件时 available=false 附原因。不按单价换算成本（账单实付与估算分开，不在快照推算）。
+- 测试：新增 tests/test_value_usage.py 4 项（提取幂等+不采正文+分列+会话归属；数值非法 skip 与白名单拒绝；zcode/trae not_supported；快照 cost 对账=transcript 原始值之和）。全套 457 passed, 1 skipped；compileall/diff-check 通过。
+- 真实冒烟：本机 transcripts 只读解析 798 条请求记录（session 归属 100%、多模型、token 合计可算）；真实库未启用 events，命令被门禁正确拦截未写任何数据。对账闭环（快照合计=源数据合计）已有测试锁定；"至少一宿主可对账"以 claude 满足。
+
+## 2026-10-22 评审修复轮：数据可信性四项 + V3 看板补齐
+- 修复 1（隐私）：导入侧不再信任来源端自校验——exchange._import_one 重跑 events.validate_payload（类型/字段白名单/数值），额外字段（raw_query/prompt 等）即使重算哈希也整条 rejected（测试含私密串不入库断言）；dashboard 带 --team-data 时不再嵌入本机搜索原文（命中计数保留在治理表，原始查询明细不进页面数据，页面明示"团队分享输出不嵌入本机搜索原文"；本地模式保留）。
+- 修复 2（helpful 误判）：aggregate 任务级有效性重写——反馈只统计该任务跨成员采纳卡（防同任务其他卡串联）；任务结果取全量账本，failed/abandoned 且有帮助声称→conflicted、无声称→failed_excluded；正负反馈并存→conflicted；仅 agent 来源正向→agent_reported_helpful_tasks 单列，user 来源正向且无冲突→helpful_tasks。评审复现场景（agent helpful+user not_helpful+任务 abandoned）回归锁定 helpful=0/conflicted=1；user helpful+completed 锁定 helpful=1。
+- 修复 3（跨成员误计/漏计）：member_binding_id 改为按成员标签稳定（digest(["member",label])，同人多安装同标签=同一绑定，不再拆成两人/假跨成员；同名不同人在受信任团队文件模式可被汇总端 confirm_member 人工纠正——测试跨库验证绑定一致）；贡献者（created/revised）与任务结局（task.completed/abandoned）改从全量事件账本归因、不随展示窗口过滤——上月创建本周采纳可归因（测试锁定 since=10 月仍 cross=1/unattributed=0）。
+- 修复 4（Token 展示）：load_team_snapshot 白名单补 cost/weekly/reuse_evidence 等新字段；cost 分列字段缺失不再填零——未采集字段为 None（页面显示"未采集"），并附 fields_missing_on_requests/missing_fields；测试用仅 input 的记录锁定 output=None≠0。
+- V3 补齐：价值分区新增 时间范围/宿主/个人-团队范围 三联动筛选控件（作用于价值区，治理区沿用自身筛选）；本机与团队周趋势 SVG 折线（ISO 周序列在 Python 内核计算，页面只渲染）；最近事件明细表（内嵌上限 500 条并标注截断）；团队复用证据链（每跨成员任务的时间线 递送→采纳→反馈→结局，有界 100 任务，缺失环节不补）。
+- 测试：新增/更新 9 项回归（导入白名单拒绝+私密串不入库、team 输出不含搜索原文、绑定跨安装稳定、helpful 三场景、卡范围限定、同名归并、cost None 语义、V3 控件/趋势/证据链）。全套 466 passed, 1 skipped；compileall/diff-check 通过。
+- 仍待人工项不变：三宿主真实任务样本、三人跨机复用、效果稿评审与浏览器交互验收——本轮修复不改变"未验收"结论，收益统计失真风险已消除但收益本身仍未实测。
+
+## 2026-10-22 第二轮评审修复：任务身份/版本关联/深层脱敏/联动筛选/覆盖率分子
+- 修复 1（旧版本反馈计收益）：反馈关联改为完整消费身份（反馈人,任务,卡,内容版本）——scoped_feedback 匹配 cross_member_cards 的 (memory_id, content_revision) 集合，r1 的反馈不再给 r2 的采纳计收益（回归：helpful/feedback_covered 均为 0）。
+- 修复 2（同名任务合并）：任务身份改为（归属人, task_id）二元组——归属人=成员映射/绑定，退回安装实例；delivered/adopted/task_details/timeline/task_result/verdict/reuse_evidence 全链按身份去重。B/C 同名 fix-order 不再互相污染（回归：adopted=2、B helpful=1、C failed_excluded=1、conflicted=0）。
+- 修复 4（脱敏旁路）：events.validate_event_shape——顶层键白名单（TOP_LEVEL_FIELDS）+ 除 payload 外全标量 + payload 值全标量；导入侧接入，顶层 raw_query 与白名单字段嵌套对象（重算哈希）均整条 rejected。load_team_snapshot 改为 _sanitize_snapshot 深层结构化裁剪：每容器只留已知键、叶子只留标量，task_details[].raw_query、reuse_evidence 嵌套 secret 不进看板数据（回归：'PRIVATE' 全文不出现）。
+- 修复 5（覆盖率分子）：分子改为"有明确 referenced/adopted 的已确认成员"（confirmed_effective_consumers=consumer_keys 去除 binding: 前缀），评审复现（两人名单、仅创建无消费）输出 coverage=0.0 而非 50%。
+- 修复 3（筛选联动）：仅本机/仅团队真正隐藏对应分区（此前只隐藏了团队标题的 bug 已修）；本机周趋势与"筛选态汇总"随时间/宿主筛选从内嵌明细重算（明细截断时显式标注"部分视图"，全窗口口径行保留并标注）；团队区时间筛选作用于周序列与证据时间线，汇总保持快照冻结口径并明示"换窗口需重新生成快照"。生成页脚本过 node --check。
+- 测试：新增 5 组回归（r1 反馈不串 r2、同名任务分离、覆盖率 0%、顶层/嵌套旁路拒绝、快照深层脱敏）。全套 471 passed, 1 skipped；compileall/diff-check 通过。
+- 如实边界：筛选联动的浏览器实测仍以评审人环境为准（本轮仅静态+语法校验+数据层断言）；任务身份未含跨机显式转交引用（方案 §5.3 受控任务引用待真实跨机样本再定格式）。

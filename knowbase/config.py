@@ -27,6 +27,7 @@ DEFAULTS = {
     "index": {"max_lines": 300, "vector_model": "char-ngram-v1", "dense_threshold": 0.25},
     "scope_map": {},
     "stats": {"enabled": True},
+    "value": {"events_enabled": False, "aggregate_db": "~/.knowbase/value-aggregate.db"},
     "hooks": {"enabled": True, "inject_min_confidence": "verified"},
     "inflight": {
         "enabled": False, "capture_enabled": True, "mode": "assisted", "protocol_version": 2,
