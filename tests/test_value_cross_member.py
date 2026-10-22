@@ -130,8 +130,9 @@ def _package(path, events_list, source):
     return path
 
 
-def _event(event_type, payload, installation, binding, event_id, occurred="2026-10-22T01:00:00+00:00"):
-    return vevents.build_event(event_type, payload, host="zcode", session_id="s1",
+def _event(event_type, payload, installation, binding, event_id,
+            occurred="2026-10-22T01:00:00+00:00", session_id="s1"):
+    return vevents.build_event(event_type, payload, host="zcode", session_id=session_id,
                                installation_id=installation, member_binding_id=binding,
                                task_id=payload.get("task_id", ""), event_id=event_id,
                                occurred_at=occurred)
@@ -483,3 +484,253 @@ def test_coverage_numerator_is_effective_consumers(tmp_path):
     assert members["coverage_known"] is True
     assert members["coverage"] == 0.0  # 分子=有效消费成员，不是有事件的成员
     agg.close()
+
+
+def test_feedback_with_fake_use_id_is_unlinked(tmp_path):
+    """评审复现：反馈引用不存在的 use_id → 未关联单列，不得计入 helpful。"""
+    mid, rev = "P-u1", "r1"
+    events_a = [
+        _event("knowledge.created",
+               {"memory_id": mid, "content_revision": rev, "scope": "orders",
+                "dtype": "pitfall"},
+               "INST-a", "MBR-A", "VE-u0", occurred="2026-10-01T00:00:00+00:00"),
+    ]
+    events_b = [
+        _event("knowledge.used",
+               {"memory_id": mid, "content_revision": rev, "context_event_id": "ce",
+                "use_id": "USE-REAL", "state": "adopted", "task_id": "t-u1", "scope": "orders"},
+               "INST-b", "MBR-B", "VE-u1", occurred="2026-10-10T00:00:00+00:00"),
+        # 反馈声称 user helpful，但 use_id 指向不存在的回执
+        _event("feedback.recorded",
+               {"memory_id": mid, "content_revision": rev,
+                "use_id": "MISSING-CONSUMPTION-RECEIPT",
+                "task_outcome_id": "OUT-x", "outcome": "helpful", "binding": "version_task",
+                "receipt_id": "FB-x", "feedback_source": "user", "task_id": "t-u1"},
+               "INST-b", "MBR-B", "VE-u2", occurred="2026-10-10T00:05:00+00:00"),
+    ]
+    agg = aggregate.connect(tmp_path / "agg.db")
+    exchange.import_package(agg, _package(tmp_path / "a.json", events_a,
+        {"installation_id": "INST-a", "member_binding_id": "MBR-A", "member_label": "A",
+         "member_evidence": "manual_confirmed", "member_confirmed_at": "x"}), team_id="t")
+    exchange.import_package(agg, _package(tmp_path / "b.json", events_b,
+        {"installation_id": "INST-b", "member_binding_id": "MBR-B", "member_label": "B",
+         "member_evidence": "manual_confirmed", "member_confirmed_at": "x"}), team_id="t")
+    cross = aggregate.snapshot(agg, team_id="t")["cross_member_reuse"]
+    assert cross["cross_member_tasks"] == 1
+    assert cross["helpful_tasks"] == 0 and cross["agent_reported_helpful_tasks"] == 0
+    assert cross["feedback_covered_tasks"] == 0
+    assert cross["unlinked_feedback_events"] == 1  # 待关联单列，不猜
+    agg.close()
+
+
+def test_same_member_two_installations_same_task_stay_separate(tmp_path):
+    """评审复现：同一成员 ZCode/Claude 两安装同名任务 → 两个任务运行；
+    后一次失败不改写前一次的用户确认 helpful。"""
+    mid, rev = "P-u2", "r1"
+    common = [
+        _event("knowledge.created",
+               {"memory_id": mid, "content_revision": rev, "scope": "orders",
+                "dtype": "pitfall"},
+               "INST-a", "MBR-A", "VE-w0", occurred="2026-10-01T00:00:00+00:00"),
+    ]
+    run1 = [
+        _event("knowledge.used",
+               {"memory_id": mid, "content_revision": rev, "context_event_id": "ce",
+                "use_id": "U-z1", "state": "adopted", "task_id": "fix-order", "scope": "orders"},
+               "INST-zcode", "MBR-SAME", "VE-w1", occurred="2026-10-10T00:00:00+00:00",
+               session_id="sess-zcode"),
+        _event("feedback.recorded",
+               {"memory_id": mid, "content_revision": rev, "use_id": "U-z1",
+                "task_outcome_id": "OUT-z1", "outcome": "helpful", "binding": "version_task",
+                "receipt_id": "FB-z1", "feedback_source": "user", "task_id": "fix-order"},
+               "INST-zcode", "MBR-SAME", "VE-w2", occurred="2026-10-10T00:05:00+00:00",
+               session_id="sess-zcode"),
+        _event("task.completed",
+               {"task_id": "fix-order", "task_outcome_id": "OUT-z1", "result": "completed",
+                "verification_source": "user_confirmed", "use_id": "U-z1", "memory_id": mid},
+               "INST-zcode", "MBR-SAME", "VE-w3", occurred="2026-10-10T00:10:00+00:00",
+               session_id="sess-zcode"),
+    ]
+    run2 = [
+        _event("knowledge.used",
+               {"memory_id": mid, "content_revision": rev, "context_event_id": "ce",
+                "use_id": "U-c1", "state": "adopted", "task_id": "fix-order", "scope": "orders"},
+               "INST-claude", "MBR-SAME", "VE-w4", occurred="2026-10-11T00:00:00+00:00",
+               session_id="sess-claude"),
+        _event("task.abandoned",
+               {"task_id": "fix-order", "task_outcome_id": "OUT-c1", "result": "abandoned",
+                "verification_source": "user_confirmed", "use_id": "U-c1", "memory_id": mid},
+               "INST-claude", "MBR-SAME", "VE-w5", occurred="2026-10-11T00:10:00+00:00",
+               session_id="sess-claude"),
+    ]
+    agg = aggregate.connect(tmp_path / "agg.db")
+    src = {"member_binding_id": "MBR-SAME", "member_label": "qc",
+           "member_evidence": "manual_confirmed", "member_confirmed_at": "x"}
+    exchange.import_package(agg, _package(tmp_path / "a.json", common,
+        {**src, "installation_id": "INST-a", "member_binding_id": "MBR-A"}), team_id="t")
+    exchange.import_package(agg, _package(tmp_path / "z.json", run1,
+        {**src, "installation_id": "INST-zcode"}), team_id="t")
+    exchange.import_package(agg, _package(tmp_path / "c.json", run2,
+        {**src, "installation_id": "INST-claude"}), team_id="t")
+    cross = aggregate.snapshot(agg, team_id="t")["cross_member_reuse"]
+    assert cross["adopted_tasks"] == 2          # 同成员不同运行来源：两个任务
+    assert cross["cross_member_tasks"] == 2
+    assert cross["helpful_tasks"] == 1          # ZCode 会话的用户确认保留
+    assert cross["conflicted_tasks"] == 0       # Claude 会话的失败不改写它
+    assert cross["failed_excluded_tasks"] == 1
+    agg.close()
+
+
+def test_old_aggregate_db_upgrade_backfills_session_and_keeps_linkage(tmp_path):
+    """评审复现：旧结构汇总库升级后，历史消费与新反馈不断开。"""
+    import hashlib
+    import sqlite3
+    db = tmp_path / "old-agg.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+    CREATE TABLE agg_events(
+      team_id TEXT NOT NULL, event_id TEXT NOT NULL, event_type TEXT NOT NULL,
+      installation_id TEXT NOT NULL DEFAULT '', member_binding_id TEXT NOT NULL DEFAULT '',
+      host TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '',
+      occurred_at TEXT NOT NULL DEFAULT '', payload_json TEXT NOT NULL,
+      payload_hash TEXT NOT NULL, source_key TEXT NOT NULL DEFAULT '',
+      state TEXT NOT NULL DEFAULT 'accepted', imported_at TEXT NOT NULL,
+      PRIMARY KEY(team_id,event_id));
+    """)
+    conn.commit()
+    conn.close()
+
+    def old_import(events):
+        c = sqlite3.connect(db)
+        for event in events:
+            c.execute(
+                "INSERT INTO agg_events(team_id,event_id,event_type,installation_id,"
+                "member_binding_id,host,task_id,occurred_at,payload_json,payload_hash,"
+                "state,imported_at) VALUES('t',?,?,?,?,?,?,?,?,?,'accepted',?)",
+                (event["event_id"], event["event_type"], event["installation_id"],
+                 event["member_binding_id"], event.get("host", ""), event["task_id"],
+                 event["occurred_at"], json.dumps(event, ensure_ascii=False),
+                 vevents.payload_hash(event), event["occurred_at"]))
+        c.commit()
+        c.close()
+
+    mid, rev = "P-old", "r1"
+    # 旧写入：事件 JSON 内含 session_id，但旧表无该列
+    old_import([
+        vevents.build_event("knowledge.created",
+                            {"memory_id": mid, "content_revision": rev, "scope": "orders",
+                             "dtype": "pitfall"},
+                            host="zcode", session_id="", installation_id="INST-a",
+                            member_binding_id="MBR-A", task_id="",
+                            event_id="VE-o0", occurred_at="2026-10-01T00:00:00+00:00"),
+        vevents.build_event("knowledge.used",
+                            {"memory_id": mid, "content_revision": rev,
+                             "context_event_id": "ce", "use_id": "U-old", "state": "adopted",
+                             "task_id": "t-old", "scope": "orders"},
+                            host="zcode", session_id="sess-old",
+                            installation_id="INST-b", member_binding_id="MBR-B",
+                            task_id="t-old", event_id="VE-o1",
+                            occurred_at="2026-10-10T00:00:00+00:00"),
+    ])
+    # 升级（connect 补列+回填）后，新导入同任务的用户反馈仍能关联
+    agg = aggregate.connect(db)
+    feedback_event = vevents.build_event(
+        "feedback.recorded",
+        {"memory_id": mid, "content_revision": rev, "use_id": "U-old",
+         "task_outcome_id": "OUT-old", "outcome": "helpful", "binding": "version_task",
+         "receipt_id": "FB-old", "feedback_source": "user", "task_id": "t-old"},
+        host="zcode", session_id="sess-old", installation_id="INST-b",
+        member_binding_id="MBR-B", task_id="t-old", event_id="VE-o2",
+        occurred_at="2026-10-10T00:05:00+00:00")
+    agg.execute(
+        "INSERT INTO agg_events(team_id,event_id,event_type,installation_id,member_binding_id,"
+        "host,task_id,occurred_at,session_id,payload_json,payload_hash,state,imported_at) "
+        "VALUES('t',?,?,?,?,?,?,?,?,?,?,'accepted',?)",
+        ("VE-o2", "feedback.recorded", "INST-b", "MBR-B", "zcode", "t-old",
+         "2026-10-10T00:05:00+00:00", "sess-old", json.dumps(feedback_event),
+         vevents.payload_hash(feedback_event), "2026-10-10T00:05:00+00:00"))
+    agg.commit()
+    backfilled = agg.execute("SELECT COUNT(*) FROM agg_events WHERE session_id='sess-old'").fetchone()[0]
+    assert backfilled == 2  # 历史 used 已回填；新反馈原生带列
+    cross = aggregate.snapshot(agg, team_id="t")["cross_member_reuse"]
+    assert cross["cross_member_tasks"] == 1
+    assert cross["helpful_tasks"] == 1  # 升级前后关联一致
+    assert cross["unlinked_feedback_events"] == 0
+    agg.close()
+
+
+def test_weekly_bucket_carries_last_event_time(tmp_path):
+    """周桶带周内最近事件时间：时间筛选按事件时间而非周起点。"""
+    import sqlite3
+    db = tmp_path / "agg.db"
+    agg = aggregate.connect(db)
+    event = {"event_id": "VE-w", "schema_version": "knowbase.value.events.v1",
+             "event_type": "knowledge.used", "host": "zcode",
+             "occurred_at": "2026-10-16T00:00:00+00:00", "session_id": "s",
+             "payload": {"memory_id": "P", "content_revision": "r", "context_event_id": "c",
+                         "use_id": "u", "state": "adopted", "task_id": "t", "scope": "o"}}
+    agg.execute(
+        "INSERT INTO agg_events(team_id,event_id,event_type,occurred_at,session_id,host,"
+        "payload_json,payload_hash,imported_at) VALUES('t',?,?,?,?,?,?,?,?)",
+        ("VE-w", "knowledge.used", "2026-10-16T00:00:00+00:00", "s", "zcode",
+         json.dumps(event), vevents.payload_hash(event), "2026-10-16T00:00:00+00:00"))
+    agg.commit()
+    snap = aggregate.snapshot(agg, team_id="t")
+    bucket = snap["weekly"][0]
+    assert bucket["last"] == "2026-10-16T00:00:00+00:00"
+    host_bucket = snap["weekly_by_host"]["zcode"][0]
+    assert host_bucket["last"] == "2026-10-16T00:00:00+00:00"
+    agg.close()
+
+
+def test_daily_granularity_supports_filter_then_rebucket(tmp_path):
+    """评审复现：同一 ISO 周内 10 天前与 6 天前两条事件，"近 7 天"只应计 1。"""
+    mid, rev = "P-d1", "r1"
+
+    def used(event_id, when):
+        return vevents.build_event(
+            "knowledge.used",
+            {"memory_id": mid, "content_revision": rev, "context_event_id": "ce",
+             "use_id": "U-" + event_id, "state": "adopted", "task_id": "t-d1",
+             "scope": "orders"},
+            host="zcode", session_id="s", installation_id="INST-b",
+            member_binding_id="MBR-B", task_id="t-d1", event_id=event_id,
+            occurred_at=when)
+
+    # 2026-10-12（周一）与 2026-10-16 同属 W42；快照窗口不筛，两者都进周桶
+    events = [
+        _event("knowledge.created",
+               {"memory_id": mid, "content_revision": rev, "scope": "orders",
+                "dtype": "pitfall"},
+               "INST-a", "MBR-A", "VE-d0", occurred="2026-10-01T00:00:00+00:00"),
+        used("VE-d1", "2026-10-12T08:00:00+00:00"),
+        used("VE-d2", "2026-10-16T08:00:00+00:00"),
+    ]
+    agg = aggregate.connect(tmp_path / "agg.db")
+    exchange.import_package(agg, _package(tmp_path / "p.json", events,
+        {"installation_id": "INST-b", "member_binding_id": "MBR-B", "member_label": "B",
+         "member_evidence": "manual_confirmed", "member_confirmed_at": "x"}), team_id="t")
+    snap = aggregate.snapshot(agg, team_id="t")
+    agg.close()
+    # 周桶确实是整周 2 条（这是它天生的粒度）
+    w42 = [w for w in snap["weekly"] if w["week"].endswith("W42")]
+    assert w42 and w42[0]["events"] == 2
+    # 日粒度把两条事件分开，供"先过滤后重聚"（created 事件也计入其日期）
+    daily = {d["date"]: d["events"] for d in snap["daily"]}
+    assert daily["2026-10-12"] == 1 and daily["2026-10-16"] == 1
+    assert daily.get("2026-10-01") == 1
+    assert snap["daily_by_host"]["zcode"][0]["date"] in daily
+    # 页面同款算法：以 2026-10-22T12:00Z 为 now、近 7 天（按当天 00:00 判定）
+    # → 只剩 10-16，重聚后 W42=1，10-12 不再计入整周
+    from knowbase.value.aggregate import _week_key
+    from datetime import datetime, timezone
+    now = int(datetime(2026, 10, 22, 12, tzinfo=timezone.utc).timestamp())
+    cutoff = now - 7 * 86400
+    kept = [d for d in snap["daily"]
+            if datetime.fromisoformat(d["date"] + "T00:00:00+00:00").timestamp() >= cutoff]
+    weeks = {}
+    for d in kept:
+        key = _week_key(d["date"] + "T00:00:00+00:00")
+        weeks[f"{key[0]}-W{key[1]:02d}"] = weeks.get(f"{key[0]}-W{key[1]:02d}", 0) + d["events"]
+    assert weeks.get("2026-W42") == 1
+    assert "2026-W40" not in weeks  # 10-01（W40）同样被排除

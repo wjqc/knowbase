@@ -1,5 +1,7 @@
 # Claude Code 执行中接线
 
+> 当前本机已更新至 rc5：见 [最新接入、验证与回滚](latest-local.md)。下文 rc4/历史能力快照保留作为历史记录，当前配置以最新记录为准。
+
 合并到 `~/.claude/settings.json` 的 hooks，不覆盖现有事件和其他处理器：
 
 ```json

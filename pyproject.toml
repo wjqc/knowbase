@@ -1,6 +1,6 @@
 [project]
 name = "knowbase"
-version = "0.2.0rc4"
+version = "0.2.0rc5"
 description = "薪火：跨 Agent 共享的经验记忆库 MCP 服务（本地 markdown + git + SQLite FTS5）"
 requires-python = ">=3.10"
 dependencies = [

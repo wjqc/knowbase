@@ -922,3 +922,49 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - 修复 3（筛选联动）：仅本机/仅团队真正隐藏对应分区（此前只隐藏了团队标题的 bug 已修）；本机周趋势与"筛选态汇总"随时间/宿主筛选从内嵌明细重算（明细截断时显式标注"部分视图"，全窗口口径行保留并标注）；团队区时间筛选作用于周序列与证据时间线，汇总保持快照冻结口径并明示"换窗口需重新生成快照"。生成页脚本过 node --check。
 - 测试：新增 5 组回归（r1 反馈不串 r2、同名任务分离、覆盖率 0%、顶层/嵌套旁路拒绝、快照深层脱敏）。全套 471 passed, 1 skipped；compileall/diff-check 通过。
 - 如实边界：筛选联动的浏览器实测仍以评审人环境为准（本轮仅静态+语法校验+数据层断言）；任务身份未含跨机显式转交引用（方案 §5.3 受控任务引用待真实跨机样本再定格式）。
+
+## 2026-10-22 第三轮评审修复：use_id 回执匹配/任务运行来源/团队筛选按日期与宿主
+- 修复 1（伪造 use_id 串联）：汇总端登记实际消费回执集合（归属人,运行来源,任务,卡,版本,use_id，来自 referenced/adopted 事件）；feedback.recorded 必须命中其中一条才计入任务结论，未命中（如引用 MISSING-CONSUMPTION-RECEIPT）计入新字段 unlinked_feedback_events 单列。评审复现回归：helpful/agent_reported/feedback_covered 全 0、unlinked=1。
+- 修复 2（同成员跨安装同名任务合并）：任务身份升级三元组（归属人, 运行来源, task_id）——运行来源=会话 ID，缺会话退回安装实例；同一成员 ZCode/Claude 两安装/两会话的同名任务是两个任务运行，后者失败不改写前者结论（回归：adopted=2、helpful=1、conflicted=0、failed_excluded=1）。跨宿主任务合并仍待受控转交引用（方案 §5.3），未实现前一律不自动关联。汇总库 agg_events 增 session_id 列（aggregate 库内升级，个人 memory.db 迁移链不涉及——首轮误挂 v21 个人迁移已撤回）。
+- 修复 3（团队筛选）：快照新增 weekly_by_host 与 hosts（内核按宿主分列周序列，深层脱敏白名单同步扩展）；页面团队周趋势按"周实际日期"（ISO 周→周一日期）过滤所选天数窗口，并按宿主选择切换宿主序列——40 天前的数据在"近 7 天"下不再出现（为空时显示"窗口内无事件"而非零）；宿主下拉同时并入快照 hosts。脚本过 node --check。
+- 测试：新增 3 组回归（伪造 use_id 未关联、同成员双安装任务分离、weekly_by_host 生成+脱敏）。全套 474 passed, 1 skipped；compileall/diff-check 通过。
+- 边界不变：浏览器实测以评审环境为准；三宿主/三人跨机验收未执行；真实库与 runtime 未动。
+
+## 2026-10-22 第四轮评审修复：升级回填/事件粒度时间过滤/团队宿主下拉
+- 修复 1（旧汇总库断链）：aggregate.connect 补 session_id 列后从历史事件 payload_json 回填（WHERE session_id='' 批量 UPDATE）；评审复现回归——旧结构库升级后历史 used 回填 sess-old、新反馈原生带列，helpful_tasks=1、unlinked=0，升级前后关联一致；重复导入原事件仍 duplicate 不产生第二身份。
+- 修复 2（周起点漏事件）：周桶（含 weekly_by_host）新增 last=周内最近事件时间；页面时间筛选按 w.last 的实际事件时间过滤，不再用周一日期代替——6 天前落在上一周的事件在"近 7 天"下保留；深层脱敏白名单加 last。
+- 修复 3（团队宿主不可选）：宿主下拉改为 本机最近事件 ∪ 快照 hosts 一次性填充（顺带修复选项随筛选重复追加的隐患）；团队独有宿主可选并切换其周序列。
+- 测试：新增 3 组回归（旧库升级回填一致性、周桶 last 粒度、hosts 透出与合并逻辑）。全套 477 passed, 1 skipped；compileall/diff-check/node --check 通过。
+
+## 2026-10-22 第五轮评审修复：跨筛选边界周计数
+- 问题：周桶整体保留时展示整周计数——同一 ISO 周内 10 天前（范围外）+6 天前（范围内）事件显示 42W:2，应为 42W:1。
+- 修复：快照新增日粒度序列 daily / daily_by_host（内核计算，保留最近 370 天，深层脱敏白名单同步）；页面团队周趋势改为"先按事件日期过滤日粒度点，再按 ISO 周重聚"——跨边界周只计窗口内日期；旧快照无日粒度时退回周粒度 last 过滤并显式标注粒度降级。
+- 回归：混合边界场景锁定（10-12 与 10-16 同属 W42，now=10-22T12:00Z 近 7 天 → 重聚后 W42=1、W40 不出现；周桶本身仍如实为整周 2）。全套 478 passed, 1 skipped；compileall/diff-check/node --check 通过。
+# 2026-10-22 统计卡片与自动演进交付
+
+## 三宿主固定运行包接入更新（同日后续）
+- 构建 0.2.0rc5，wheel SHA256 364251318b8c…；60 个模块逐字节匹配工作区。安装于 ~/.knowbase/runtime/releases/rc5-364251318b8c/venv，使用 -I，依赖从本机 uv 缓存离线安装。
+- 备份 ~/.knowbase/backups/hosts-rc5-20261022-174641：六个配置路径、SQLite online backup、全局 AGENTS 与 Trae 旧规则/开关记录；原发行包保留。配置只合并 knowbase 相关入口，其他 MCP/权限保留。
+- ZCode 六类 Hook、Claude 七类（含 PreCompact/失败）、Trae 五类原生 Hook 更新。Trae 新增独立 style=trae，工具输出按官方 hookSpecificOutput，失败从 PostToolUse 结果识别；原生 UI 确认关闭 Claude 导入、开启自有 Hook、保留沙箱，全局规则保存并读回。
+- 开启 inflight.capture_enabled、value.events_enabled 与 evolution 当前策略；mode 维持 assisted，不追认三宿主真实模型消费已验收。全局 AGENTS 中旧“Trae 无 Hook/业务规则只待人审”条款已替换。
+- 源码全套 496 passed / 1 skipped；Trae/宿主/演进定向 28 passed；安装态 stdio 2 passed；三份实际 MCP 配置分别初始化/list_tools 成功，16 工具及 task_result/validation_candidates 已确认；18 个配置 Hook 命令隔离运行与输出封装通过。
+- 原库 schema20 正常，191 卡/25 feedback_log/2 knowledge_uses 保留；未终止现有任务、未向其他聊天发消息。旧会话 MCP 仍需重连；最新接入与回滚见 docs/hosts/latest-local-rc5.md。
+
+- 用户明确授权业务规则也按有效反馈自动晋升/淘汰。新增 evolution.py：3 个当前版本已完成独立任务、≥2 会话即可在同工具晋升；冲突阻止，2 个独立 not_helpful 或 incorrect/outdated 失效。旧两工具反馈兼容。
+- memory_context 有界提供验证候选；任务关联阅读后需显式 task_result 回填。普通阅读/失败结果不能晋升；业务规则自动激活共用反馈回执的原子移动/恢复读回，关闭开关不再递送验证候选。
+- 新增 overview.py、dashboard_view.py；dashboard.generate 改只读连接并只输出统计摘要。调用/状态/命中/更新/Token/净节省 6 卡，加四个分布区；缺失/无对照不填零，不嵌入正文/查询/任务明细。
+- 已将 /Users/qc/knowbase-dashboard.html 更新至约 11KB（原约 500KB），原版备份 ~/.knowbase/backups/dashboard-20261022-172801.html。设计稿 docs/design/knowbase-card-preview.html 为明确示例；实际输出读取本机统计。
+- Token 优先入账事件，缺失时只读 Claude 记录。重复请求的部分/最终累计用量合并，不首条冻结、不重复相加；bool/负数/非有限值拒绝。缓存与 knowbase 净节省分列。
+- 全套回归 492 passed / 1 skipped；随后补总开关关闭的候选递送测试与非有限前序字段防护，运行对应定向回归。UI 1440/1280/200% 无溢出，键盘 focus=scope，0 页面错误，0 外部请求。机械样式检测无发现。
+- 验证过程修正了新测试夹具缺少必填字段，以及保存提示保留正式目录；另一次测试命令引用不存在文件，已改为实际的 test_versioned_feedback.py。
+- 文档与独立知识已同步，knowledge 提交 fbc0cc7；未提交其他既有变更。未切换固定 runtime、未重启宿主、未批量追认历史反馈或激活真实规则；真实闭环待升级后验证。
+
+## 同日单版本运行约束落地
+- 用户明确要求永远只保留一个版本；部署路径统一 ~/.knowbase/runtime/venv/bin/python。复用当前版本与锁定依赖离线安装到唯一环境。
+- 更新5个宿主配置文件；关闭3个仍引用旧路径的 knowbase 服务连接，未关闭宿主/任务。移除6个旧运行目录、runtime/builds 和源码 build。只迁移保留其中的配置备份，不保留旧代码/依赖包。
+- 固定路径安装态stdio2项通过；三份实际MCP入口再次初始化/16工具验证。原库与其他MCP/权限保持。
+- 项目/全局AGENTS与最新接入文档已改为原地更新政策；新指南 docs/hosts/latest-local.md。配置备份 single-runtime-20261022-180225，数据库备份继续独立保留。
+
+## 2026-10-22 提交前验证：源码测试运行环境要求
+- 单版本运行时清理后，系统 python3（3.14）不再有 knowbase 安装副本；refresh 子进程以 `sys.executable -I -m knowbase` 运行，隔离模式不认 cwd 源码，导致 test_inflight_refresh/test_inflight_stdio 2 项环境性失败（子进程 exit 1，非代码回归）。
+- 源码全套需在带 editable 安装的 venv 中运行（如 `uv venv /tmp/kbtest-venv && uv pip install --offline -e ".[dev]"`）：pytest 导入 cwd 源码、`-I` 子进程经 editable 路径解析同一源码。本次验证 496 passed / 1 skipped，与 rc5 记录一致；固定运行时 venv（~/.knowbase/runtime）未改动。

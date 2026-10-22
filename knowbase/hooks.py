@@ -42,6 +42,8 @@ def session_start() -> str:
         "候选实际参考/采纳/无关/待验证时调用 memory_use，沿用实际 session_id/host_profile，"
         "context_event_id 指向返回该卡的检索event_id，并携带 id/content_revision；不要命中即helpful。\n"
         "已开启观察的会话可用 memory_capture(session_id,scope,host_profile) 直接抓取持久化增量，无需重新复制长原文。\n"
+        "业务规则 validation_candidates 仅供验证：带会话身份 memory_read，检查 provenance 与实际结果，"
+        "用 read_use_id 回填 task_result=completed/failed；服务按当前版本的独立证据自动晋升或淘汰。\n"
         "6. 提炼使用 memory_job_claim(protocol_version=2)，材料未读完用 memory_job_material 续页；"
         "候选注明 type/title/scope/八项 body/segment_ids/evidence_refs，业务规则含 provenance 和 rule_context；"
         "memory_job_submit 后核对 memory_id/保存状态，queued 和 accepted 不代表已成卡。"
@@ -349,7 +351,7 @@ def cmd_tool_event(style: str = "claude", event: str = "tool-after"):
         text = "[knowbase] 执行中处理失败：" + type(exc).__name__ + "；原任务可继续，知识处理尚未完成。"
     if not text:
         return
-    if style == "claude":
+    if style in ("claude", "trae"):
         external = {"tool-before": "PreToolUse", "tool-after": "PostToolUse", "tool-failure": "PostToolUseFailure"}[event]
         print(json.dumps({"hookSpecificOutput": {"hookEventName": external, "additionalContext": text}}, ensure_ascii=False))
     else:

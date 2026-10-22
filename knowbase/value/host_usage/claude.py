@@ -15,11 +15,11 @@ PROVIDER = "anthropic"
 
 
 def extract_records(base_path: str = DEFAULT_PATH):
-    """遍历 transcripts，产出用量记录 dict；同 message.id 去重（同文件内取首条）。"""
+    """遍历 transcripts，产出用量记录 dict；同 message.id 合并（同文件内累计字段取最大已观测值）。"""
     base = Path(base_path).expanduser()
     if not base.exists():
         return
-    seen: set[str] = set()
+    records: dict[str, dict] = {}
     for path in sorted(base.glob("*/*.jsonl")):
         try:
             handle = open(path, encoding="utf-8", errors="ignore")
@@ -41,10 +41,7 @@ def extract_records(base_path: str = DEFAULT_PATH):
                 if not request_id:
                     continue
                 dedupe_key = f"{path.name}:{request_id}"
-                if dedupe_key in seen:
-                    continue
-                seen.add(dedupe_key)
-                yield {
+                record = {
                     "source_file": path.name,
                     "session_id": str(entry.get("sessionId") or ""),
                     "request_id": request_id,
@@ -55,6 +52,21 @@ def extract_records(base_path: str = DEFAULT_PATH):
                     "cache_read_tokens": usage.get("cache_read_input_tokens"),
                     "cache_creation_tokens": usage.get("cache_creation_input_tokens"),
                 }
+
+                if dedupe_key not in records:
+                    records[dedupe_key] = record
+                else:
+                    # 同请求可能先落部分用量、后落最终累计值；不把首条冻结，也不相加。
+                    import math
+                    for field in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"):
+                        value = record.get(field)
+                        prior = records[dedupe_key].get(field)
+                        if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                                and math.isfinite(value) and value >= 0):
+                            valid_prior=(isinstance(prior,(int,float)) and not isinstance(prior,bool)
+                                         and math.isfinite(prior) and prior>=0)
+                            records[dedupe_key][field] = max(prior, value) if valid_prior else value
+    yield from records.values()
 
 
 def to_event_payload(record: dict) -> dict:

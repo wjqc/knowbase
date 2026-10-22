@@ -1,6 +1,6 @@
 # knowbase 价值事件协议 knowbase.value.events.v1
 
-状态：**H0 冻结基线**（2026-10-22，随[团队价值实施方案](knowbase-team-value-implementation-plan.md) §5–§7 形成）。V1 实现本地持久记录，A1 实现文件汇总，S1 可选服务沿用同一协议；与既有 `knowbase.metrics.v1` 并存，不合并口径、不相加。
+状态：**H0 冻结基线**（2026-10-22，随[团队价值实施方案](knowbase-team-value-implementation-plan.md) §5–§7 形成）。V1 实现本地持久记录，A1 实现文件汇总，S1 可选服务沿用同一协议；与既有 `knowbase.metrics.v1` 并存，不合并口径、不相加。汇总侧任务运行身份与反馈回执匹配口径已随评审修复明确（见下“文件汇总”节），事件字段本身未变。
 
 破坏性变更必须新增 schema 版本并保留共存窗口，所有启用实例确认前不下线旧版本（方案 §10.2）；接收端对未知 `schema_version` 明确拒绝，不静默忽略必需字段。
 
@@ -44,6 +44,9 @@
 - `knowbase value import <事件包>`：汇总机按事件 ID 幂等导入，冲突隔离；未确认身份保持未知。汇总库为独立 SQLite 分析库（知识 Git 仓库外），禁止导入他人事件进本机 `memory.db`。
 - 接收回执：导出成功≠已接收；汇总机导入后生成含事件 ID/哈希的接收回执，源端显式导入并核对后才置 acknowledged。
 - `knowbase value snapshot --output <快照>`：冻结时间窗与允许范围的最小看板快照；快照只带授权范围内的结果和证据摘要，不是完整原始事件包。解析前校验 schema、大小和类型，拒绝可执行内容与任意本地路径引用。
+- 汇总侧任务运行身份：（归属人, 运行来源, `task_id`）——运行来源优先 `session_id`，缺失回退安装实例；同成员跨安装/跨会话的同名 `task_id` 是不同任务运行。跨安装/跨宿主续接仍待受控任务引用（方案 §5.3），落地前不自动关联。旧汇总库导入时自动补 `agg_events.session_id` 列并从历史事件回填，升级前后身份关联一致。
+- `feedback.recorded` 计入任务结论前须命中同一任务运行的实际消费回执（`memory_id`＋`content_revision`＋`use_id` 的 referenced/adopted）；未命中的反馈单列 `unlinked_feedback_events`，不计入任何任务结论。
+- 快照同时输出周序列（`weekly`/`weekly_by_host`，带 `last`=周内最近事件时间）与日粒度序列（`daily`/`daily_by_host`，保留最近 370 天），并附 `hosts` 宿主清单；看板时间筛选优先按事件日期过滤日粒度后重聚 ISO 周（跨筛选边界的周不计范围外事件），旧快照无日粒度时退回周粒度 `last` 过滤并标注降级；宿主筛选切换对应宿主序列。
 - 事件包/快照经团队已有授权渠道传递；文件哈希仅校验完整性，不能认证人员。
 
 ## 可选服务模式（S1）

@@ -129,8 +129,11 @@ def validate_payload(event_type: str, payload: dict) -> None:
     if event_type == "feedback.recorded" and payload["feedback_source"] not in FEEDBACK_SOURCES:
         raise ValueError(f"invalid feedback_source: {payload['feedback_source']}")
     for key, value in payload.items():
-        if key.endswith("_tokens") and not isinstance(value, (int, float)):
-            raise ValueError(f"token field must be numeric: {key}")
+        if key.endswith("_tokens"):
+            import math
+            if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                    or not math.isfinite(value) or value < 0):
+                raise ValueError(f"token field must be finite and nonnegative: {key}")
 
 
 def build_event(event_type: str, payload: dict, *, host: str, session_id: str = "",

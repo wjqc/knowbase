@@ -272,7 +272,8 @@ def _sanitize_snapshot(snap: dict) -> dict:
     out["cross_member_reuse"] = _scalar_map(snap.get("cross_member_reuse"), {
         "available", "adopted_tasks", "cross_member_tasks", "unattributed_tasks",
         "feedback_covered_tasks", "helpful_tasks", "agent_reported_helpful_tasks",
-        "conflicted_tasks", "failed_excluded_tasks", "feedback_coverage", "reason", "note"})
+        "conflicted_tasks", "failed_excluded_tasks", "unlinked_feedback_events",
+        "feedback_coverage", "reason", "note"})
     cost = snap.get("cost") if isinstance(snap.get("cost"), dict) else {}
     by_model = {}
     for model, slot in (cost.get("by_model") or {}).items():
@@ -286,8 +287,21 @@ def _sanitize_snapshot(snap: dict) -> dict:
         "attribution": cost.get("attribution", "") if isinstance(cost.get("attribution"), str) else "",
         "currency": cost.get("currency", "") if isinstance(cost.get("currency"), str) else "",
         "reason": cost.get("reason", "") if isinstance(cost.get("reason"), str) else ""}
-    out["weekly"] = [_scalar_map(w, {"week", "events", "adopted", "feedback"})
+    out["weekly"] = [_scalar_map(w, {"week", "events", "adopted", "feedback", "last"})
                      for w in snap.get("weekly") or [] if isinstance(w, dict)]
+    out["weekly_by_host"] = {
+        host: [_scalar_map(w, {"week", "events", "adopted", "feedback", "last"})
+               for w in buckets if isinstance(w, dict)]
+        for host, buckets in (snap.get("weekly_by_host") or {}).items()
+        if isinstance(host, str) and isinstance(buckets, list)}
+    out["daily"] = [_scalar_map(d, {"date", "events", "adopted", "feedback"})
+                    for d in snap.get("daily") or [] if isinstance(d, dict)]
+    out["daily_by_host"] = {
+        host: [_scalar_map(d, {"date", "events", "adopted", "feedback"})
+               for d in days if isinstance(d, dict)]
+        for host, days in (snap.get("daily_by_host") or {}).items()
+        if isinstance(host, str) and isinstance(days, list)}
+    out["hosts"] = _scalar_list(snap.get("hosts"))
     out["sources"] = [_scalar_map(s, {"installation_id", "events", "first_event", "last_event"})
                       for s in snap.get("sources") or [] if isinstance(s, dict)]
     out["task_details"] = [_scalar_map(t, {"task_id", "owner", "memory_id", "state"})
@@ -297,7 +311,7 @@ def _sanitize_snapshot(snap: dict) -> dict:
         if not isinstance(entry, dict):
             continue
         out["reuse_evidence"].append({
-            **_scalar_map(entry, {"task_id", "owner", "consumer"}),
+            **_scalar_map(entry, {"task_id", "owner", "run", "consumer"}),
             "cards": [_scalar_map(c, {"memory_id", "contributor"})
                       for c in entry.get("cards") or [] if isinstance(c, dict)],
             "timeline": [_scalar_map(e, {"type", "at", "actor"})

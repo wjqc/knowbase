@@ -27,6 +27,9 @@ DEFAULTS = {
     "index": {"max_lines": 300, "vector_model": "char-ngram-v1", "dense_threshold": 0.25},
     "scope_map": {},
     "stats": {"enabled": True},
+    "dashboard": {"host_usage_source": "claude"},
+    "evolution": {"enabled": True, "auto_activate_bizrules": True,
+                  "min_helpful_tasks": 3, "min_sessions": 2, "retire_not_helpful_tasks": 2},
     "value": {"events_enabled": False, "aggregate_db": "~/.knowbase/value-aggregate.db"},
     "hooks": {"enabled": True, "inject_min_confidence": "verified"},
     "inflight": {

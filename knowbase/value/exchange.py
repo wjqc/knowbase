@@ -168,12 +168,13 @@ def _import_one(conn, team_id, item, event, imported_at) -> dict:
         return {"result": "duplicate" if existing[0] == item["payload_hash"] else "conflict"}
     conn.execute(
         "INSERT INTO agg_events(team_id,event_id,event_type,installation_id,member_binding_id,"
-        "host,task_id,occurred_at,payload_json,payload_hash,source_key,state,imported_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,'accepted',?)",
+        "host,task_id,occurred_at,session_id,payload_json,payload_hash,source_key,state,imported_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'accepted',?)",
         (team_id, event["event_id"], event["event_type"],
          str(event.get("installation_id", "")), str(event.get("member_binding_id", "")),
          str(event.get("host", "")), str(event.get("task_id", "")),
-         str(event.get("occurred_at", "")), json.dumps(event, ensure_ascii=False),
+         str(event.get("occurred_at", "")), str(event.get("session_id", "")),
+         json.dumps(event, ensure_ascii=False),
          item["payload_hash"], str(item.get("source_key", "")), imported_at))
     return {"result": "accepted"}
 

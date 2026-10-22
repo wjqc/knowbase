@@ -1,5 +1,7 @@
 # Trae 执行中接线
 
+> 当前本机已更新至 rc5：见 [最新接入、验证与回滚](latest-local.md)。下文 rc4/历史能力快照保留作为历史记录，当前配置以最新记录为准。
+
 宿主版本基线：Trae CN 3.3.103（`/Applications/Trae CN.app`，2026-10-22 取证）；IDE 形态，本机无 trae CLI。接入走两条路径，**MCP 必选**；Hook 待真实探针，通过前为辅助模式。
 
 ## MCP（已接线）
@@ -9,7 +11,7 @@ knowbase 服务已注册于用户级 `~/Library/Application Support/Trae CN/User
 ```json
 {
   "knowbase": {
-    "command": "/Users/qc/.knowbase/runtime/releases/ef4189a/venv/bin/python",
+    "command": "/Users/qc/.knowbase/runtime/venv/bin/python",
     "args": ["-I", "-m", "knowbase", "serve"],
     "env": {"KNOWBASE_AGENT_NAME": "trae"}
   }

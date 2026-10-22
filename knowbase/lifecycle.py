@@ -1,7 +1,9 @@
 """生命周期状态机：Agent 提交 evidence，服务端决定 state。
 
-once ──(本版本≥2 个任务结果 helpful 且来自 ≥2 个工具标签；或可信CLI人工确认)──▶ verified
+once/staging(bizrule) ──(本版本≥3 个已完成独立任务 helpful，≥2 个会话)──▶ verified
+旧反馈兼容：once 的无 task_result 反馈保留两工具标签晋升条件。
 verified ──(outdated / incorrect 反馈)──▶ stale
+active ──(≥2 个独立任务 not_helpful)──▶ stale
 stale ──(人工修订 + verify)──▶ verified
 any ──(人工 archive)──▶ archived
 """

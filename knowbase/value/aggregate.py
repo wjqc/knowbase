@@ -15,6 +15,7 @@ DEFINITION_VERSION = "value-metrics-v0"
 MAX_TASK_DETAIL = 500
 MAX_REUSE_EVIDENCE = 100
 MAX_WEEKLY_BUCKETS = 12
+MAX_DAILY_DAYS = 370
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS members(
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS agg_events(
   host TEXT NOT NULL DEFAULT '',
   task_id TEXT NOT NULL DEFAULT '',
   occurred_at TEXT NOT NULL DEFAULT '',
+  session_id TEXT NOT NULL DEFAULT '',
   payload_json TEXT NOT NULL,
   payload_hash TEXT NOT NULL,
   source_key TEXT NOT NULL DEFAULT '',
@@ -78,6 +80,22 @@ def connect(path) -> sqlite3.Connection:
         raise ValueError("IMPORT_TARGET_PERSONAL_DB：汇总库不能是个人 memory.db")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA)
+    # 旧汇总库补会话来源列（任务运行身份用；个人 memory.db 迁移链不涉及此表），
+    # 并从历史事件 JSON 回填 session_id——否则旧消费与新反馈的身份会断裂。
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(agg_events)").fetchall()}
+    if "session_id" not in columns:
+        conn.execute("ALTER TABLE agg_events ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
+    backfill = []
+    for rowid, payload_json in conn.execute(
+            "SELECT rowid, payload_json FROM agg_events WHERE session_id=''").fetchall():
+        try:
+            session = str((json.loads(payload_json) or {}).get("session_id", "") or "")
+        except ValueError:
+            continue
+        if session:
+            backfill.append((session, rowid))
+    if backfill:
+        conn.executemany("UPDATE agg_events SET session_id=? WHERE rowid=?", backfill)
     conn.commit()
     return conn
 
@@ -139,7 +157,7 @@ def snapshot(conn, *, team_id: str, since: str = "", until: str = "") -> dict:
         where += " AND occurred_at<?"
         params.append(until)
     rows = conn.execute(f"SELECT event_type,installation_id,member_binding_id,task_id,"
-                        f"occurred_at,payload_json FROM agg_events WHERE {where} "
+                        f"occurred_at,session_id,payload_json FROM agg_events WHERE {where} "
                         f"ORDER BY occurred_at,event_id", params).fetchall()
     by_type: dict[str, int] = {}
     delivered_tasks: set[str] = set()
@@ -154,6 +172,7 @@ def snapshot(conn, *, team_id: str, since: str = "", until: str = "") -> dict:
     usage_sources: set[str] = set()
     task_details: list[dict] = []
     binding_members: set[str] = set()
+    consumption_receipts: set[tuple] = set()
     sources: dict[str, dict] = {}
     watermark = ""
     mapping, _unknown = _member_keys(conn, team_id)
@@ -166,7 +185,12 @@ def snapshot(conn, *, team_id: str, since: str = "", until: str = "") -> dict:
         task_id 不合并（方案 §5.3：不按相近性合并跨宿主任务）。"""
         return key or (f"inst:{inst}" if inst else "unknown")
 
-    for event_type, inst, binding, task_id, occurred, payload_json in rows:
+    def run_source(session_id: str, inst: str) -> str:
+        """任务运行来源：会话优先，缺会话退回安装实例。同一成员跨安装/跨会话
+        的同名 task_id 是不同任务运行；受控转交引用落地前一律不自动关联。"""
+        return session_id or (f"inst:{inst}" if inst else "unknown")
+
+    for event_type, inst, binding, task_id, occurred, session_id, payload_json in rows:
         by_type[event_type] = by_type.get(event_type, 0) + 1
         key = member_key(inst, binding)
         if key:
@@ -178,7 +202,7 @@ def snapshot(conn, *, team_id: str, since: str = "", until: str = "") -> dict:
         src["last_event"] = max(src["last_event"], occurred)
         watermark = max(watermark, occurred)
         owner = owner_of(key, inst)
-        identity = (owner, task_id)
+        identity = (owner, run_source(session_id, inst), task_id)
         if task_id:
             entries = timeline_by_task.setdefault(identity, [])
             if len(entries) < 64:
@@ -193,8 +217,13 @@ def snapshot(conn, *, team_id: str, since: str = "", until: str = "") -> dict:
                     adopted_records.append((identity, task_id,
                                             payload.get("memory_id", ""),
                                             payload.get("content_revision", ""), key, owner))
-                if payload.get("state") in ("referenced", "adopted") and key:
-                    consumer_keys.add(key)
+                if payload.get("state") in ("referenced", "adopted"):
+                    # 实际消费回执登记：反馈必须命中其中一条（含 use_id）。
+                    consumption_receipts.add((identity, payload.get("memory_id", ""),
+                                              payload.get("content_revision", ""),
+                                              payload.get("use_id", "")))
+                    if key:
+                        consumer_keys.add(key)
                 if len(task_details) < MAX_TASK_DETAIL:
                     task_details.append({"task_id": task_id, "owner": owner,
                                          "memory_id": payload.get("memory_id", ""),
@@ -208,11 +237,12 @@ def snapshot(conn, *, team_id: str, since: str = "", until: str = "") -> dict:
             if payload.get("use_id"):
                 fb_task = payload.get("task_id") or task_id
                 if fb_task:
-                    # 反馈关联到（反馈人, 任务, 卡, 版本）完整消费身份：
-                    # 旧版本反馈不给新版本采纳计收益。
-                    feedback_records.append(((owner, fb_task),
+                    # 反馈关联到（归属人,运行来源,任务,卡,版本,use_id）完整消费
+                    # 身份：必须命中实际消费回执，否则按未关联单列不计入。
+                    feedback_records.append(((owner, run_source(session_id, inst), fb_task),
                                              payload.get("memory_id", ""),
                                              payload.get("content_revision", ""),
+                                             payload.get("use_id", ""),
                                              outcome, source_kind))
         elif event_type == "model.usage":
             payload = json.loads(payload_json).get("payload", {})
@@ -248,8 +278,8 @@ def snapshot(conn, *, team_id: str, since: str = "", until: str = "") -> dict:
         if card[0]:
             contributor_of[card] = member_key(inst, binding)
     task_result_of: dict[tuple, str] = {}
-    for result_inst, result_binding, result_payload in conn.execute(
-            "SELECT installation_id,member_binding_id,payload_json FROM agg_events "
+    for result_inst, result_binding, result_session, result_payload in conn.execute(
+            "SELECT installation_id,member_binding_id,session_id,payload_json FROM agg_events "
             "WHERE team_id=? AND state='accepted' "
             "AND event_type IN ('task.completed','task.abandoned') ORDER BY occurred_at,event_id",
             (team_id,)).fetchall():
@@ -257,7 +287,8 @@ def snapshot(conn, *, team_id: str, since: str = "", until: str = "") -> dict:
         task_id = payload.get("task_id", "")
         if task_id:
             owner = owner_of(member_key(result_inst, result_binding), result_inst)
-            task_result_of[(owner, task_id)] = payload.get("result", "unknown")
+            identity = (owner, run_source(result_session, result_inst), task_id)
+            task_result_of[identity] = payload.get("result", "unknown")
 
     roster = conn.execute("SELECT COUNT(*) FROM members").fetchone()[0]
     # 覆盖率分子＝有明确 referenced/adopted 的已确认成员（方案 §8.1 有效消费成员），
@@ -286,13 +317,17 @@ def snapshot(conn, *, team_id: str, since: str = "", until: str = "") -> dict:
         elif contributor != consumer:
             cross_member_tasks.add(identity)  # 任务按（归属人,task_id）去重，只计一次
             cross_member_cards.setdefault(identity, set()).add((mid, rev))
-    # 任务级有效性判定（方案 §8.1/T10）：反馈按（反馈人,任务,卡,版本）完整消费
-    # 身份关联——旧版本反馈不给新版本采纳计收益，同任务其他卡的反馈不串联；
-    # 来源冲突与任务失败不得产出"明确有帮助"。
+    # 任务级有效性判定（方案 §8.1/T10）：反馈按（归属人,运行来源,任务,卡,版本,
+    # use_id）完整消费身份关联——必须命中实际消费回执；未命中回执（伪造/漂移的
+    # use_id）按未关联单列，不计入任何任务结论。
     scoped_feedback: dict[tuple, list] = {}
-    for identity, mid, rev, outcome, source_kind in feedback_records:
-        if identity in cross_member_cards and (mid, rev) in cross_member_cards[identity]:
+    unlinked_feedback_events = 0
+    for identity, mid, rev, use_id, outcome, source_kind in feedback_records:
+        if (identity, mid, rev, use_id) in consumption_receipts and \
+                identity in cross_member_cards and (mid, rev) in cross_member_cards[identity]:
             scoped_feedback.setdefault(identity, []).append((outcome, source_kind))
+        elif (identity, mid, rev, use_id) not in consumption_receipts:
+            unlinked_feedback_events += 1
     verdicts = {"helpful": set(), "agent_reported": set(), "conflicted": set(),
                 "not_helpful": set(), "failed_excluded": set()}
     for identity in cross_member_tasks:
@@ -326,26 +361,62 @@ def snapshot(conn, *, team_id: str, since: str = "", until: str = "") -> dict:
                   "contributor": contributor_of.get((mid, rev)) or "unknown"}
                  for other, task_id2, mid, rev, consumer, owner in adopted_records
                  if other == identity and contributor_of.get((mid, rev))]
-        reuse_evidence.append({"task_id": identity[1], "owner": identity[0],
+        reuse_evidence.append({"task_id": identity[2], "owner": identity[0],
+                               "run": identity[1],
                                "consumer": consumer_of_task.get(identity, "unknown"),
                                "cards": cards,
                                "timeline": sorted(timeline_by_task.get(identity, []),
                                                   key=lambda e: e["at"])})
-    # 周趋势序列（内核计算，页面只渲染）
+    # 周趋势序列（内核计算，页面只渲染）；按宿主分列供筛选联动。
+    # 另存日粒度序列：页面先按事件日期过滤、再重聚为周——跨筛选边界的周
+    # 不会把范围外事件计入（周桶整体保留无法做到这一点）。
     weekly_buckets: dict[tuple, dict] = {}
-    for event_type, _inst, _binding, task_id, occurred, payload_json in rows:
+    weekly_by_host: dict[str, dict[tuple, dict]] = {}
+    daily_buckets: dict[str, dict] = {}
+    daily_by_host: dict[str, dict[str, dict]] = {}
+    host_names: set[str] = set()
+    for event_type, _inst, _binding, _task_id, occurred, _session, payload_json, host in conn.execute(
+            f"SELECT event_type,installation_id,member_binding_id,task_id,occurred_at,"
+            f"session_id,payload_json,host FROM agg_events WHERE {where} "
+            f"ORDER BY occurred_at,event_id", params).fetchall():
         key = _week_key(occurred)
         if not key:
             continue
-        slot = weekly_buckets.setdefault(key, {"week": f"{key[0]}-W{key[1]:02d}",
-                                               "events": 0, "adopted": 0, "feedback": 0})
+        label = f"{key[0]}-W{key[1]:02d}"
+        adopted = event_type == "knowledge.used" and \
+            json.loads(payload_json).get("payload", {}).get("state") == "adopted"
+        is_feedback = event_type == "feedback.recorded"
+        slot = weekly_buckets.setdefault(key, {"week": label, "events": 0,
+                                               "adopted": 0, "feedback": 0, "last": occurred})
         slot["events"] += 1
-        if event_type == "knowledge.used" and \
-                json.loads(payload_json).get("payload", {}).get("state") == "adopted":
-            slot["adopted"] += 1
-        elif event_type == "feedback.recorded":
-            slot["feedback"] += 1
+        slot["adopted"] += int(adopted)
+        slot["feedback"] += int(is_feedback)
+        slot["last"] = max(slot["last"], occurred)
+        day = occurred[:10]
+        dslot = daily_buckets.setdefault(day, {"date": day, "events": 0,
+                                               "adopted": 0, "feedback": 0})
+        dslot["events"] += 1
+        dslot["adopted"] += int(adopted)
+        dslot["feedback"] += int(is_feedback)
+        if host:
+            host_names.add(host)
+            hslot = weekly_by_host.setdefault(host, {}).setdefault(
+                key, {"week": label, "events": 0, "adopted": 0, "feedback": 0, "last": occurred})
+            hslot["events"] += 1
+            hslot["adopted"] += int(adopted)
+            hslot["feedback"] += int(is_feedback)
+            hslot["last"] = max(hslot["last"], occurred)
+            hdslot = daily_by_host.setdefault(host, {}).setdefault(
+                day, {"date": day, "events": 0, "adopted": 0, "feedback": 0})
+            hdslot["events"] += 1
+            hdslot["adopted"] += int(adopted)
+            hdslot["feedback"] += int(is_feedback)
     weekly = [weekly_buckets[k] for k in sorted(weekly_buckets)][-MAX_WEEKLY_BUCKETS:]
+    weekly_by_host = {h: [buckets[k] for k in sorted(buckets)][-MAX_WEEKLY_BUCKETS:]
+                      for h, buckets in weekly_by_host.items()}
+    daily = [daily_buckets[d] for d in sorted(daily_buckets)][-MAX_DAILY_DAYS:]
+    daily_by_host = {h: [buckets[d] for d in sorted(buckets)][-MAX_DAILY_DAYS:]
+                     for h, buckets in daily_by_host.items()}
     if contributor_of:
         cross_member_reuse = {
             "available": True,
@@ -357,10 +428,12 @@ def snapshot(conn, *, team_id: str, since: str = "", until: str = "") -> dict:
             "agent_reported_helpful_tasks": len(verdicts["agent_reported"]),
             "conflicted_tasks": len(verdicts["conflicted"]),
             "failed_excluded_tasks": len(verdicts["failed_excluded"]),
+            "unlinked_feedback_events": unlinked_feedback_events,
             "feedback_coverage": round(len(feedback_covered) / len(cross_member_tasks), 4)
             if cross_member_tasks else None,
-            "note": "明确有帮助=正向反馈且无反馈权威冲突、任务未失败；仅统计该任务跨成员"
-                    "采纳卡的反馈；Agent 单独声称单列（agent_reported），不与用户确认混算",
+            "note": "明确有帮助=正向反馈且无反馈权威冲突、任务未失败；反馈须命中该任务"
+                    "跨成员采纳卡的实际消费回执（含 use_id），未命中回执按未关联单列；"
+                    "Agent 单独声称单列（agent_reported），不与用户确认混算",
         }
     else:
         cross_member_reuse = {"available": False,
@@ -400,6 +473,10 @@ def snapshot(conn, *, team_id: str, since: str = "", until: str = "") -> dict:
         "cross_member_reuse": cross_member_reuse,
         "cost": cost,
         "weekly": weekly,
+        "weekly_by_host": weekly_by_host,
+        "daily": daily,
+        "daily_by_host": daily_by_host,
+        "hosts": sorted(host_names),
         "reuse_evidence": reuse_evidence,
         "reuse_evidence_truncated": len(cross_member_tasks) > MAX_REUSE_EVIDENCE,
         "sources": sorted(sources.values(), key=lambda s: -s["events"]),

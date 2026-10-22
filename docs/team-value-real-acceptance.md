@@ -17,7 +17,7 @@
 2. **阶段切换 ≥2 次**：核对主题增量——新主题补检索、同任务/同知识版本命中签名缓存不重复查询（`coverage_summary.queries_completed` 只增不重）。
 3. **触发一次错误**：核对 `new_failure` 检索使用归一化错误特征（时间戳/ANSI/十六进制已脱敏为 `<volatile>`）、knowbase 自身调用被排除、无跨项目召回。
 4. **长材料增量沉淀**：capture → claim(protocol_version=2) → material 续页读完 → submit；核对后半段关键规则被提炼、例外条款进入"不适用条件"、预算不足显示 partial 不假完成（`coverage_summary.queries_pending`>0 时不得宣称完整）。
-5. **消费与反馈**：候选递送 → `memory_use(referenced/adopted)` → 任务结果验证后 `memory_feedback`（携带 expected_content_revision/use_id/task_outcome_id）；Agent 声明与用户反馈分开记录。
+5. **消费与反馈**：候选递送 → `memory_use(referenced/adopted)` → 任务结果验证后 `memory_feedback`（携带 expected_content_revision/use_id/task_outcome_id）；`use_id` 须来自本任务运行的 `memory_use` 回执（团队汇总端校验命中，未命中不计入任务结论）；Agent 声明与用户反馈分开记录。
 6. **读回与治理**：新卡带完整身份读回；bizrule/standard 保持 staging 待人工 promote，Agent 不直接生效。
 7. **证据留存**：`context_events`/`knowledge_uses`/`feedback_events` 落库记录 + 人工预期核对表；启用 `value.events_enabled` 的成员同时产生 `value_outbox` 事件（V1，默认关闭）。
 

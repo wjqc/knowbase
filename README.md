@@ -162,7 +162,7 @@ code_refs:
 | `knowbase stats` | 数量分布 / 使用漏斗 / TOP |
 | `knowbase list [type]` | 列出记忆（含 staging 标注） |
 | `knowbase history [--limit N]` | 最近搜索命中记录（JSON） |
-| `knowbase dashboard [--output <文件>] [--open]` | 生成 HTML 治理看板（静态快照，重跑即刷新） |
+| `knowbase dashboard [--output <文件>] [--open]` | 生成离线统计卡片：调用、知识状态、命中、更新、Token 和自动演进；只读业务库 |
 | `knowbase doctor [--json]` | 健康检查：索引一致性 / 同步 / Git / 解析器 |
 | `knowbase alerts [--dry-run]` | 输出异常状态，供调度器通知 |
 
@@ -183,10 +183,10 @@ code_refs:
 | `knowbase value snapshot --output <快照> --agg-db <库>` | 从汇总库生成最小团队快照（指标、来源覆盖、数据水位；覆盖率分母仅认登记名单） |
 | `knowbase value usage [--source claude\|zcode\|trae] [--path <目录>]` | 提取本机宿主请求级用量为 model.usage 事件（当前仅 claude transcripts 支持，不采对话正文；zcode/trae 明确 not_supported 不估算） |
 | `knowbase value report --output <报告> [--agg-db <库>] [--personal]` | 确定性生成周/月 Markdown 报告（无模型润色，数值与证据等级不可改写） |
-| `knowbase dashboard --team-data <快照>` | 原看板追加价值分区（本机事件窗口/采集健康/团队快照），个人与团队范围分开标注不相加 |
+| `knowbase dashboard --team-data <快照>` | 本机/团队统计卡片切换；不嵌入原始查询、知识正文或任务明细，缺失指标保留未知 |
 | `knowbase value register-member / confirm-member` | 登记团队成员名单 / 人工确认安装实例归属（归并一人多宿主） |
 
-协议与口径见[价值事件协议](docs/value-events-protocol.md)；导出成功≠已接收，以回执核对为准。
+协议与口径见[价值事件协议](docs/value-events-protocol.md)；导出成功≠已接收，以回执核对为准。汇总侧任务按（归属人, 运行来源＝会话优先/安装实例回退, task_id）区分运行，同名任务不跨安装/会话合并；反馈计入任务结论前须命中实际消费回执（含 use_id），未命中单列 `unlinked_feedback_events`。
 
 ## 已知边界（诚实版）
 

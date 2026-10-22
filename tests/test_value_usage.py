@@ -90,6 +90,25 @@ def test_zcode_trae_usage_explicitly_unsupported(memory_repo, capsys):
         assert out["status"] == "not_supported" and out["source"] == source
 
 
+def test_repeated_request_merges_partial_usage_without_double_count(tmp_path):
+    from knowbase.value.host_usage.claude import extract_records
+    first=json.loads(json.dumps(USAGE_LINE));last=json.loads(json.dumps(USAGE_LINE))
+    first['message']['usage']['output_tokens']=0
+    last['message']['usage']['output_tokens']=240
+    make_transcript(tmp_path,lines=[first,last,last])
+    records=list(extract_records(str(tmp_path)))
+    assert len(records)==1 and records[0]['output_tokens']==240
+    assert records[0]['input_tokens']==100
+
+
+def test_token_values_reject_boolean_negative_and_nonfinite():
+    import pytest
+    for value in [True,-1,float('nan'),float('inf')]:
+        with pytest.raises(ValueError):
+            vevents.build_event('model.usage',{'usage_source':'fixture','session_id':'s',
+                                            'input_tokens':value},host='fixture')
+
+
 def test_aggregate_cost_and_reconciliation(memory_repo, tmp_path):
     enable_events()
     second = dict(USAGE_LINE)

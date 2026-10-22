@@ -1,5 +1,7 @@
 # ZCode 执行中接线
 
+> 当前本机已更新至 rc5：见 [最新接入、验证与回滚](latest-local.md)。下文 rc4/历史能力快照保留作为历史记录，当前配置以最新记录为准。
+
 以下对象合并到用户级 `~/.zcode/cli/config.json` 的 `hooks.events`，保持 hooks.enabled=true，不覆盖现有 SessionStart/UserPromptSubmit/Stop 和其他插件。替换 Python 路径为本机 knowbase 虚拟环境。
 
 ```json

@@ -819,7 +819,7 @@ def _main(argv=None):
                           help="不实际派发 webhook/文件，仅 stdout 打印事件清单")
     p_hook = sub.add_parser("hook", help="Agent hook 入口")
     p_hook.add_argument("event", choices=["session-start", "user-prompt", "stop", "tool-before", "tool-after", "tool-failure", "before-compact"])
-    p_hook.add_argument("--style", choices=["claude", "zcode"], default="claude")
+    p_hook.add_argument("--style", choices=["claude", "zcode", "trae"], default="claude")
     p_imp = sub.add_parser("import", help="批量导入为 source artifact（不产生知识卡、不进默认检索）")
     p_imp.add_argument("directory")
     p_imp.add_argument("--type", choices=store.TYPES, default="pitfall",

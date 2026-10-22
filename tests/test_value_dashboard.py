@@ -1,6 +1,7 @@
 """V3 dashboard 增强：本机价值分区、采集健康、团队快照分区、确定性报告。"""
 
 import json
+import pathlib
 
 from knowbase import config, index
 from knowbase.__main__ import main
@@ -37,33 +38,18 @@ def produce_events(repo):
     return mid, revision, use
 
 
-def test_dashboard_local_sections_distinguish_zero_unknown_disabled(memory_repo, tmp_path):
-    out = tmp_path / "dash.html"
-    assert main(["dashboard", "--output", str(out)]) == 0  # 原命令兼容
-    html = out.read_text()
-    assert "价值与使用" in html and "采集健康（本机）" in html
-    assert 'id="v-time"' in html and 'id="v-host"' in html and 'id="v-scope"' in html
-    assert "团队快照" in html and "未提供团队快照：仅展示本机数据" in html
-    data = json.loads(html.split('<script type="application/json" id="data">')[1]
-                      .split("</script>")[0].replace("\\u003c", "<").replace("\\u003e", ">")
-                      .replace("\\u0026", "&"))
-    personal = data["value"]["personal"]
-    assert personal["events_enabled"] is False and personal["outbox"]["total"] == 0
-    assert personal["identity"]["member_label"] == ""  # 未确认成员：不冒充
-
-    enable_events()
-    produce_events(memory_repo)
-    assert main(["dashboard", "--output", str(out)]) == 0
-    html = out.read_text()
-    data = json.loads(html.split('<script type="application/json" id="data">')[1]
-                      .split("</script>")[0].replace("\\u003c", "<").replace("\\u003e", ">")
-                      .replace("\\u0026", "&"))
-    personal = data["value"]["personal"]
-    assert personal["events_enabled"] is True
-    assert personal["outbox"]["by_type"].get("knowledge.created") == 1
-    assert personal["outbox"]["by_type"].get("knowledge.used") == 1
-    assert personal["uses"]["adopted_tasks"] == 1
-    assert personal["identity"]["installation_id"].startswith("INST-")
+def test_dashboard_local_sections_distinguish_zero_unknown_disabled(memory_repo, tmp_path, monkeypatch):
+    from knowbase import dashboard
+    monkeypatch.setattr(config, "load_config", lambda: {"dashboard": {"host_usage_source": "none"}})
+    out=tmp_path / "dash.html"
+    dashboard.generate(memory_repo,out)
+    html=out.read_text()
+    data=json.loads(html.split('<script type="application/json" id="data">')[1].split('</script>')[0])
+    local=data["overview"]["local"]
+    assert local["knowledge_total"]==0 and local["calls"]==0
+    assert local["usage"]["total"] is None and local["usage"]["saved_tokens"] is None
+    assert "Token 净节省" in html and "知识状态" in html and "自动演进" in html
+    assert '<table' not in html and 'data["items"]' not in html
 
 
 def _telemetry_rows(repo):
@@ -75,42 +61,20 @@ def _telemetry_rows(repo):
 
 
 def test_team_snapshot_validation_and_rendering(memory_repo, tmp_path):
-    enable_events()
-    produce_events(memory_repo)
-    # 生成真实团队快照
+    enable_events(); produce_events(memory_repo)
     from knowbase.value import exchange
-    pkg = tmp_path / "pkg.json"
-    exchange.export_events(memory_repo, pkg)
-    agg_db = tmp_path / "agg.db"
-    agg = aggregate.connect(agg_db)
-    exchange.import_package(agg, pkg, team_id="team-1")
-    snap = aggregate.snapshot(agg, team_id="team-1")
-    agg.close()
-    snap_path = tmp_path / "snap.json"
-    snap_path.write_text(json.dumps(snap, ensure_ascii=False))
-
-    out = tmp_path / "dash-team.html"
-    assert main(["dashboard", "--output", str(out), "--team-data", str(snap_path)]) == 0
-    data = json.loads(out.read_text().split('<script type="application/json" id="data">')[1]
-                      .split("</script>")[0].replace("\\u003c", "<").replace("\\u003e", ">")
-                      .replace("\\u0026", "&"))
-    team = data["value"]["team"]
-    assert team["team_id"] == "team-1" and team["counts"]["events_total"] >= 2
-    # 团队与个人分区并存且范围分开标注
-    assert data["value"]["personal"]["schema"] == value_report.SUMMARY_SCHEMA
-    # 未知顶层键被裁剪，不进入页面数据
-    dirty = json.loads(snap_path.read_text())
-    dirty["evil_key"] = "<b>inject</b>"
-    dirty_path = tmp_path / "snap-dirty.json"
-    dirty_path.write_text(json.dumps(dirty))
-    loaded = value_report.load_team_snapshot(dirty_path)
-    assert "evil_key" not in loaded
-
-    # schema 不符拒绝，rc=2，不生成
-    bad = tmp_path / "snap-bad.json"
-    bad.write_text(json.dumps({"schema": "knowbase.value.snapshot.v999"}))
-    assert main(["dashboard", "--output", str(tmp_path / "no.html"), "--team-data", str(bad)]) == 2
-    assert not (tmp_path / "no.html").exists()
+    pkg=tmp_path / "pkg.json"; exchange.export_events(memory_repo,pkg)
+    conn=aggregate.connect(tmp_path / "agg.db"); exchange.import_package(conn,pkg,team_id="team-1")
+    snap=aggregate.snapshot(conn,team_id="team-1"); conn.close()
+    sp=tmp_path / "snap.json"; sp.write_text(json.dumps(snap));out=tmp_path / "dash.html"
+    assert main(["dashboard","--output",str(out),"--team-data",str(sp)])==0
+    data=json.loads(out.read_text().split('<script type="application/json" id="data">')[1].split('</script>')[0])
+    team=data["overview"]["team"]
+    assert team["scope"]=="团队" and team["calls"] is None and team["knowledge_total"] is None
+    assert team["events"]==snap["counts"]["events_total"]
+    sp.write_text('{"schema":"unsupported"}')
+    assert main(["dashboard","--output",str(tmp_path / "bad.html"),"--team-data",str(sp)])==2
+    assert not (tmp_path / "bad.html").exists()
 
 
 def test_report_deterministic_markdown(memory_repo, tmp_path):
@@ -132,70 +96,25 @@ def test_report_deterministic_markdown(memory_repo, tmp_path):
 
 
 def test_team_output_excludes_local_search_history(memory_repo, tmp_path):
-    enable_events()
-    produce_events(memory_repo)
-    # 制造含私密查询的本机搜索历史
-    conn = index.connect(memory_repo)
-    index.record_search(conn, "PRIVATE_QUERY_7C2A 客户名单", "orders", [], tool="auto_search")
-    conn.commit()
-    conn.close()
-    snap = {"schema": "knowbase.value.snapshot.v1", "team_id": "t", "window": {"since": "", "until": ""},
-            "counts": {"events_total": 1, "events_by_type": {"knowledge.used": 1}},
-            "members": {"observed": 1, "effective_consumers": 1, "roster_size": None,
-                        "coverage": None, "coverage_known": False},
-            "tasks": {"delivered": 1, "adopted": 1, "adoption_rate": 1.0},
-            "feedback": {}, "cross_member_reuse": {"available": False, "reason": "x"},
-            "sources": [], "task_details": [], "task_details_truncated": False,
-            "limitations": [], "generated_at": "2026-10-22T00:00:00+00:00",
-            "data_watermark": {"max_event_time": "", "max_import_time": ""}}
-    snap_path = tmp_path / "snap.json"
-    snap_path.write_text(json.dumps(snap))
-    team_out = tmp_path / "team.html"
-    assert main(["dashboard", "--output", str(team_out), "--team-data", str(snap_path)]) == 0
-    team_html = team_out.read_text()
-    assert "PRIVATE_QUERY_7C2A" not in team_html
-    assert "团队分享输出不嵌入本机搜索原文" in team_html
-    # 本地模式（不带 --team-data）保留搜索原文
-    local_out = tmp_path / "local.html"
-    assert main(["dashboard", "--output", str(local_out)]) == 0
-    assert "PRIVATE_QUERY_7C2A" in local_out.read_text()
+    from knowbase import dashboard
+    conn=index.connect(memory_repo)
+    index.record_search(conn,"PRIVATE_QUERY_CUSTOMER", "orders", [], tool="auto_search")
+    conn.commit();conn.close()
+    for snap in [None,{"counts":{},"members":{},"cost":{}}]:
+        out=tmp_path / ("local.html" if snap is None else "team.html")
+        dashboard.generate(memory_repo,out,team_snapshot=snap)
+        assert "PRIVATE_QUERY_CUSTOMER" not in out.read_text()
 
 
-def test_v3_value_controls_trend_and_evidence_timeline(memory_repo, tmp_path):
-    enable_events()
-    produce_events(memory_repo)
-    # 团队快照（含复用证据链）
-    from knowbase.value import exchange
-    pkg = tmp_path / "pkg.json"
-    exchange.export_events(memory_repo, pkg)
-    agg = aggregate.connect(tmp_path / "agg.db")
-    exchange.import_package(agg, pkg, team_id="t")
-    snap = aggregate.snapshot(agg, team_id="t")
-    agg.close()
-    snap_path = tmp_path / "snap.json"
-    snap_path.write_text(json.dumps(snap))
-    out = tmp_path / "dash.html"
-    assert main(["dashboard", "--output", str(out), "--team-data", str(snap_path)]) == 0
-    html = out.read_text()
-    # 联动筛选控件存在
-    for control in ('id="v-time"', 'id="v-host"', 'id="v-scope"'):
-        assert control in html
-    data = json.loads(html.split('<script type="application/json" id="data">')[1]
-                      .split("</script>")[0].replace("\\u003c", "<").replace("\\u003e", ">")
-                      .replace("\\u0026", "&"))
-    personal = data["value"]["personal"]
-    # 周趋势序列（内核计算）+ 最近事件明细（有界）
-    assert personal["weekly"] and personal["weekly"][0]["events"] >= 1
-    assert personal["recent_events"]["events"] and not personal["recent_events"]["truncated"]
-    kinds = {e["event_type"] for e in personal["recent_events"]["events"]}
-    assert "knowledge.used" in kinds
-    # 团队快照带周序列与证据链结构
-    team = data["value"]["team"]
-    assert team["weekly"] and "week" in team["weekly"][0]
-    assert isinstance(team["reuse_evidence"], list)
-    assert team["reuse_evidence_truncated"] is False
-    # 单成员本机自采自用：无跨成员任务 → 证据链为空但不缺失字段
-    assert team["reuse_evidence"] == []
+def test_card_overview_retains_counts_without_task_detail(memory_repo, tmp_path):
+    from knowbase import dashboard
+    enable_events();produce_events(memory_repo)
+    out=tmp_path / "cards.html";dashboard.generate(memory_repo,out)
+    html=out.read_text();data=json.loads(html.split('<script type="application/json" id="data">')[1].split('</script>')[0])
+    assert data["overview"]["local"]["knowledge_total"]==1
+    assert 'id="scope"' in html and 'id="metrics"' in html
+    assert "recent_events" not in data and "value" not in data and "history" not in data
+    assert "<table" not in html
 
 
 def test_snapshot_deep_sanitize_strips_nested_smuggling():
@@ -232,3 +151,56 @@ def test_snapshot_deep_sanitize_strips_nested_smuggling():
     assert loaded["reuse_evidence"][0]["timeline"] == [{"type": "used", "at": "x", "actor": "B"}]
     assert loaded["limitations"] == ["ok"]
     assert loaded["cost"]["by_model"]["m"]["input_tokens"] is None
+
+
+def test_team_weekly_by_host_in_snapshot_and_sanitized():
+    from knowbase.value import aggregate as agg_mod
+    import tempfile
+    # 汇总库直接造两宿主的周数据，验证 weekly_by_host 生成与深层脱敏
+    with tempfile.TemporaryDirectory() as d:
+        db = pathlib.Path(d) / "agg.db"
+        conn = agg_mod.connect(db)
+        conn.execute("INSERT INTO members(member_id,display_label,confirmed_at,note) "
+                     "VALUES('M1','A','','')")
+        conn.commit()
+        for host, week_date in (("zcode", "2026-10-20T00:00:00+00:00"),
+                                ("claude-code", "2026-09-15T00:00:00+00:00")):
+            event = {"event_id": f"VE-{host}", "schema_version": "knowbase.value.events.v1",
+                     "event_type": "knowledge.used", "host": host,
+                     "occurred_at": week_date, "session_id": "s",
+                     "payload": {"memory_id": "P", "content_revision": "r",
+                                 "context_event_id": "c", "use_id": "u",
+                                 "state": "adopted", "task_id": "t", "scope": "o"}}
+            import hashlib
+            payload_json = json.dumps(event, sort_keys=True, ensure_ascii=False,
+                                       separators=(",", ":"))
+            conn.execute(
+                "INSERT INTO agg_events(team_id,event_id,event_type,occurred_at,session_id,"
+                "host,payload_json,payload_hash,imported_at) VALUES('t',?,?,?,?,?,?,?,?)",
+                (event["event_id"], "knowledge.used", week_date, "s", host,
+                 json.dumps(event), hashlib.sha256(payload_json.encode()).hexdigest(),
+                 week_date))
+        conn.commit()
+        snap = agg_mod.snapshot(conn, team_id="t")
+        conn.close()
+        assert set(snap["weekly_by_host"]) == {"zcode", "claude-code"}
+        assert snap["hosts"] == ["claude-code", "zcode"]
+        # 深层脱敏：weekly_by_host 只保留周标量字段
+        snap_path = pathlib.Path(d) / "snap.json"
+        snap["weekly_by_host"]["zcode"][0]["raw_query"] = "PRIVATE"
+        snap_path.write_text(json.dumps(snap))
+        from knowbase.value.report import load_team_snapshot
+        loaded = load_team_snapshot(snap_path)
+        assert "PRIVATE" not in json.dumps(loaded)
+        assert loaded["weekly_by_host"]["zcode"][0].get("events") == 1
+
+
+def test_team_cards_do_not_embed_host_or_task_details(memory_repo, tmp_path):
+    from knowbase import dashboard
+    snap={"counts":{"events_total":2,"events_by_type":{"knowledge.revised":1}},
+          "hosts":["PRIVATE_HOST"],"task_details":[{"task_id":"PRIVATE_TASK"}],
+          "cost":{"available":False},"members":{},"cross_member_reuse":{}}
+    out=tmp_path / "team.html";dashboard.generate(memory_repo,out,team_snapshot=snap)
+    html=out.read_text();assert "PRIVATE_HOST" not in html and "PRIVATE_TASK" not in html
+    data=json.loads(html.split('<script type="application/json" id="data">')[1].split('</script>')[0])
+    assert data["overview"]["team"]["updates"]==1

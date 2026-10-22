@@ -31,6 +31,13 @@ def _finish(repo,conn,row,*,replaying):
     if current!=after:
         from .commit_adapter import _atomic_write
         _atomic_write(path,store.render(saved,body))
+    if result.get("auto_activation"):
+        target = store.mem_path(repo, saved["type"], mid)
+        if path != target:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                return {"error":"ACTIVATION_TARGET_CONFLICT","receipt_id":receipt}
+            path.replace(target)  # 同库原子移动；崩溃后 store.load 可从正式目录恢复。
     reread,rbody,rpath=store.load(repo,mid)
     if not reread or _file_hash(reread,rbody)!=after:
         return {"error":"FEEDBACK_READBACK_FAILED","receipt_id":receipt}
@@ -60,6 +67,12 @@ def _finish(repo,conn,row,*,replaying):
             task_id=fb_task_id,installation_id=installation,
             member_binding_id=ident["member_binding_id"])
         value_event=_vo.append(conn,event,source_key=f"feedback_events:{receipt}")
+        if result.get("auto_activation"):
+            _ve.record(conn,"knowledge.activated",
+                       {"memory_id":mid,"content_revision":result["content_revision"],
+                        "scope":reread.get("scope","")},
+                       source_key=f"knowledge:{mid}:{result['content_revision']}:auto_activated",
+                       host=host,session_id=session_id,task_id=fb_task_id)
     conn.commit()
     out={**result,"idempotent":replaying}
     if value_event is not None:
@@ -92,7 +105,8 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
     bound=bool(use_id and task_outcome_id and expected_content_revision)
     if any((use_id,task_outcome_id,expected_content_revision)) and not bound:
         return {"error":"INCOMPLETE_FEEDBACK_BINDING"}
-    phash=materials.digest([mid,outcome,by,expected_content_revision,use_id,task_outcome_id])
+    phash=materials.digest([mid,outcome,by,expected_content_revision,use_id,task_outcome_id,
+                           task_result,verification_source])
     with RepoLock(repo,lock_timeout):
         if request_id:
             prior=conn.execute("SELECT payload_hash,receipt_id FROM feedback_requests WHERE request_id=?",(request_id,)).fetchone()
@@ -105,7 +119,7 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
         if bound:
             use=conn.execute("SELECT host_profile,session_id,task_id,task_revision,memory_id,content_revision,state "
                              "FROM knowledge_uses WHERE use_id=?",(use_id,)).fetchone()
-            if not use or use[4]!=mid or use[5]!=expected_content_revision or use[6] not in ("adopted","referenced"):
+            if not use or use[4]!=mid or use[5]!=expected_content_revision or use[6] not in ("adopted","referenced","read"):
                 return {"error":"VALIDATED_USE_REQUIRED"}
             task_key=materials.digest(list(use[:4]))
             prior=conn.execute("SELECT outcome FROM feedback_events WHERE memory_id=? AND content_revision=? "
@@ -130,16 +144,31 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
         meta,body,path=store.load(repo,mid)
         if not meta:
             return {"error":"not_found"}
+        policy=config.load_config().get("evolution",{})
+        staged=path.parent.name=="staging"
+        validation=bool(bound and use[6]=="read" and meta.get("type")=="bizrule"
+                        and policy.get("enabled",True) and policy.get("auto_activate_bizrules",True)
+                        and task_result in ("completed","failed"))
+        if bound and use[6]=="read" and not validation:
+            return {"error":"VALIDATION_RESULT_REQUIRED"}
+        if validation and outcome=="helpful" and task_result!="completed":
+            return {"error":"VALIDATION_NOT_COMPLETED"}
         current=_compute_revision(meta,body)
         gov=_compute_governance_revision(meta)
         if expected_content_revision and current!=expected_content_revision:
             return {"error":"REVISION_CONFLICT","current_content_revision":current}
         if expected_governance_revision and gov!=expected_governance_revision:
             return {"error":"REVISION_CONFLICT","current_governance_revision":gov}
-        if bound and (path.parent.name=="staging" or meta.get("status")=="archived"):
+        if bound and ((staged and not validation) or meta.get("status")=="archived"):
             return {"error":"KNOWLEDGE_NOT_ACTIVE"}
+        if bound and task_result:
+            prior_outcome=conn.execute("SELECT task_id,host_profile,session_id FROM task_outcomes "
+                                       "WHERE task_outcome_id=?",(task_outcome_id,)).fetchone()
+            if prior_outcome and prior_outcome != (use[2],use[0],use[1]):
+                return {"error":"TASK_OUTCOME_ID_CONFLICT"}
         after=copy.deepcopy(meta)
         events=[]
+        auto_activation=False
         if bound:
             after["updated"]=date.today().isoformat()
             key="helpful_count" if outcome=="helpful" else "unhelpful_count"
@@ -147,7 +176,22 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
             if outcome in ("outdated","incorrect") and after.get("status")=="active":
                 after["status"]="stale"
                 events.append(f"status: active → stale（{outcome}，版本绑定）")
-            if outcome=="helpful" and after.get("confidence")=="once" and after.get("status")=="active":
+            from .evolution import decide
+            decision=decide(conn,mid,current,meta,use,task_key,outcome,task_result,staged=staged)
+            if decision["retire"] and after.get("status")=="active":
+                after["status"]="stale"
+                events.append("status: active → stale（独立任务负面反馈，自动淘汰）")
+            if decision["promote"] and after.get("confidence") in ("once","staging"):
+                after["confidence"]="verified";after["last_verified"]=date.today().isoformat()
+                after["verified_content_revision"]=current
+                auto_activation=staged
+                events.append(f"confidence: {meta.get('confidence')} → verified（{decision['helpful_tasks']}个独立任务，{decision['sessions']}个会话）")
+                if auto_activation:
+                    events.append("业务规则自动激活：staging → bizrules（当前版本验证证据达标）")
+            # 兼容既有无任务结果字段的工具反馈；新显式验证统一使用独立任务策略。
+            if (not task_result and not staged and policy.get("enabled",True) and outcome=="helpful"
+                    and after.get("confidence")=="once" and after.get("status")=="active"
+                    and not decision["blocked"]):
                 rows=conn.execute("SELECT agent FROM feedback_events WHERE memory_id=? AND content_revision=? "
                                   "AND outcome='helpful' AND binding='version_task' AND state='applied'",(mid,current)).fetchall()
                 total=len(rows)+1;tools={r[0] for r in rows}|{by}
@@ -162,6 +206,8 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
         result={"entity_id":mid,"receipt_id":receipt,"content_revision":current,
                 "governance_revision":_compute_governance_revision(after),"binding":binding,
                 "events":events,"governance_applied":bound}
+        if auto_activation:
+            result["auto_activation"]=True
         stamp=datetime.now(timezone.utc).isoformat(timespec="seconds")
         conn.execute("INSERT INTO feedback_events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (receipt,request_id,phash,mid,current,use_id,task_key,task_outcome_id,by,outcome,binding,"applying",
