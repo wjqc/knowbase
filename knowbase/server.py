@@ -123,7 +123,8 @@ def read_impl(id: str, session_id: str = "", event_id: str = "",
     """按id读全文。关联任务时同时传session_id/event_id/context_event_id，host_profile沿用检索。
 
     event_id是本次阅读的新稳定事件ID；context_event_id是实际返回该候选的检索事件ID。
-    仅传id仍可普通读取，不会产生任务阅读回执。
+    仅传id仍可普通读取新卡、staging或历史卡，不会产生任务阅读回执。
+    完整身份关联到任务时也允许同scope新卡/待审卡读回；阅读不代表候选已被采纳。
     """
     rp, err = _repo()
     if err:
@@ -595,7 +596,8 @@ def _build_distillation_guide(events: list[dict], similar: list[dict], scope: st
         "每条候选必填 candidate_key/type/title/scope/action（create|update|link_existing|review）、"
         "segment_ids 和 evidence_refs=[{segment_id,text_hash}]，引用已完整读取的实际片段。\n"
         "body 必须为八项结构对象：conclusion/problem/applicable_when/not_applicable_when/"
-        "actionable_steps/key_evidence/verification/unknown_items，并附 scope。\n"
+        "actionable_steps/key_evidence/verification/unknown_items；scope填候选顶层即可，body.scope可省略，提供时必须一致。\n"
+        "code_refs须为对象列表，例如[{\"repo\":\"项目scope\",\"path\":\"项目相对路径.py\",\"symbol\":\"函数名\"}]，不能写字符串列表。\n"
         "bizrule 还需 provenance 和 rule_context={business_object,trigger,required_or_forbidden,exceptions,"
         "applicable_version,business_confirmation(explicit_source|code_inferred|unconfirmed),"
         "implementation_status(not_implemented|implemented_unverified|verified|unknown)}；"
@@ -829,7 +831,7 @@ from .telemetry import observe as _observe
 
 mcp.tool(name="memory_save", description="保存一条经验记忆。standard/preference 由 Agent 保存时自动进 staging 待人审")(_observe(save_impl,"memory_save"))
 mcp.tool(name="memory_update", description="修改已有记忆的内容/标签/关系。confidence 与 status 由服务端状态机管理，不接受指定")(_observe(update_impl,"memory_update"))
-mcp.tool(name="memory_read", description="按id读全文，成功读取才计hit。可只传id；若关联任务，session_id/event_id/context_event_id必须一起传，host_profile沿用检索。event_id为本次阅读新事件，context_event_id为实际返回候选的检索事件；返回read_use_id，阅读不等于采纳或helpful")(_observe(read_impl,"memory_read"))
+mcp.tool(name="memory_read", description="按id读全文，成功读取才计hit。新卡或staging读回可只传id。若关联任务，session_id/event_id/context_event_id一起传，host_profile沿用检索；event_id为本次阅读新事件，context_event_id绑定实际任务上下文。允许同scope新卡/待审卡阅读，阅读不等于候选采纳或helpful")(_observe(read_impl,"memory_read"))
 mcp.tool(name="memory_search", description="检索经验记忆：任务开始涉及具体项目/系统/报错时先调用。检索词建议 ≥3 字的具体名词或报错关键词")(_observe(search_impl,"memory_search"))
 mcp.tool(name="memory_feedback", description="验证任务结果后回填helpful/not_helpful/outdated/incorrect；携带expected_content_revision、memory_use返回的use_id、稳定task_outcome_id。按卡版本+任务结果去重。旧调用仅保留未绑定观察，不改变治理状态")(_observe(feedback_impl,"memory_feedback"))
 mcp.tool(name="memory_context", description="执行中知识检索：拆解长方案后、进入子任务、新错误和重要决策前调用；提供当前主题与查询，阶段结束检查技术经验及业务规则待办")(_observe(context_impl,"memory_context"))
@@ -839,7 +841,7 @@ mcp.tool(name="memory_capture", description="阶段完成时入队提炼任务�
 mcp.tool(name="memory_job_claim", description="领取提炼批次。返回脱敏材料、相似卡引用、lease_token 和到期时间")(_observe(job_claim_impl,"memory_job_claim"))
 mcp.tool(name="memory_job_material", description="分页读取已领取批次材料，保留原文定位；返回 next_cursor，读完后再提交对应片段")(_observe(job_material_impl,"memory_job_material"))
 mcp.tool(name="memory_job_renew", description="续租当前批次。延长 lease 到期时间")(_observe(job_renew_impl,"memory_job_renew"))
-mcp.tool(name="memory_job_submit", description="提交提炼结果（候选经验或 no_candidate）。宿主完成提炼后调用")(_observe(job_submit_impl,"memory_job_submit"))
+mcp.tool(name="memory_job_submit", description="提交提炼结果；先读完对应材料。候选scope填顶层，body为八项结构对象；code_refs是[{repo,path,symbol?,lines?}]对象列表，不能是字符串。候选须有candidate_key/type/title/action/segment_ids/evidence_refs；业务规则附provenance及rule_context，保持待审")(_observe(job_submit_impl,"memory_job_submit"))
 mcp.tool(name="memory_job_status", description="查询任务状态。返回 state/cursor/error 等信息")(_observe(job_status_impl,"memory_job_status"))
 mcp.tool(name="memory_import", description="M4-5: 导入文档目录，入队 extract 任务供提炼。支持 Markdown/HTML/代码等多种格式")(_observe(import_impl,"memory_import"))
 

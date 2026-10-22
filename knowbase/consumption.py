@@ -36,16 +36,18 @@ def record(repo, *, session_id, event_id, context_event_id, memory_id,
             if not row:
                 return {"error":"CONTEXT_EVENT_NOT_FOUND"}
             receipt=json.loads(row[1])
-            if not any(c.get("id")==memory_id and c.get("content_revision")==content_revision
-                       for c in receipt.get("candidates",[])):
+            if not reading and not any(c.get("id")==memory_id and c.get("content_revision")==content_revision
+                                       for c in receipt.get("candidates",[])):
                 return {"error":"CANDIDATE_NOT_DELIVERED"}
             meta,body,path=store.load(repo,memory_id)
             current=bool(meta and _compute_revision(meta,body)==content_revision)
             if state in ("adopted","referenced","read"):
                 if not current:
                     return {"error":"CONTENT_REVISION_CONFLICT"}
-                if path.parent.name=="staging" or meta.get("status")!="active":
+                if not reading and (path.parent.name=="staging" or meta.get("status")!="active"):
                     return {"error":"KNOWLEDGE_NOT_ACTIVE"}
+                if reading and meta.get("scope") not in (receipt["scope"],"global"):
+                    return {"error":"SCOPE_MISMATCH"}
             use_id="USE-"+materials.digest([host,session_id,event_id])[:24]
             task=receipt.get("task_id") or row[0] or session_id
             task_revision=receipt.get("task_revision","")

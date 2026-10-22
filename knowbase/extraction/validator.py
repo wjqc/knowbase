@@ -66,6 +66,8 @@ def validate_candidate(candidate: dict, *, scope: str = "",
         return result
 
     for field_name in REQUIRED_FIELDS:
+        if field_name == "scope" and candidate.get("scope"):
+            continue  # 顶层scope是候选范围；无需让模型在body重复填写同一事实。
         if not body.get(field_name):
             result.errors.append(f"body.{field_name} 必填")
 
@@ -73,6 +75,8 @@ def validate_candidate(candidate: dict, *, scope: str = "",
     cand_scope = candidate.get("scope") or body.get("scope") or scope
     if not cand_scope:
         result.errors.append("scope 必填")
+    if candidate.get("scope") and body.get("scope") and candidate["scope"] != body["scope"]:
+        result.errors.append("SCOPE_MISMATCH：顶层scope与body.scope不一致")
 
     # 3. type 校验
     dtype = candidate.get("type") or candidate.get("suggested_type") or "pitfall"

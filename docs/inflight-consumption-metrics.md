@@ -5,8 +5,9 @@
 ## 消费链
 
 1. `memory_context(session_id,event_id,task_id,task_revision,scope,current_goal,topics)` 返回候选的 `id/content_revision` 和实际任务身份。`freshness` 说明本地版本及后台刷新状态；当前调用不等待网络。后台只接收远端变更，推送仍由写入链路负责。
-2. 需要全文时，`memory_read(id,session_id,event_id,context_event_id,host_profile)` 可获得与任务关联的独立阅读回执。`context_event_id` 必须指向实际返回该候选的检索事件；缓存跳过的事件没有递送新候选，应沿用原递送事件。
+2. 需要全文时，`memory_read(id)`可直接读取新卡、待审卡或历史卡。需要关联任务时，同时传`session_id/event_id/context_event_id`，host_profile沿用真实任务，得到独立阅读回执；缺少一项会明确列出缺参。context_event_id绑定实际任务上下文，同scope新卡/待审卡可直接读回，不要求先进入默认检索。阅读不等于递送候选或采纳。失败读取不增加成功阅读/hit计数，命令遥测仍记录失败尝试。
 3. `memory_use(session_id,event_id,context_event_id,id,content_revision,state,host_profile)` 接受 `referenced/adopted/irrelevant/unverified`，返回 `use_id`。每次状态变化使用独立稳定事件ID；同事件重试保持ID和内容。记录不会自动产生helpful。
+   使用记录的context_event_id必须指向实际递送该候选的事件；缓存跳过没有新候选时沿用原递送事件。staging读回不能据此绕过治理进入adopted。
 4. 实际执行并验证后，`memory_feedback(id,outcome,expected_content_revision,use_id,task_outcome_id,request_id)` 回填结果。`use_id`须是该卡版本的参考/采纳回执；`task_outcome_id`表示本任务的一项稳定验证结果，重试不能重新生成。去重粒度为卡版本+会话/任务/方案版本+结果ID；更换请求ID或工具标签不能重复累计同一结果。
 
 旧feedback调用仍可用，但仅记 `legacy_unbound` 观察，不改变有效验证计数或治理状态。旧历史日志保留，不追认成新版本验证。正文等内容字段变更后清除旧验证及本版本反馈计数；新版本重新验证。人工修订规则不等于人工确认有效，可信人工确认走CLI verify。工具标签用于归因，不认证人数，human前缀也不构成人工权限。
