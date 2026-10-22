@@ -67,6 +67,21 @@ def test_registered_mcp_pipeline_creates_and_consumes_knowledge(memory_repo):
                 # 仅为隔离协议样本，不冒充真实业务质量或独立人工验收。
                 assert store.load(memory_repo,mid)[0]["helpful_count"]==1
                 assert store.load(memory_repo, mid)[0]["confidence"] == "once"
+                rule_body="\n\n".join("## "+heading+"\n"+value for heading,value in [
+                    ("结论","受控PRD要求已结算订单拒绝撤回。"),("解决的问题","验证规则提案读回不会误显示为已生效。"),
+                    ("适用条件","隔离合成订单样本处于已结算状态。"),("不适用条件","真实业务未在本次协议测试中确认。"),
+                    ("可执行动作","先核对结算状态，拒绝已结算订单的撤回请求。"),("关键证据","合成协议夹具STDIO-SYNTHETIC-ORDER第1条。"),
+                    ("验证情况","仅验证提案保存和读取协议，不证明真实订单代码已实现。"),("未知与待确认","真实业务确认和人工激活尚未完成。")])
+                saved=await call("memory_save",{"type":"bizrule","title":"合成PRD结算后的订单状态变更约束", "body":rule_body,
+                    "scope":"orders","provenance":"STDIO-SYNTHETIC-ORDER §1",
+                    "rule_context":{"business_object":"订单","trigger":"撤回请求","required_or_forbidden":"已结算时拒绝撤回",
+                        "exceptions":"草稿由独立规则处理","applicable_version":"合成协议夹具v1",
+                        "business_confirmation":"explicit_source","implementation_status":"not_implemented"}})
+                rule_id=re.search(r"B-[a-f0-9]+",saved).group()
+                rule_read=await call("memory_read",{"id":rule_id,"session_id":"stdio-s1","event_id":"read-staged-rule",
+                    "context_event_id":"phase-2"})
+                assert "staging=true" in rule_read and "未激活" in rule_read and "runtime_version=" in rule_read
+                assert store.load(memory_repo,rule_id)[2].parent.name=="staging"
                 metrics=json.loads(await call("memory_metrics",{"source_label":"stdio-device"}))
                 assert metrics["schema"]=="knowbase.metrics.v1"
                 calls={r["command"]:r["count"] for r in metrics["counts"]["command_calls"]}

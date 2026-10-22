@@ -88,6 +88,7 @@ def test_new_staging_card_can_be_read_in_task_without_becoming_adoptable(memory_
     assert not ctx["candidates"]
     text=read_impl(mid,session_id="reader",event_id="read-new",context_event_id="lookup",host_profile="native-test")
     assert "read_use_id=" in text and "已结算订单禁止撤回" in text
+    assert "staging=true" in text and "未激活" in text and "runtime_version=" in text
     from knowbase.mutations import _compute_revision
     meta,body,path=store.load(memory_repo,mid)
     use=json.loads(use_impl(session_id="reader",event_id="adopt-new",context_event_id="lookup",id=mid,

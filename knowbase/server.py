@@ -9,7 +9,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from . import config, gitops, index, jobs, lifecycle, store
+from . import __version__, config, gitops, index, jobs, lifecycle, store
 from .adapters import checkpoint as cp_mod
 from .adapters import normalizer
 from .extraction import recall, sanitizer, validator
@@ -167,7 +167,10 @@ def read_impl(id: str, session_id: str = "", event_id: str = "",
 
     head = (f"[{meta['id']}] {meta.get('title','')}"
             f" ｜ {meta.get('confidence')}·{meta.get('status')}"
-            f" ｜ scope={meta.get('scope')}")
+            f" ｜ scope={meta.get('scope')} ｜ runtime_version={__version__}"
+            f" ｜ staging={str(path.parent.name=='staging').lower()}")
+    if path.parent.name=="staging":
+        head += " ｜ 待人工审核，未激活；status=active不表示业务规则已生效"
     if content_rev:
         head += f" ｜ content_revision={content_rev}"
     if gov_rev:
