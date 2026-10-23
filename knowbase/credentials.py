@@ -13,14 +13,29 @@ _CONTROL = r"(?:limit|budget|size|count|usage|timeout|threshold|window|length|ca
 _KEY = rf"(?![a-z0-9_-]*[_-]{_CONTROL}(?:[_-]|\b))(?:[a-z0-9]+[_-])*{_WORD}(?:[_-][a-z0-9]+)*"
 _KEY_RE = re.compile(rf"{_KEY}\Z", re.I)
 _Q = r"[\\]*[\"']"
-_VALUE = rf"(?!\[REDACTED:)(?:(?:{_Q})[^\"'\r\n]+(?:{_Q})|[^\s'\"\\<>,;\}}\]]{{6,}})"
+_MASKED = rf"(?:{_Q})?(?:(?:bearer|basic|token)\s+)?\[REDACTED:[\w-]+\](?:{_Q})?(?=$|[\s,;}}\]])"
+# Quote delimiters must agree in both type and escape depth. A quote escaped
+# inside a secret has more backslashes than its surrounding JSON delimiter.
+
+
+def _value_pattern(label):
+    quoted = []
+    for suffix, quote in (("dq", '"'), ("sq", "'")):
+        group = label + suffix
+        closing = rf"(?<!\\)(?P={group}){quote}"
+        quoted.append(rf"(?P<{group}>\\*){quote}(?:(?!{closing})[^\r\n])+(?:{closing}|(?=$|[\r\n]))")
+    return rf"(?!{_MASKED})(?:{'|'.join(quoted)}|[^\s'\"\\<>,;\}}\]]{{6,}})"
+
+
 _FLAG = r"(?:--(?:api[-_]?key|access[-_]?(?:key|token)|app[-_]?secret|client[-_]?secret|secret|token|password|passwd|credential)|-s)"
 _FLAG_RE = re.compile(rf"{_FLAG}\Z", re.I)
 _PATTERN_SRCS = (
-    rf"(?<![\w-]){_KEY}(?:{_Q})?\s*[=:]\s*{_VALUE}",
-    # Both shell '--api-key value' and JSON argv ['--api-key', 'value'], at any escape depth.
-    rf"(?<![\w-]){_FLAG}(?:(?:{_Q})?\s*,\s*|[=\s]+){_VALUE}",
+    # Consume the complete auth scheme + token before the general key=value rule.
+    # Otherwise that rule can consume just 'Authorization: Bearer', leaking the token.
     rf"(?:proxy-)?authorization(?:{_Q})?\s*:\s*(?:{_Q})?(?:bearer|basic|token)\s+[\w.\-+/=]{{8,}}",
+    rf"(?<![\w-]){_KEY}(?:{_Q})?\s*[=:]\s*{_value_pattern('key')}",
+    # Both shell '--api-key value' and JSON argv ['--api-key', 'value'], at any escape depth.
+    rf"(?<![\w-]){_FLAG}(?:(?:{_Q})?\s*,\s*|[=\s]+){_value_pattern('flag')}",
     r"\bbearer\s+[A-Za-z0-9\-._~+/]{16,}={0,2}",
     r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
     r"\b(?:sk-[A-Za-z0-9_-]{16,}|figd_[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{16,})",

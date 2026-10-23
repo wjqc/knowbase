@@ -1,6 +1,6 @@
 # knowbase（薪火）
 
-凭据脱敏修复与历史清洗：见 [rc6 修复记录及操作说明](docs/credential-redaction-2026-10-22.md)。`knowbase privacy-scrub` 默认只读盘点；`--apply --backup-dir <仓库外新目录>` 先私有备份再清洗。
+凭据脱敏修复与历史清洗：见 [凭据修复记录及 rc7 复核](docs/credential-redaction-2026-10-22.md)。`knowbase privacy-scrub` 默认只读盘点；`--apply --backup-dir <仓库外新目录>` 先私有备份再清洗。
 
 执行中检索与增量沉淀已进入实现验证：新增 `memory_context` 和 `memory_job_material`，支持分阶段查询、完整材料分页、技术经验/业务规则候选成卡与回执恢复。新机制默认关闭；升级与宿主配置见 [接入和回滚说明](docs/inflight-rollout.md)，真实验收边界见 [宿主能力记录](docs/host-capabilities.md)。
 

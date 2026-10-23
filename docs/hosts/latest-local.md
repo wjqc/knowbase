@@ -1,6 +1,6 @@
 # 本机三宿主 knowbase 接入（唯一运行版本）
 
-已原地安装 0.2.0rc6（凭据脱敏修复），62 个模块与源码一致；不是 editable 安装。启动 Python：
+已原地安装 0.2.0rc7（凭据脱敏复核补修），62 个模块与源码一致；不是 editable 安装。启动 Python：
 
 `/Users/qc/.knowbase/runtime/venv/bin/python`
 
@@ -22,13 +22,13 @@ Trae 设置界面已确认：专用 Hook 开启，导入 Claude Hook 关闭，�
 3. 业务规则 validation_candidates 只用于验证，关联 memory_read 获得 read_use_id 后根据实际结果回填；服务按当前版本的独立反馈自动晋升/失效，不能为了阈值编造任务。标准/全局偏好保持原权限。
 4. 现有会话保留旧 MCP 进程。任务结束后在宿主中重连 knowbase MCP；若宿主不支持单服务重连，重启该客户端后开启新会话。单纯改文件不证明旧会话已经加载新工具。
 
-rc6 修复、历史清洗和验证见 [凭据修复记录](../credential-redaction-2026-10-22.md)。`duplicate_evaluation` 必须放在每个 `candidates[i]` 内部，不是 `memory_job_submit` 顶层参数。历史清洗撤销了受影响材料的旧租约，未完成作业需重新领取。
+rc6 修复及 rc7 独立复核、历史清洗和验证见 [凭据修复记录](../credential-redaction-2026-10-22.md)。`duplicate_evaluation` 必须放在每个 `candidates[i]` 内部，不是 `memory_job_submit` 顶层参数。历史清洗撤销了受影响材料的旧租约，未完成作业需重新领取。
 
 ## 验证及边界
-- 源码全套：496 passed、1 skipped；Trae/宿主/演进定向 28 passed。
+- 当前 rc7 源码全套：603 passed、1 skipped；凭据相关定向 125 passed。旧 rc5 上线时曾验证 496 passed、1 skipped。
 - 固定包安装态 stdio 端到端 2 passed；三个实际配置启动命令分别初始化成功、列出 16 工具，反馈 schema 包含 task_result，instructions 含 validation_candidates。
 - Hook 配置命令逐项在隔离测试库运行；正常退出及输出封装核对，结果见运行 manifest。
-- 真实库 schema20 可正常连接；知识 191、feedback_log 25、knowledge_uses 2 保持。没有批量激活历史候选。
+- 真实库 schema20 可正常连接，完整性检查通过，凭据扫描覆盖字段无待修改项。191 卡/25 feedback/2 knowledge_uses 是 rc5 上线时的历史库存，本次不以其作为当前计数；没有批量激活历史候选。
 - Trae 全局 Hook 开关与规则保存有原生 UI 证据；未向正在运行的聊天发消息，未终止任何宿主任务。三宿主新会话真实业务整链及三人收益仍待使用样本，配置/协议验证不替代这些验收。
 
 ## 单版本运维与数据恢复

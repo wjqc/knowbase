@@ -190,3 +190,58 @@ def test_dry_run_cli_does_not_write_telemetry_or_database(memory_repo):
     assert json.loads(result.stdout)["mode"] == "dry_run"
     assert list(conn.iterdump()) == before
     conn.close()
+
+
+@pytest.mark.parametrize("scheme", ["Bearer", "Basic", "Token"])
+def test_authorization_never_leaves_the_original_token(scheme):
+    secret = "synthetic-authority-value-987654321"
+    text = f"Authorization: {scheme} {secret}"
+    clean = sanitize(text)
+    assert secret not in clean
+    assert not has_credentials(clean)
+    payload = materials.capture_payload([normalize_event({"role": "user", "text": text})], scope="orders", session_id="auth")
+    assert secret not in json.dumps(payload)
+
+
+@pytest.mark.parametrize("text,secret", [
+    ('''run --api-key "synthetic'quoted-secret-987654321" --port 8080''', "synthetic'quoted-secret-987654321"),
+    ('''run --api-key 'synthetic"quoted-secret-987654321' --port 8080''', 'synthetic"quoted-secret-987654321'),
+    ('password="synthetic\\\"quoted-secret-987654321"', '987654321'),
+])
+def test_quoted_credentials_keep_no_suffix(text, secret):
+    clean = sanitize(text)
+    assert secret not in clean
+    assert "987654321" not in clean
+    assert sanitize(clean) == clean
+
+
+@pytest.mark.parametrize("text", [
+    'example password="[REDACTED:credential]"',
+    'example password=\'[REDACTED:credential]\'',
+    'example ["--api-key", "[REDACTED:credential]"]',
+    'example ["--api-key", "[REDACTED:credential]"] and token_limit=900000',
+    'Authorization: Bearer [REDACTED:credential]',
+    'password="[REDACTED:credential]" and tail text',
+])
+def test_quoted_masked_examples_are_not_credentials(text):
+    assert not has_credentials(text)
+    assert sanitize(text) == text
+
+
+@pytest.mark.parametrize("depth", range(5))
+def test_json_preview_in_prose_preserves_no_escaped_secret_suffix(depth):
+    value = json.dumps({"apiKey": 'synthetic"quoted-987654321'})
+    for _ in range(depth):
+        value = json.dumps(value)
+    clean = sanitize("preview " + value)
+    assert "987654321" not in clean
+    assert sanitize(clean) == clean
+
+
+@pytest.mark.parametrize("text", [
+    'password="synthetic-truncated-987654321',
+    'password="synthetic-truncated-987654321\nnext line',
+    'password="[REDACTED:credential]synthetic-appended-987654321"',
+])
+def test_truncated_quotes_and_marker_prefix_cannot_hide_a_secret(text):
+    assert "987654321" not in sanitize(text)
