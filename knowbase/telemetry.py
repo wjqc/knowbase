@@ -23,6 +23,13 @@ HOOK_EVENTS=frozenset({"session-start","user-prompt","stop","tool-before","tool-
 _INSTALLATION_CACHE: dict[str, str] = {}
 
 
+def host_name(value):
+    value = str(value or "unknown").lower()
+    if value in {"claude", "claude-code", "claudecode"}:
+        return "claude-code"
+    return value if value in {"zcode", "trae", "cli"} else "unknown"
+
+
 def _installation_id(path) -> str:
     """best-effort 读取本机 installation_id；无表/未登记返回空串，绝不冒充成员。"""
     key = str(path)
@@ -57,11 +64,16 @@ def record(transport,command,status,duration_ms):
         call=(uuid.uuid4().hex,datetime.now(timezone.utc).isoformat(timespec="microseconds"),
               transport,command,status,max(0,duration_ms))
         try:
-            conn.execute("INSERT INTO command_calls VALUES(?,?,?,?,?,?,?)",
-                         (*call,_installation_id(path)))
+            conn.execute("INSERT INTO command_calls VALUES(?,?,?,?,?,?,?)", (*call,_installation_id(path)))
         except sqlite3.OperationalError:
-            # 迁移前的库没有 installation_id 列，退回旧口径，不丢命令记录。
             conn.execute("INSERT INTO command_calls VALUES(?,?,?,?,?,?)",call)
+        try:
+            # Keep command_calls' positional layout compatible with already-running
+            # old MCP processes. Their calls continue to count with unknown host.
+            host = host_name(config.agent_name()) if transport != "cli" or command.startswith("hook.") else "cli"
+            conn.execute("INSERT INTO command_call_hosts VALUES(?,?)", (call[0],host))
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
     except (sqlite3.Error,OSError,ValueError,TypeError):
         pass

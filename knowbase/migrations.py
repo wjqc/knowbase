@@ -318,6 +318,12 @@ MIGRATIONS: list[tuple[int, str]] = [
     );
     CREATE INDEX IF NOT EXISTS idx_task_outcomes_task ON task_outcomes(task_id);
     """),
+    (21, """
+    CREATE TABLE command_call_hosts(
+      call_id TEXT PRIMARY KEY,
+      host TEXT NOT NULL DEFAULT 'unknown'
+    );
+    """),
     (22, """
     CREATE TABLE IF NOT EXISTS embedding_index(
       memory_id TEXT PRIMARY KEY, model_version TEXT NOT NULL,

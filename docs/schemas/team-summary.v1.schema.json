@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:knowbase:team-summary:v1",
+  "title": "Team daily observed summary contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "definition_version", "team_id", "member_id", "installation_id", "db_epoch", "snapshot_id", "period_start", "period_end", "source_timezone", "sequence", "generated_at", "data_watermark", "coverage", "metrics"],
+  "properties": {
+    "schema": {"const": "knowbase.team-summary.v1"},
+    "definition_version": {"const": "daily-observed-v1"},
+    "team_id": {"$ref": "#/$defs/id"},
+    "member_id": {"$ref": "#/$defs/id"},
+    "installation_id": {"$ref": "#/$defs/id"},
+    "db_epoch": {"$ref": "#/$defs/id"},
+    "snapshot_id": {"$ref": "#/$defs/id"},
+    "period_start": {"$ref": "#/$defs/time"},
+    "period_end": {"$ref": "#/$defs/time"},
+    "source_timezone": {"type": "string", "minLength": 1, "maxLength": 128},
+    "sequence": {"type": "integer", "minimum": 1},
+    "generated_at": {"$ref": "#/$defs/time"},
+    "data_watermark": {"oneOf": [{"$ref": "#/$defs/time"}, {"type": "null"}]},
+    "coverage": {"enum": ["complete", "partial", "recovery_required", "unknown"]},
+    "metrics": {
+      "type": "object", "additionalProperties": false,
+      "required": ["calls", "known_searches", "hit_searches", "missing_searches", "updates", "commands", "usage"],
+      "properties": {
+        "calls": {"$ref": "#/$defs/count"},
+        "legacy_calls": {"$ref": "#/$defs/count"},
+        "known_searches": {"$ref": "#/$defs/count"},
+        "hit_searches": {"$ref": "#/$defs/count"},
+        "missing_searches": {"$ref": "#/$defs/count"},
+        "updates": {"$ref": "#/$defs/count"},
+        "adoption_receipts": {"$ref": "#/$defs/count"},
+        "helpful_receipts": {"$ref": "#/$defs/count"},
+        "negative_receipts": {"$ref": "#/$defs/count"},
+        "promotions": {"$ref": "#/$defs/count"},
+        "retirements": {"$ref": "#/$defs/count"},
+        "commands": {"type": "array", "maxItems": 2000, "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["command", "host", "transport", "status", "count"],
+          "properties": {
+            "command": {"type": "string", "pattern": "^[a-zA-Z0-9_.:-]{1,80}$"},
+            "host": {"enum": ["zcode", "claude-code", "trae", "cli", "unknown"]},
+            "transport": {"enum": ["mcp", "hook", "cli"]},
+            "status": {"enum": ["ok", "returned_error", "raised", "unknown"]},
+            "count": {"type": "integer", "minimum": 0}
+          }
+        }},
+        "usage": {"type": "array", "maxItems": 200, "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["host", "source", "model", "requests", "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"],
+          "properties": {
+            "host": {"enum": ["zcode", "claude-code", "trae", "unknown"]},
+            "source": {"enum": ["request_log", "model_usage", "unknown"]},
+            "model": {"type": "string", "maxLength": 160},
+            "requests": {"$ref": "#/$defs/count"},
+            "input_tokens": {"$ref": "#/$defs/count"},
+            "output_tokens": {"$ref": "#/$defs/count"},
+            "cache_read_tokens": {"$ref": "#/$defs/count"},
+            "cache_creation_tokens": {"$ref": "#/$defs/count"}
+          }
+        }}
+      }
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"},
+    "time": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "count": {"type": ["integer", "null"], "minimum": 0}
+  }
+}

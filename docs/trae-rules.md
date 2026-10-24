@@ -3,7 +3,7 @@
 本机已在原生设置启用 ~/.trae-cn/hooks.json，并关闭重复导入 Claude Hook；规则已在全局规则界面保存，不需要再次手动粘贴。接入与回滚见 [最新本机记录](hosts/latest-local.md)。
 
 - 阶段开始主动 memory_context，host_profile=trae，沿用真实 session_id/scope；实际消费 memory_use，验证后携带当前版本/use_id/唯一稳定 task_outcome_id/task_result 回填。
-- 长材料 capture→claim(protocol_version=2)→material 续页→submit→读回；不要把入队或普通阅读当成功。
+- Hook自动采集静默入队；Stop不因待办/未反馈阻断，不要求主任务立即领取或逐段提炼。明确整理知识/维护任务再capture→claim(protocol_version=2)→material续页→submit→读回；入队和普通阅读不当作成功。
 - 业务规则保存来源、条件、例外、rule_context/code_refs。validation_candidates 是验证候选，关联读取后用 read_use_id 和实际任务结果回填；当前版本 3 个独立完成任务、2 会话 helpful 自动激活，负面证据失效并保留历史。不得凑任务或伪造人工确认。
 - standards/全局 preferences 保持既有人工激活权限。无出处、不完整材料、缺失观测如实标注，不把原始文档或明文密钥入卡。
 

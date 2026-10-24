@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:knowbase:team-member:v1",
+  "title": "Dynamic team member contract",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "team_id", "member_id", "label", "status", "joined_at", "retired_at", "sequence", "confirmation"],
+  "properties": {
+    "schema": {"const": "knowbase.team-member.v1"},
+    "team_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"},
+    "member_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"},
+    "label": {"type": "string", "minLength": 1, "maxLength": 80},
+    "status": {"enum": ["pending", "active", "retired"]},
+    "joined_at": {"type": "string", "format": "date-time"},
+    "retired_at": {"type": ["string", "null"], "format": "date-time"},
+    "sequence": {"type": "integer", "minimum": 1},
+    "confirmation": {"enum": ["pending", "self_confirmed", "publisher_confirmed"]}
+  },
+  "allOf": [
+    {"if": {"properties": {"status": {"const": "retired"}}},
+      "then": {"properties": {"retired_at": {"type": "string"}}}},
+    {"if": {"properties": {"status": {"const": "active"}}},
+      "then": {"properties": {"retired_at": {"type": "null"},
+        "confirmation": {"enum": ["self_confirmed", "publisher_confirmed"]}}}}
+  ]
+}

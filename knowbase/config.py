@@ -34,6 +34,8 @@ DEFAULTS = {
     "scope_map": {},
     "stats": {"enabled": True},
     "dashboard": {"host_usage_source": "claude"},
+    "team": {"enabled": False, "data_dir": "~/.knowbase/team", "interval_seconds": 900,
+             "dashboard_output": "~/knowbase-dashboard.html"},
     "evolution": {"enabled": True, "auto_activate_bizrules": True,
                   "min_helpful_tasks": 3, "min_sessions": 2, "retire_not_helpful_tasks": 2},
     "value": {"events_enabled": False, "aggregate_db": "~/.knowbase/value-aggregate.db"},

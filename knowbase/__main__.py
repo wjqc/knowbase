@@ -746,6 +746,24 @@ def _main(argv=None):
     p_dash.add_argument("--output", default="knowbase-dashboard.html")
     p_dash.add_argument("--open", action="store_true")
     p_dash.add_argument("--team-data", default="", help="团队快照 JSON（knowbase value snapshot 生成）")
+    p_team = sub.add_parser("team", help="各电脑通过共享 Git 自动上报和汇总统计")
+    team_sub = p_team.add_subparsers(dest="team_cmd", required=True)
+    p_enroll = team_sub.add_parser("enroll", help="首次确认本机成员身份")
+    p_enroll.add_argument("--member-id", required=True)
+    p_enroll.add_argument("--label", required=True)
+    p_enroll.add_argument("--publisher", action="store_true", help="指定本机单独发布 README")
+    p_enroll.add_argument("--include-history", action="store_true", help="确认本库历史属于本人后回补，旧日标部分数据")
+    p_enroll.add_argument("--source-timezone", default="Asia/Shanghai")
+    for name in ("status", "collect", "sync", "install-worker", "remove-worker", "disable"):
+        team_sub.add_parser(name)
+    p_member = team_sub.add_parser("member", help="动态预登记、改名或退出（历史保留）")
+    p_member.add_argument("--member-id", required=True)
+    p_member.add_argument("--label", required=True)
+    p_member.add_argument("--status", choices=["pending", "active", "retired"], required=True)
+    p_recover = team_sub.add_parser("recover", help="检查恢复库来源后，保留旧日桶并开启恢复 epoch")
+    p_recover.add_argument("--confirm-local-database", action="store_true", required=True)
+    p_publisher = team_sub.add_parser("publisher", help="明确转交 README 发布角色；先关闭原发布机")
+    p_publisher.add_argument("--enable", action="store_true")
     p_history = sub.add_parser("history", help="查看搜索命中记录 JSON")
     p_history.add_argument("--limit", type=int, default=100)
     p_reindex=sub.add_parser("reindex", help="全量重建索引")
@@ -1032,6 +1050,44 @@ def _main(argv=None):
          "user-prompt": hooks.cmd_user_prompt,
          "stop": hooks.cmd_stop}[args.event](style=args.style)
         return 0
+    if args.cmd == "team":
+        from .team import service, state, worker
+        from .locking import RepoLock
+        try:
+            action = args.team_cmd
+            if action == "enroll":
+                result = service.enroll(args.member_id, args.label, publisher=args.publisher,
+                                        include_history=args.include_history, source_timezone=args.source_timezone)
+            elif action in {"sync", "collect"}:
+                result = service.run(network=action == "sync")
+            elif action == "member":
+                result = service.member(args.member_id, args.label, args.status)
+            elif action in {"install-worker", "remove-worker", "disable"}:
+                result = worker.install(remove=action != "install-worker")
+                if action == "disable":
+                    cfg = config.load_config(); cfg["team"]["enabled"] = False
+                    service._save_config(cfg)
+            elif action == "recover":
+                result = service.recover()
+            else:
+                root = service.root_path()
+                with RepoLock(root):
+                    conn = state.connect(root)
+                    try:
+                        if action == "publisher":
+                            e = state.get(conn, "enrollment")
+                            if not e:
+                                raise ValueError("team enrollment required")
+                            e["publisher"] = args.enable
+                            state.put(conn, "enrollment", e); conn.commit()
+                        result = service.status(conn)
+                    finally:
+                        conn.close()
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 1 if result.get("errors") else 0
+        except (ValueError, RuntimeError, OSError) as exc:
+            print(json.dumps({"error": str(exc)}, ensure_ascii=False))
+            return 1
     if args.cmd == "value":
         from .value import aggregate, exchange
         agg_default = config.load_config().get("value", {}).get("aggregate_db",
