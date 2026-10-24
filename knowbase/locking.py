@@ -53,13 +53,19 @@ class RepoLock:
     def __enter__(self):
         self._fh = open(self._path, "a+")
         deadline = time.monotonic() + self._timeout
-        while True:
-            if _try_lock(self._fh):
-                return self
-            if time.monotonic() >= deadline:
-                self._fh.close()
-                raise LockTimeout(f"repo lock 超时({self._timeout}s): {self._path}")
-            time.sleep(0.05)
+        try:
+            while True:
+                if _try_lock(self._fh):
+                    return self
+                if time.monotonic() >= deadline:
+                    raise LockTimeout(f"repo lock 超时({self._timeout}s): {self._path}")
+                time.sleep(0.05)
+        except BaseException:
+            # 获取锁失败（含 _try_lock 抛出的非预期 OSError 与超时）：
+            # 必须关闭已打开的句柄，否则每次失败泄漏一个文件描述符。
+            self._fh.close()
+            self._fh = None
+            raise
 
     def __exit__(self, *exc):
         try:

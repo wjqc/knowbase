@@ -374,7 +374,7 @@ def cmd_list(dtype: str | None) -> int:
     for meta, _body, path in store.iter_all(rp, include_staging=True):
         if dtype and meta.get("type") != dtype:
             continue
-        stg = " (staging)" if "staging" in str(path) else ""
+        stg = " (staging)" if path.parent.name == "staging" else ""
         print(f"[{meta['id']}]{stg} {meta.get('title','')} ｜ {meta.get('confidence')}·{meta.get('status')}")
     return 0
 
@@ -537,13 +537,20 @@ def _cmd_import_extract(files: list[Path], src_dir: Path, scope: str, source: st
     1. 锁外解析文档（使用 parsers.py）
     2. 锁内入队 extract job（每个文档一个 job）
     3. 返回 job_id 列表
+
+    载荷构造与 MCP memory_import（server.import_impl）共用同一实现：
+    materials.capture_payload 切分并按存储内容计算 text_hash/input_version，
+    register_manifest 登记 job_segments。禁止再手搓 dict 或截断正文——
+    截断后存储的 text 与全文哈希对不上，证据校验必然失败（旧实现即如此）。
     """
     from . import jobs
+    from . import materials as material_store
+    from .adapters import normalizer
     from .extraction.parsers import parse_document
 
     print(f"extract 模式：解析 {len(files)} 个文件并入队提炼任务...")
 
-    # 阶段 1：锁外解析
+    # 阶段 1：锁外解析 + 构建载荷（与 MCP 路径同一构造）
     parsed_docs: list[dict] = []
     skipped = 0
     for f in files:
@@ -557,9 +564,15 @@ def _cmd_import_extract(files: list[Path], src_dir: Path, scope: str, source: st
                 skipped += 1
                 print(f"  跳过（疑似明文凭据）：{f.name}")
                 continue
+            event = normalizer.normalize_event({"role": "user", "text": doc.text, "id": str(f)})
+            payload = material_store.capture_payload(
+                [event], scope=scope, session_id="document:" + str(f))
+            payload.update(source_path=str(f), source_format=doc.format,
+                           title=doc.meta.get("title", f.stem)[:80], text=doc.text)
             parsed_docs.append({
                 "file": f,
                 "doc": doc,
+                "payload": payload,
                 "title": doc.meta.get("title", f.stem)[:80],
             })
         except Exception as exc:
@@ -579,40 +592,26 @@ def _cmd_import_extract(files: list[Path], src_dir: Path, scope: str, source: st
         try:
             for item in parsed_docs:
                 f = item["file"]
-                doc = item["doc"]
-                # 构建 materials
-                materials = {
-                    "source_path": str(f),
-                    "source_format": doc.format,
-                    "title": item["title"],
-                    "text": doc.text[:100000],  # 限制大小
-                    "segments": [
-                        {
-                            "segment_id": seg.segment_id,
-                            "text": seg.text[:4000],
-                            "locator": seg.locator._asdict() if hasattr(seg.locator, '_asdict') else str(seg.locator),
-                            "text_hash": seg.text_hash,
-                        }
-                        for seg in doc.segments
-                    ],
-                    "total_segments": len(doc.segments),
-                }
-                # 幂等键：文件路径 + 内容哈希
-                import hashlib
-                content_hash = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()[:16]
-                idem_key = f"extract:{f}:{content_hash}"
+                payload = item["payload"]
+                # 幂等键与 MCP 路径同款：scope + 文件路径 + input_version
+                idem_key = f"extract:{scope}:{f}:{payload['input_version']}"
 
                 result = jobs.enqueue(
-                    conn, jobs.KIND_EXTRACT, scope, materials,
+                    conn, jobs.KIND_EXTRACT, scope, payload,
                     idempotency_key=idem_key,
                 )
+                if result.get("error"):
+                    skipped += 1
+                    print(f"  跳过（入队失败 {result['error']}）：{f.name}")
+                    continue
                 if result["created"]:
+                    material_store.register_manifest(conn, result["job_id"], payload)
                     # 设置为 awaiting_agent 状态
                     jobs.set_preparing(conn, result["job_id"])
-                    jobs.set_awaiting(conn, result["job_id"], len(doc.segments))
+                    jobs.set_awaiting(conn, result["job_id"], len(payload["segments"]))
                     enqueued += 1
                     job_ids.append(result["job_id"])
-                    print(f"  {result['job_id']}  {item['title'][:44]}  ({len(doc.segments)} segments)")
+                    print(f"  {result['job_id']}  {item['title'][:44]}  ({len(payload['segments'])} segments)")
                 else:
                     skipped += 1
                     print(f"  跳过（重复任务）：{f.name}")

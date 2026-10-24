@@ -174,7 +174,14 @@ def build(repo, *, provider=None, deadline=None):
         conn.commit()
         if not changed:return {"state":"leased"}
         # Reject obsolete work/config before model calls.
-        payload=json.loads(conn.execute("SELECT input_json FROM job_spool WHERE job_id=?",(job_id,)).fetchone()[0])
+        spool=conn.execute("SELECT input_json FROM job_spool WHERE job_id=?",(job_id,)).fetchone()
+        if not spool:
+            # job 与 spool 由 enqueue 同事务写入；spool 缺失说明数据已损坏，
+            # 重试永远无法恢复：显性失败并记录原因，不让 TypeError 冒泡崩溃。
+            conn.execute("UPDATE jobs SET state='failed',error='job_spool_missing',lease_owner='',lease_until='',updated_at=? "
+                "WHERE job_id=? AND lease_owner=?",(now(),job_id,owner));conn.commit()
+            return {"state":"failed","reason":"job_spool_missing"}
+        payload=json.loads(spool[0])
         if payload["provider_fp"]!=provider.fingerprint:
             raise ProviderError("configuration_changed")
         items=manifest(conn,options);corpus=digest(items)

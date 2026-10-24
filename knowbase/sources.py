@@ -243,10 +243,11 @@ def find_knowledge_cards_referencing(repo: Path, source_id: str) -> list[str]:
     """
     from . import store
     referencing = []
-    for mid, meta, _ in store.iter_all(repo, include_staging=True):
+    # iter_all 产出顺序为 (meta, body, path)，卡片 ID 取 meta["id"]
+    for meta, _body, _path in store.iter_all(repo, include_staging=True):
         source_refs = meta.get("source_refs") or []
         for ref in source_refs:
             if isinstance(ref, dict) and ref.get("source_id") == source_id:
-                referencing.append(mid)
+                referencing.append(meta["id"])
                 break
     return referencing
