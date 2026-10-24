@@ -51,10 +51,13 @@ def create(repo, dtype: str, title: str, body: str, *, scope: str, tags=None,
         if result.get("error"):
             return result
         mid = result["entity_id"]
-        current, saved_body, path = store.load(repo, mid)
-        if not current or path is None:
-            return {"error": "READBACK_FAILED", "entity_id": mid, "retryable": True}
         with RepoLock(repo, cfg.get("lock_timeout", 10.0)):
+            # 锁内重读快照：adapter 的锁已释放，两段锁之间其他写入者可能
+            # 已更新同一张卡；若用锁外读到的快照回写索引，会把索引降级
+            # 到旧版本（两段锁竞态），必须在临界区内取最新状态。
+            current, saved_body, path = store.load(repo, mid)
+            if not current or path is None:
+                return {"error": "READBACK_FAILED", "entity_id": mid, "retryable": True}
             notes, modified = _relation_side_effects(repo, current)
             if not result.get("idempotent"):
                 index.record_usage(conn, "save", mid, title)
@@ -98,10 +101,11 @@ def update(repo, mid: str, *, request_id="", expected_content_revision="",
             lock_timeout=cfg.get("lock_timeout", 10.0), **updates)
         if result.get("error"):
             return result
-        current, body, path = store.load(repo, mid)
-        if not current:
-            return {"error": "READBACK_FAILED", "retryable": True}
         with RepoLock(repo, cfg.get("lock_timeout", 10.0)):
+            # 锁内重读快照（同 create：防两段锁竞态把索引降级到旧版本）。
+            current, body, path = store.load(repo, mid)
+            if not current:
+                return {"error": "READBACK_FAILED", "retryable": True}
             notes, modified = _relation_side_effects(repo, current)
             if not result.get("idempotent"):
                 index.record_usage(conn, "update", mid)

@@ -171,40 +171,42 @@ def cmd_reindex() -> int:
 def _human_op(rp, fn, mid, label, expect_revision: str = ""):
     """人工操作（verify/archive）的通用流程。
 
-    expect_revision: 可选的 governance_revision CAS 检查。
+    expect_revision: 可选的 governance_revision CAS 检查。检查必须在
+    RepoLock 内执行，与随后的写入处于同一临界区：锁外检查通过后、
+    写入执行前状态可被其他写入者改变（TOCTOU），检查结论会失效。
     """
     from .mutations import _compute_governance_revision, REVISION_CONFLICT
 
     cfg = config.load_config()
 
-    # CAS 检查（如果提供了 expect_revision）
-    if expect_revision:
-        conn = index.connect(rp)
-        try:
-            row = conn.execute(
-                "SELECT governance_revision FROM entity_heads WHERE entity_id=?",
-                (mid,),
-            ).fetchone()
-            if row:
-                current_rev = row[0]
-            else:
-                # 没有 entity_heads 记录，从文件计算
-                meta, body, _ = store.load(rp, mid)
-                if meta:
-                    current_rev = _compute_governance_revision(meta)
-                else:
-                    print(f"错误：未找到 {mid}")
-                    return 1
-            if expect_revision != current_rev:
-                print(f"错误：版本冲突（governance_revision 不匹配）。")
-                print(f"  期望: {expect_revision}")
-                print(f"  当前: {current_rev}")
-                print(f"请先 memory_read 获取最新 revision 后重试。")
-                return 1
-        finally:
-            conn.close()
-
     with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
+        # CAS 检查（如果提供了 expect_revision）：与 fn 的写入同临界区。
+        if expect_revision:
+            conn = index.connect(rp)
+            try:
+                row = conn.execute(
+                    "SELECT governance_revision FROM entity_heads WHERE entity_id=?",
+                    (mid,),
+                ).fetchone()
+                if row:
+                    current_rev = row[0]
+                else:
+                    # 没有 entity_heads 记录，从文件计算
+                    meta, body, _ = store.load(rp, mid)
+                    if meta:
+                        current_rev = _compute_governance_revision(meta)
+                    else:
+                        print(f"错误：未找到 {mid}")
+                        return 1
+                if expect_revision != current_rev:
+                    print(f"错误：版本冲突（governance_revision 不匹配）。")
+                    print(f"  期望: {expect_revision}")
+                    print(f"  当前: {current_rev}")
+                    print(f"请先 memory_read 获取最新 revision 后重试。")
+                    return 1
+            finally:
+                conn.close()
+
         meta = fn(rp, mid)
         if not meta:
             print(f"错误：未找到 {mid}")
