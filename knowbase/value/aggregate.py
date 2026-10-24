@@ -1,8 +1,10 @@
 """汇总机独立分析库与最小团队快照。
 
-只保存统计证据，不是第二套知识权威；连接时拒绝个人 memory.db 形态的
-目标文件（不混写个人业务库）。成员名单为人工登记（团队覆盖率的分母
-权威）；未登记/未确认时快照显式 unknown，不估算。
+只保存统计证据，不是第二套知识权威。默认归属 = 实例密钥 + 首次 enroll
+记录链（实例侧绑定，不靠汇总端人工确认）；人工 confirm_member 保留为
+纠错入口（发现归属错误时修正并留痕），不再是归属必需路径。覆盖率分母
+为已登记实例数（有归属的实例），未归属实例单列 unknown，不计入分母；
+host/工具标签永远不当成员。
 """
 
 import json
@@ -32,6 +34,15 @@ CREATE TABLE IF NOT EXISTS installations(
   member_binding_id TEXT NOT NULL DEFAULT '',
   first_seen TEXT,
   last_seen TEXT
+);
+CREATE TABLE IF NOT EXISTS attribution_corrections(
+  correction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  installation_id TEXT NOT NULL,
+  old_member_id TEXT NOT NULL DEFAULT '',
+  new_member_id TEXT NOT NULL,
+  actor TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  corrected_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS agg_events(
   team_id TEXT NOT NULL,
@@ -109,30 +120,70 @@ def register_member(conn, member_id: str, display_label: str = "") -> dict:
     return {"member_id": member_id, "display_label": display_label}
 
 
-def confirm_member(conn, installation_id: str, member_id: str) -> dict:
-    """把安装实例归属到登记成员（人工确认）；不追认历史事件为认证事实。"""
+def confirm_member(conn, installation_id: str, member_id: str, *,
+                   actor: str = "", note: str = "") -> dict:
+    """纠错入口：把安装实例归属修正到指定成员，并留痕。
+
+    不再是归属必需路径——默认归属走实例 enroll 链（见 attribution），
+    只有发现归属错误时才调用本函数。修正只改 installations 映射行，
+    不改写历史事件行（不追认历史事件为认证事实）；每次修正写入
+    attribution_corrections（旧归属、新归属、操作人、时间），不得静默改写。
+    """
+    old = conn.execute("SELECT member_id FROM installations WHERE installation_id=?",
+                       (installation_id,)).fetchone()
+    old_member = old[0] if old and old[0] else ""
     conn.execute(
         "INSERT INTO installations(installation_id,member_id,member_label,evidence,"
         "member_binding_id,first_seen,last_seen) VALUES(?,?,?,?,?,?,?) "
         "ON CONFLICT(installation_id) DO UPDATE SET member_id=excluded.member_id",
         (installation_id, member_id, "", "", "", now(), now()))
+    cur = conn.execute("INSERT INTO attribution_corrections(installation_id,old_member_id,"
+                       "new_member_id,actor,note,corrected_at) VALUES(?,?,?,?,?,?)",
+                       (installation_id, old_member, member_id, actor, note, now()))
     conn.commit()
-    return {"installation_id": installation_id, "member_id": member_id}
+    return {"installation_id": installation_id, "member_id": member_id,
+            "old_member_id": old_member, "correction_id": cur.lastrowid}
+
+
+def attribution(conn, team_id: str) -> dict:
+    """实例归属总览（Phase 3-A，snapshot 与验收共用同一口径）。
+
+    归属优先级：纠错映射（confirm_member）> 事件自带绑定 > enroll 记录绑定；
+    host/工具标签永远不产生归属。返回：
+    - mapping：安装实例 → 纠错成员 id；
+    - enroll：安装实例 → 首次 enroll 绑定（first-enroll-wins，见 exchange）；
+    - attributed：有归属的安装实例集合（映射或任一绑定）；
+    - unknown：事件中出现但无任何归属的安装实例 → {实例: 事件数}；
+    - registered：installations 表行数（已登记实例，含未归属者）。
+    """
+    mapping = {r[0]: r[1] for r in conn.execute(
+        "SELECT installation_id,member_id FROM installations WHERE member_id IS NOT NULL "
+        "AND member_id<>''").fetchall() if r[0]}
+    enroll = {r[0]: r[1] for r in conn.execute(
+        "SELECT installation_id,member_binding_id FROM installations "
+        "WHERE member_binding_id IS NOT NULL AND member_binding_id<>''").fetchall() if r[0]}
+    event_bindings: dict[str, set[str]] = {}
+    event_counts: dict[str, int] = {}
+    for inst, binding in conn.execute(
+            "SELECT installation_id,member_binding_id FROM agg_events WHERE team_id=?",
+            (team_id,)).fetchall():
+        if not inst:
+            continue
+        event_counts[inst] = event_counts.get(inst, 0) + 1
+        if binding:
+            event_bindings.setdefault(inst, set()).add(binding)
+    attributed = {inst for inst in set(mapping) | set(enroll) | set(event_bindings)}
+    unknown = {inst: event_counts[inst] for inst in event_counts if inst not in attributed}
+    registered = conn.execute("SELECT COUNT(*) FROM installations").fetchone()[0]
+    return {"mapping": mapping, "enroll": enroll, "attributed": attributed,
+            "unknown": unknown, "registered": registered}
 
 
 def _member_keys(conn, team_id: str) -> tuple[dict[str, str], set[str]]:
     """事件身份归并：installation→member 映射优先，其次 member_binding_id；
     两者皆缺 → 未归属（不得把 host/工具标签当成员）。"""
-    mapping = {r[0]: r[1] for r in conn.execute(
-        "SELECT installation_id,member_id FROM installations WHERE member_id IS NOT NULL "
-        "AND member_id<>''").fetchall() if r[0]}
-    unknown: set[str] = set()
-    for inst, binding in conn.execute(
-            "SELECT DISTINCT installation_id,member_binding_id FROM agg_events WHERE team_id=?",
-            (team_id,)).fetchall():
-        if not (mapping.get(inst) or binding):
-            unknown.add(inst)
-    return mapping, unknown
+    attr = attribution(conn, team_id)
+    return attr["mapping"], set(attr["unknown"])
 
 
 def _week_key(occurred_at: str):
@@ -164,6 +215,7 @@ def snapshot(conn, *, team_id: str, since: str = "", until: str = "") -> dict:
     adopted_tasks: set[str] = set()
     adopted_records: list[tuple] = []
     consumer_keys: set[str] = set()
+    consumer_insts: set[str] = set()
     feedback_by_outcome: dict[str, int] = {}
     feedback_by_source: dict[str, int] = {}
     feedback_records: list[tuple] = []
@@ -175,7 +227,8 @@ def snapshot(conn, *, team_id: str, since: str = "", until: str = "") -> dict:
     consumption_receipts: set[tuple] = set()
     sources: dict[str, dict] = {}
     watermark = ""
-    mapping, _unknown = _member_keys(conn, team_id)
+    attr = attribution(conn, team_id)
+    mapping = attr["mapping"]
 
     def member_key(inst: str, binding: str) -> str | None:
         return mapping.get(inst) or (f"binding:{binding}" if binding else None)
@@ -224,6 +277,8 @@ def snapshot(conn, *, team_id: str, since: str = "", until: str = "") -> dict:
                                               payload.get("use_id", "")))
                     if key:
                         consumer_keys.add(key)
+                        if inst:
+                            consumer_insts.add(inst)
                 if len(task_details) < MAX_TASK_DETAIL:
                     task_details.append({"task_id": task_id, "owner": owner,
                                          "memory_id": payload.get("memory_id", ""),
@@ -291,20 +346,26 @@ def snapshot(conn, *, team_id: str, since: str = "", until: str = "") -> dict:
             task_result_of[identity] = payload.get("result", "unknown")
 
     roster = conn.execute("SELECT COUNT(*) FROM members").fetchone()[0]
-    # 覆盖率分子＝有明确 referenced/adopted 的已确认成员（方案 §8.1 有效消费成员），
-    # 不是"有任意事件的成员"；绑定未确认身份不计入分子。
-    confirmed_effective_consumers = {k for k in consumer_keys if not k.startswith("binding:")}
-    coverage = None
-    coverage_known = False
-    if roster:
-        unattributed = conn.execute(
-            f"SELECT COUNT(DISTINCT installation_id) FROM agg_events WHERE {where} "
-            "AND member_binding_id='' AND installation_id NOT IN (SELECT installation_id "
-            "FROM installations WHERE member_id IS NOT NULL AND member_id<>'')",
-            params).fetchone()[0]
-        # 分母只认登记名单；存在无归属安装时覆盖率口径不完整，如实标注。
-        coverage_known = unattributed == 0
-        coverage = round(len(confirmed_effective_consumers) / roster, 4) if coverage_known else None
+    # 覆盖率（Phase 3-A）：分母 = 有归属的已登记实例数（纠错映射、enroll
+    # 绑定或事件自带绑定三者任一），分子 = 其中在窗口内有 referenced/adopted
+    # 有效消费的实例数。未归属实例不计入分母，单列 unknown_instances；
+    # unknown 不再毒化覆盖率口径（coverage_known 只要求分母 > 0）。
+    # 事件级归属仍只认映射与事件自带绑定：enroll 绑定决定实例级归属，
+    # 不追认绑定确立前的历史事件（与 confirm_member 纠错语义一致）。
+    attributed_insts = attr["attributed"]
+    coverage = round(len(consumer_insts) / len(attributed_insts), 4) if attributed_insts else None
+    coverage_known = bool(attributed_insts)
+    unknown_list = [{"installation_id": inst, "events": n}
+                    for inst, n in sorted(attr["unknown"].items())]
+    unknown_truncated = len(unknown_list) > 200
+    unknown_list = unknown_list[:200]
+    corr_total = conn.execute("SELECT COUNT(*) FROM attribution_corrections").fetchone()[0]
+    corrections = [{"installation_id": r[0], "old_member_id": r[1], "new_member_id": r[2],
+                    "actor": r[3], "note": r[4], "corrected_at": r[5]}
+                   for r in conn.execute(
+                       "SELECT installation_id,old_member_id,new_member_id,actor,note,"
+                       "corrected_at FROM attribution_corrections "
+                       "ORDER BY correction_id DESC LIMIT 50").fetchall()]
     import_row = conn.execute("SELECT MAX(imported_at) FROM imports WHERE team_id=?",
                               (team_id,)).fetchone()[0] or ""
     cross_member_tasks: set[str] = set()
@@ -464,8 +525,15 @@ def snapshot(conn, *, team_id: str, since: str = "", until: str = "") -> dict:
         "data_watermark": {"max_event_time": watermark, "max_import_time": import_row},
         "counts": {"events_total": len(rows), "events_by_type": by_type},
         "members": {"observed": len(binding_members), "effective_consumers": len(consumer_keys),
+                    "effective_consumer_instances": len(consumer_insts),
                     "roster_size": roster or None, "coverage": coverage,
-                    "coverage_known": coverage_known},
+                    "coverage_known": coverage_known,
+                    "instances_registered": attr["registered"],
+                    "instances_attributed": len(attributed_insts),
+                    "unknown_instances": unknown_list,
+                    "unknown_instances_truncated": unknown_truncated,
+                    "attribution_corrections": corrections,
+                    "attribution_corrections_total": corr_total},
         "tasks": {"delivered": len(delivered_tasks), "adopted": len(adopted_tasks),
                   "adoption_rate": round(len(adopted_tasks) / len(delivered_tasks), 4)
                   if delivered_tasks else None},
@@ -482,8 +550,12 @@ def snapshot(conn, *, team_id: str, since: str = "", until: str = "") -> dict:
         "sources": sorted(sources.values(), key=lambda s: -s["events"]),
         "task_details": task_details,
         "task_details_truncated": len(task_details) == MAX_TASK_DETAIL,
-        "limitations": ["覆盖率分母仅认人工登记成员名单，未登记则 unknown",
-                        "member_binding_id 为文件汇总确认证据，非中心认证",
+        "limitations": ["覆盖率分母为有归属的已登记实例数，未归属实例单列 "
+                        "unknown_instances、不计入分母",
+                        "默认归属走实例 enroll 链（首次绑定为准）；人工 confirm 仅为"
+                        "纠错入口，修正留痕于 attribution_corrections",
+                        "member_binding_id 为实例侧绑定证据，非中心认证；host/工具"
+                        "标签永远不当成员",
                         "重叠窗口/重复导入按 (team,event_id) 去重，不重复累计"],
     }
 

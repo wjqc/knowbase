@@ -213,9 +213,19 @@ def render_markdown(*, team: dict | None = None, personal: dict | None = None,
                      f"导入 {team['data_watermark']['max_import_time'] or '无'}")
         members = team["members"]
         coverage = (f"{members['coverage']:.0%}" if members.get("coverage_known")
-                    and members.get("coverage") is not None else "unknown（名单未登记或存在无归属安装）")
-        lines.append(f"- 成员：观测 {members['observed']}，有效消费 {members['effective_consumers']}，"
-                     f"名单 {members['roster_size'] if members['roster_size'] else '未登记'}，覆盖率 {coverage}")
+                    and members.get("coverage") is not None else "unknown（无有归属的已登记实例）")
+        lines.append(f"- 成员：观测 {members['observed']}，有效消费实例 "
+                     f"{members.get('effective_consumer_instances', members['effective_consumers'])}，"
+                     f"已登记实例 {members.get('instances_registered', '未知')}（有归属 "
+                     f"{members.get('instances_attributed', '未知')}），覆盖率 {coverage}")
+        unknown = members.get("unknown_instances") or []
+        if unknown:
+            lines.append(f"- 未归属实例单列 {len(unknown)} 个"
+                         + ("（截断）" if members.get("unknown_instances_truncated") else "")
+                         + "：" + "、".join(f"{u['installation_id']}×{u['events']}"
+                                           for u in unknown[:10]))
+        if members.get("attribution_corrections_total"):
+            lines.append(f"- 归属纠错留痕 {members['attribution_corrections_total']} 条")
         tasks = team["tasks"]
         rate = f"{tasks['adoption_rate']:.0%}" if tasks.get("adoption_rate") is not None else "未知"
         lines.append(f"- 任务：收到 {tasks['delivered']}，采纳 {tasks['adopted']}，采纳率 {rate}")
@@ -262,7 +272,17 @@ def _sanitize_snapshot(snap: dict) -> dict:
         "events_by_type": {k: v for k, v in (counts.get("events_by_type") or {}).items()
                            if isinstance(k, str) and isinstance(v, int)}}
     out["members"] = _scalar_map(snap.get("members"), {
-        "observed", "effective_consumers", "roster_size", "coverage", "coverage_known"})
+        "observed", "effective_consumers", "effective_consumer_instances", "roster_size",
+        "coverage", "coverage_known", "instances_registered", "instances_attributed",
+        "unknown_instances_truncated", "attribution_corrections_total"})
+    members_raw = snap.get("members") if isinstance(snap.get("members"), dict) else {}
+    out["members"]["unknown_instances"] = [
+        _scalar_map(u, {"installation_id", "events"})
+        for u in members_raw.get("unknown_instances") or [] if isinstance(u, dict)]
+    out["members"]["attribution_corrections"] = [
+        _scalar_map(c, {"installation_id", "old_member_id", "new_member_id", "actor",
+                        "note", "corrected_at"})
+        for c in members_raw.get("attribution_corrections") or [] if isinstance(c, dict)]
     out["tasks"] = _scalar_map(snap.get("tasks"), {"delivered", "adopted", "adoption_rate"})
     feedback = snap.get("feedback") if isinstance(snap.get("feedback"), dict) else {}
     out["feedback"] = {"by_outcome": {k: v for k, v in (feedback.get("by_outcome") or {}).items()

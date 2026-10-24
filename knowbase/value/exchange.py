@@ -118,12 +118,14 @@ def import_package(agg_conn, package_path, *, team_id: str = "default",
                                    if isinstance(item, dict) else "",
                                    "result": result["result"]})
         if source.get("installation_id"):
+            # 首次 enroll 记录链（Phase 3-A）：同一安装实例的绑定以首次导入
+            # 为准，后续导入只刷新 last_seen，绝不覆盖 member_binding_id/
+            # evidence/member_label/first_seen；归属变更只走 confirm_member
+            # 纠错入口（带留痕），不靠重复导入改写。
             agg_conn.execute(
                 "INSERT INTO installations(installation_id,member_id,member_label,evidence,"
                 "member_binding_id,first_seen,last_seen) VALUES(?,?,?,?,?,?,?) "
-                "ON CONFLICT(installation_id) DO UPDATE SET member_label=excluded.member_label,"
-                "evidence=excluded.evidence,member_binding_id=excluded.member_binding_id,"
-                "last_seen=excluded.last_seen",
+                "ON CONFLICT(installation_id) DO UPDATE SET last_seen=excluded.last_seen",
                 (source["installation_id"], None, source.get("member_label", ""),
                  source.get("member_evidence", ""), source.get("member_binding_id", ""),
                  imported_at, imported_at))
