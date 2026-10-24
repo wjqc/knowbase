@@ -275,6 +275,10 @@ def renew(conn, job_id: str, lease_token: str, *,
     # lease_owner 格式为 "session:token"，只需验证 token 部分
     if state != STATE_CLAIMED or not owner or not owner.endswith(f":{lease_token}"):
         return {"error": LEASE_EXPIRED}
+    # 租约已过期不可续：过期后任务可被他人重新领取（见 claim 的 lease_expired
+    # 判定），若仍允许原持有人续租会出现双持并覆盖新持有人的租约。
+    if until and until < now_str:
+        return {"error": LEASE_EXPIRED}
 
     conn.execute(
         "UPDATE jobs SET lease_until=?, updated_at=? WHERE job_id=?",

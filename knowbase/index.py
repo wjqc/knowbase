@@ -564,7 +564,7 @@ def build_index_md(repo: Path, cfg: dict | None = None) -> Path:
             age = 0
         if meta.get("confidence") == "once" and hit == 0 and age > STALE_REVIEW_DAYS:
             line = "- ⚠️待复核 " + line[2:]
-        if "staging" in str(path):
+        if path.parent.name == "staging":
             staging_lines.append(line)
             counts["staging"] += 1
         else:

@@ -238,8 +238,9 @@ def adapter_update(repo: Path, conn, mid: str, *,
                    **updates) -> dict:
     """更新卡片（带 CAS 和 intent 持久化）。
 
-    必须携带 expected_content_revision 和/或 expected_governance_revision；
-    不携带则返回错误，防止旧版本覆盖。
+    携带 expected_content_revision / expected_governance_revision 时才做
+    CAS 校验（与锁内重读的当前 revision 不符返回 REVISION_CONFLICT）；
+    不携带则不校验。
 
     返回 {"entity_id", "content_revision", "governance_revision", "updated": True}
     或 {"error": REVISION_CONFLICT / IDEMPOTENCY_CONFLICT}。
