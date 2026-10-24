@@ -318,6 +318,34 @@ MIGRATIONS: list[tuple[int, str]] = [
     );
     CREATE INDEX IF NOT EXISTS idx_task_outcomes_task ON task_outcomes(task_id);
     """),
+    (22, """
+    CREATE TABLE IF NOT EXISTS embedding_index(
+      memory_id TEXT PRIMARY KEY, model_version TEXT NOT NULL,
+      content_hash TEXT NOT NULL, vector TEXT NOT NULL, updated_at TEXT NOT NULL);
+    ALTER TABLE embedding_index ADD COLUMN generation_id TEXT NOT NULL DEFAULT '';
+    ALTER TABLE embedding_index ADD COLUMN entity_id TEXT NOT NULL DEFAULT '';
+    ALTER TABLE embedding_index ADD COLUMN content_revision TEXT NOT NULL DEFAULT '';
+    ALTER TABLE embedding_index ADD COLUMN dimension INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE embedding_index ADD COLUMN vector_checksum TEXT NOT NULL DEFAULT '';
+    CREATE INDEX idx_embedding_generation ON embedding_index(generation_id,entity_id);
+    CREATE TABLE embedding_generations(
+      generation_id TEXT PRIMARY KEY, provider_fp TEXT NOT NULL, space_id TEXT NOT NULL,
+      identity_json TEXT NOT NULL, manifest_hash TEXT NOT NULL, state TEXT NOT NULL,
+      expected_count INTEGER NOT NULL, completed_count INTEGER NOT NULL DEFAULT 0,
+      quality_digest TEXT NOT NULL DEFAULT '', error_code TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL, validated_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE retrieval_active(singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+      generation_id TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE retrieval_provider_state(provider_fp TEXT PRIMARY KEY, state TEXT NOT NULL,
+      failures INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0,
+      checked_at REAL NOT NULL DEFAULT 0, auth_revision TEXT NOT NULL DEFAULT '', lease_owner TEXT NOT NULL DEFAULT '',
+      lease_until REAL NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT 'cold_start');
+    CREATE TABLE retrieval_observations(event_id TEXT PRIMARY KEY, occurred_at TEXT NOT NULL,
+      origin TEXT NOT NULL, level TEXT NOT NULL, reason TEXT NOT NULL,
+      detail_json TEXT NOT NULL);
+    """),
+
 ]
 
 

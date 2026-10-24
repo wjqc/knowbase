@@ -10,6 +10,8 @@ import math
 import os
 import re
 import sqlite3
+import time
+from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -86,12 +88,14 @@ def upsert(conn: sqlite3.Connection, meta: dict, body: str, path: Path, staging:
     )
     vector_text = f"{meta.get('title', '')} {' '.join(meta.get('tags', []))} {indexed_body}"
     content_hash = hashlib.sha256(vector_text.encode("utf-8")).hexdigest()
-    model = config.load_config().get("index", {}).get("vector_model", "char-ngram-v1")
+    model = "char-ngram-v1"  # retained legacy projection; never scored as semantic
     conn.execute(
         "INSERT INTO embedding_index(memory_id,model_version,content_hash,vector,updated_at) "
         "VALUES(?,?,?,?,?) ON CONFLICT(memory_id) DO UPDATE SET "
         "model_version=excluded.model_version,content_hash=excluded.content_hash,"
-        "vector=excluded.vector,updated_at=excluded.updated_at",
+        "vector=excluded.vector,updated_at=excluded.updated_at "
+        "WHERE embedding_index.model_version='char-ngram-v1' "
+        "AND embedding_index.content_hash!=excluded.content_hash",
         (meta["id"], model, content_hash, json.dumps(_fallback_vector(vector_text)),
          datetime.now().isoformat(timespec="seconds")),
     )
@@ -121,6 +125,8 @@ def upsert(conn: sqlite3.Connection, meta: dict, body: str, path: Path, staging:
                   datetime.now().isoformat(timespec="seconds")))
     if commit:
         conn.commit()
+        from .semantic_index import schedule
+        schedule(conn)
 
 
 def rebuild(repo: Path) -> int:
@@ -137,7 +143,7 @@ def rebuild(repo: Path) -> int:
             upsert(conn, meta, body, path, staging=(path.parent.name == "staging"), commit=False)
             conn.execute("UPDATE meta SET hit_count=? WHERE id=?", (old_hits.get(meta["id"], 0), meta["id"]))
             n += 1
-        conn.execute("DELETE FROM embedding_index WHERE memory_id NOT IN (SELECT id FROM meta)")
+        conn.execute("DELETE FROM embedding_index WHERE generation_id='' AND memory_id NOT IN (SELECT id FROM meta)")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -145,7 +151,34 @@ def rebuild(repo: Path) -> int:
     finally:
         conn.close()
     build_index_md(repo)
+    with __import__("contextlib").closing(connect(repo)) as conn:
+        from .semantic_index import schedule
+        schedule(conn)
     return n
+
+
+_SOURCE_CACHE=OrderedDict()
+
+
+def source_current(conn, mid, expected_meta=None):
+    row=conn.execute("SELECT m.path,m.scope,m.status,m.confidence,h.content_revision,m.staging,m.type FROM meta m JOIN entity_heads h ON h.entity_id=m.id WHERE m.id=?",(mid,)).fetchone()
+    if not row:return False
+    if expected_meta and any(expected_meta.get(key)!=row[pos] for key,pos in
+            [("scope",1),("status",2),("confidence",3),("content_revision",4),("staging",5),("type",6)]):
+        return False
+    try:
+        path=Path(row[0])
+        if path.is_symlink() or path.stat().st_size>1048576:return False
+        raw=path.read_bytes();key=(str(path),hashlib.sha256(raw).hexdigest())
+        parsed=_SOURCE_CACHE.get(key)
+        if parsed is None:
+            parsed=store.parse_text(raw.decode(),str(path));_SOURCE_CACHE[key]=parsed
+            while len(_SOURCE_CACHE)>512:_SOURCE_CACHE.popitem(last=False)
+        meta,body=parsed
+        from .mutations import _compute_revision
+        return (meta.get("id")==mid and meta.get("scope")==row[1] and meta.get("status","active")==row[2]
+                and meta.get("confidence","once")==row[3] and _compute_revision(meta,body)==row[4])
+    except (OSError,UnicodeError,ValueError,TypeError,AttributeError,store.yaml.YAMLError):return False
 
 
 # ---------- 检索与排序 ----------
@@ -264,27 +297,12 @@ def _fallback_vector(text: str, dim: int = 512) -> list[float]:
 
 
 def _dense_ids(conn: sqlite3.Connection, query: str, allowed_ids: set[str], limit: int = 100) -> dict[str, float]:
-    """直接对现有 FTS 内容做 dense 召回；不创建第二套数据库。"""
-    qv = _fallback_vector(query)
-    if not any(qv):
-        return {}
-    threshold = float(config.load_config().get("index", {}).get("dense_threshold", 0.25))
-    scored = []
-    for mid, raw_vector in conn.execute("SELECT memory_id,vector FROM embedding_index"):
-        if mid not in allowed_ids:
-            continue
-        try:
-            dv = json.loads(raw_vector)
-        except (TypeError, ValueError):
-            continue
-        score = sum(a * b for a, b in zip(qv, dv))
-        if score >= threshold:
-            scored.append((mid, score))
-    scored.sort(key=lambda item: -item[1])
-    return dict(scored[:limit])
+    """Retired legacy entry; hash vectors never participate in retrieval."""
+    # Legacy vectors remain for migration only; never compare incompatible spaces.
+    return {}
 
 
-_QUERY_ALIASES = {
+_LEGACY_ALIASES = {
     "连不上": ("连接失败", "启动失败", "vpn"),
     "很卡": ("加载慢", "查询慢", "性能"),
     "怎么写": ("生成流程", "编写流程"),
@@ -292,20 +310,50 @@ _QUERY_ALIASES = {
 }
 
 
+def _load_aliases() -> dict[str, tuple[str, ...]]:
+    """Bounded package/local dictionary. Broken input cannot break base retrieval."""
+    from importlib.resources import files
+    merged = dict(_LEGACY_ALIASES)
+    sources = [Path(os.environ.get("KNOWBASE_SYNONYMS", str(Path.home() / ".knowbase" / "synonyms.json")))]
+    try:
+        sources.insert(0, files("knowbase.data").joinpath("synonyms.json"))
+    except (ModuleNotFoundError, TypeError):
+        pass
+    for source in sources:
+        try:
+            with source.open("r", encoding="utf-8") as stream:
+                raw = stream.read(262145)
+            if len(raw) > 262144:
+                continue
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                continue
+            for phrase, aliases in list(data.items())[:256]:
+                if (not isinstance(phrase, str) or not 1 <= len(phrase) <= 64 or
+                        not isinstance(aliases, list)):
+                    continue
+                values = [a for a in aliases[:6] if isinstance(a, str) and 1 <= len(a) <= 64]
+                if values:
+                    merged[phrase] = tuple(values)
+        except (OSError, ValueError, TypeError, AttributeError, ModuleNotFoundError):
+            continue
+    return merged
+
+
 def _expanded_lexical_ids(conn: sqlite3.Connection, query: str,
-                          base: dict[str, float] | None) -> dict[str, float]:
+                          base: dict[str, float] | None, aliases=None) -> dict[str, float]:
     """原查询精确召回 + 受控同义短语扩展；扩展项使用 OR，不改变原词高优先级。"""
     scores = dict(base or {})
     terms = []
-    for phrase, aliases in _QUERY_ALIASES.items():
+    for phrase, values in (aliases if aliases is not None else _load_aliases()).items():
         if phrase in query:
-            terms.extend(aliases)
+            terms.extend(values)
     # 长中文提问至少保留首个有信息量的 2~4 字片段，如“日报”。
     for run in re.findall(r"[\u4e00-\u9fff]{2,}", query):
         cleaned = re.sub(r"(怎么写|怎么办|如何|一下吗|一下)$", "", run)
         if len(cleaned) >= 2:
             terms.append(cleaned)
-    for term in dict.fromkeys(terms):
+    for term in list(dict.fromkeys(terms))[:6]:
         hit = _match_ids(conn, [term]) or _like_ids(conn, [term])
         for mid, score in hit.items():
             scores[mid] = max(scores.get(mid, 0.0), score * 0.7)
@@ -323,12 +371,26 @@ def _rrf_scores(*rankings: dict[str, float], k: int = 60) -> dict[str, float]:
 
 def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
            scope: str | None = None, tag: str | None = None, limit: int = 5,
-           include_inactive: bool = False) -> list[dict]:
+           include_inactive: bool = False, *, origin="local", diagnostics=None, deadline=None) -> list[dict]:
     """排序 = 词法相关度 × scope × confidence × 新鲜度 × 反馈。"""
-    terms = [t for t in (query or "").split() if t]
+    started=time.monotonic()
+    deadline=deadline or started+1.2
+    if diagnostics is None:diagnostics={}
+    from .retrieval_policy import local_policy
+    policy, aliases = local_policy()
+    if diagnostics is not None:
+        diagnostics.update(policy, origin=origin)
+    if len(query or "") > 8192:
+        if diagnostics is not None:
+            diagnostics["reason"] = "query_too_large"
+        return []
+    terms = [t for t in (query or "").split() if t][:16]
     if not terms:
         return []
 
+    before_revision = None
+    if origin in {"mcp_search","mcp_context"}:
+        before_revision=list(conn.execute("SELECT m.id,m.title,m.scope,m.confidence,m.status,m.staging,h.content_revision FROM meta m LEFT JOIN entity_heads h ON h.entity_id=m.id ORDER BY m.id"))
     # ≥3 字词走 FTS5 MATCH（OR 召回 + 命中词数加权），None 表示不可用/无命中
     lex = _match_ids(conn, terms) or {}
     # 2 字及以下短词（如「死锁」）trigram 无法命中，单独 LIKE 召回后并入词法分。
@@ -341,7 +403,8 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
     if not lex:
         # trigram 无命中时整体回退 LIKE（错别字/词形变化兜底）
         lex = _like_ids(conn, terms)
-    lex = _expanded_lexical_ids(conn, query, lex)
+    if policy["level"] == "L2":
+        lex = _expanded_lexical_ids(conn, query[:8192], lex, aliases)
     eligible = []
     for r in conn.execute("SELECT * FROM meta WHERE status != 'archived'"):
         m = _row_meta(r)
@@ -355,11 +418,28 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
             continue
         if tag and tag not in m["tags"]:
             continue
+        head=conn.execute("SELECT content_revision FROM entity_heads WHERE entity_id=?",(m["id"],)).fetchone()
+        m["content_revision"]=head[0] if head else ""
+        if origin in {"mcp_search","mcp_context","hook_prompt","hook_inflight"} and not source_current(conn,m["id"],m):
+            continue
         eligible.append(m)
     allowed_ids = {m["id"] for m in eligible}
     lex = {mid: score for mid, score in (lex or {}).items() if mid in allowed_ids}
-    dense = _dense_ids(conn, query, allowed_ids)
-    fused = _rrf_scores(lex, dense)
+    dense = {}
+    if origin in {"mcp_search","mcp_context"}:
+        from . import retrieval_state
+        dense=retrieval_state.dense(conn,query,allowed_ids,deadline=deadline-.05,diagnostics=diagnostics)
+        # Schedule recovery/index progress without blocking this request or any Hook.
+        retrieval_state.wake(Path(conn.execute("PRAGMA database_list").fetchone()[2]).parent)
+    if before_revision is not None:
+        after_revision=list(conn.execute("SELECT m.id,m.title,m.scope,m.confidence,m.status,m.staging,h.content_revision FROM meta m LEFT JOIN entity_heads h ON h.entity_id=m.id ORDER BY m.id"))
+        if before_revision!=after_revision:
+            fresh={}
+            results=search(conn,query,mtype=mtype,scope=scope,tag=tag,limit=limit,
+                           include_inactive=include_inactive,origin="local",diagnostics=fresh,deadline=deadline)
+            diagnostics.update(level=fresh["level"],channels=["lexical"],reason="index_changed",semantic_status="local_after_revision_change")
+            return results
+    fused = _rrf_scores(lex,dense)
     if not fused:
         return []
 
@@ -382,6 +462,12 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
                         "channels": channels})
 
     results.sort(key=lambda x: -x["score"])
+    # Automatic callers use positive lexical evidence, not an uncalibrated RRF threshold.
+    if origin.startswith("hook"):
+        from .retrieval_policy import automatic_match
+        results = [r for r in results if automatic_match(conn, query, r["id"])]
+    diagnostics["total_ms"]=round((time.monotonic()-started)*1000,2)
+    diagnostics["channels"]=[name for name,values in (("lexical",lex),("dense",dense)) if values]
     return results[:max(0, min(limit, 100))]
 
 
@@ -517,14 +603,51 @@ def build_index_md(repo: Path, cfg: dict | None = None) -> Path:
     return out
 
 
-def record_search(conn, query, scope, results, tool="search"):
-    """一条事件保存整次查询及最终返回列表，包括零命中；分数不是概率。"""
+def record_search(conn, query, scope, results, tool="search", *,
+                  query_class=None, raw_len=None, retrieval=None):
+    """一条事件保存整次查询及最终返回列表，包括零命中；分数不是概率。
+
+    可选字段（Phase 1 遥测扩展，旧事件按缺失读）：query_class=
+    raw/distilled/skipped:<原因>；raw_len=进入卫生层前的原始长度。
+    """
     from uuid import uuid4
     payload = {"search_id": str(uuid4()), "query": query, "scope": scope,
                "hits": [{"id": h["id"], "title": h["title"], "rank": i + 1,
                          "score": h["score"], "confidence": h["confidence"],
                          "status": h["status"]} for i, h in enumerate(results)]}
-    record_usage(conn, tool, detail=json.dumps(payload, ensure_ascii=False))
+    if query_class is not None:
+        payload["query_class"] = query_class
+    if raw_len is not None:
+        payload["raw_len"] = raw_len
+    if retrieval is not None:
+        payload["retrieval"] = retrieval
+    # A busy metrics store must not turn successful retrieval into a blocked tool.
+    if conn.in_transaction:
+        savepoint="retrieval_search_log"
+        try:
+            conn.execute("SAVEPOINT "+savepoint)
+            if config.load_config().get("stats",{}).get("enabled",True):
+                conn.execute("INSERT INTO usage_log VALUES(?,?,?,?,?)",(datetime.now().isoformat(timespec="seconds"),config.agent_name(),tool,"",json.dumps(payload,ensure_ascii=False)))
+                if retrieval is not None:
+                    from .retrieval_metrics import observe
+                    observe(conn,payload["search_id"],retrieval.get("origin",tool),{**retrieval,"query_class":query_class,"result_count":len(results)})
+            conn.execute("RELEASE "+savepoint)
+        except sqlite3.Error:
+            conn.execute("ROLLBACK TO "+savepoint);conn.execute("RELEASE "+savepoint)
+        return payload["search_id"]
+    old_busy=conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    try:
+        conn.execute("PRAGMA busy_timeout=50")
+        record_usage(conn, tool, detail=json.dumps(payload, ensure_ascii=False))
+        if retrieval is not None:
+            from .retrieval_metrics import observe
+            observe(conn,payload["search_id"],retrieval.get("origin",tool),
+                    {**retrieval,"query_class":query_class,"result_count":len(results)})
+    except sqlite3.Error:
+        conn.rollback()
+    finally:
+        conn.execute("PRAGMA busy_timeout="+str(int(old_busy)))
+    return payload["search_id"]
 
 
 def record_source_state(conn, source_path: str, source_hash: str,

@@ -62,7 +62,8 @@ def outbox_rows(repo):
 def test_migration_v19_creates_value_tables(memory_repo):
     conn = index.connect(memory_repo)
     versions = [r[0] for r in conn.execute("SELECT version FROM schema_migrations")]
-    assert max(versions) == 20 and 19 in versions
+    from knowbase import migrations
+    assert max(versions) == max(v for v,_ in migrations.MIGRATIONS) and 19 in versions
     conn.execute("SELECT event_id,payload_hash,state FROM value_outbox LIMIT 1")
     conn.execute("SELECT key,value FROM value_identity LIMIT 1")
     conn.execute("SELECT task_outcome_id,result,verification_source FROM task_outcomes LIMIT 1")

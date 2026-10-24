@@ -18,6 +18,7 @@ from . import migrations
 
 # ---------- 常量 ----------
 
+KIND_EMBED = "embedding_refresh"
 KIND_CAPTURE = "capture"       # 对话沉淀
 KIND_EXTRACT = "extract"       # 文档导入提炼
 
@@ -182,6 +183,8 @@ def claim(conn, job_id: str, host_session_id: str, *,
     (state, lease_owner, lease_until, fencing, cursor, total, attempt,
      kind, scope, next_run_at) = row
 
+    if kind == KIND_EMBED:
+        return {"error": NO_WORK}  # Internal index jobs are not agent distillation materials.
     lease_expired = bool(lease_until) and lease_until < now_str
     # next_run_at 为空视为无退避，立即可领（时间戳同为 ISO 字符串，可直接比较）
     retry_due = state == STATE_RETRY_WAIT and (not next_run_at or next_run_at <= now_str)

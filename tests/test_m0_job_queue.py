@@ -385,11 +385,10 @@ class TestHooksJobIntegration:
             flag.unlink()
 
         result = stop_event("test-session", str(transcript))
-        assert result  # 应该阻断
-        parsed = json.loads(result)
-        assert parsed["decision"] == "block"
-        # 应包含 job_id 或手动沉淀提示
-        assert "memory_save" in parsed["reason"] or "memory_job_claim" in parsed["reason"]
+        assert result == ""  # 采集仍入队，主任务正常结束。
+        conn = index.connect(isolated_repo)
+        assert conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='capture'").fetchone()[0] == 1
+        conn.close()
 
 
 # ---------- MCP tools ----------

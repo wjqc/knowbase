@@ -634,65 +634,14 @@ def cmd_stats() -> int:
     return 0
 
 
-def cmd_doctor(json_output: bool = False) -> int:
-    """检查现有 Markdown + memory.db + Git 单库运行状态。"""
-    rp = config.repo_path()
-    checks: list[dict] = []
-    db = rp / index.DB_NAME
-    if not db.exists():
-        checks.append({"name": "memory_db", "level": "fail", "message": f"不存在：{db}"})
-    else:
-        try:
-            conn = index.connect(rp)
-            meta_n = conn.execute("SELECT COUNT(*) FROM meta").fetchone()[0]
-            fts_n = conn.execute("SELECT COUNT(*) FROM mem_fts").fetchone()[0]
-            staging_n = conn.execute("SELECT COUNT(*) FROM meta WHERE staging=1").fetchone()[0]
-            stale_n = conn.execute("SELECT COUNT(*) FROM meta WHERE status='stale'").fetchone()[0]
-            md_n = sum(1 for _ in store.iter_all(rp, include_staging=True))
-            conn.execute("SELECT id FROM mem_fts WHERE mem_fts MATCH 'doctor' LIMIT 1").fetchall()
-            level = "pass" if meta_n == fts_n == md_n else "fail"
-            checks.append({"name": "index_parity", "level": level,
-                           "message": f"markdown={md_n} meta={meta_n} fts={fts_n}"})
-            checks.append({"name": "governance", "level": "warn" if stale_n else "pass",
-                           "message": f"staging={staging_n} stale={stale_n}"})
-            emb_n = conn.execute("SELECT COUNT(*) FROM embedding_index").fetchone()[0]
-            checks.append({"name": "embedding_index", "level": "pass" if emb_n == meta_n else "fail",
-                           "message": f"embedding={emb_n} meta={meta_n}"})
-            if config.load_config()["inflight"]["enabled"]:
-                pending = conn.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('awaiting_agent','validating','blocked')").fetchone()[0]
-                unapplied = conn.execute("SELECT COUNT(*) FROM job_submissions WHERE state!='done'").fetchone()[0]
-                checks.append({"name": "inflight_queue", "level": "warn" if pending or unapplied else "pass",
-                               "message": f"pending_jobs={pending} unapplied_receipts={unapplied}; 入队不代表成卡"})
-                events = dict(conn.execute("SELECT status,COUNT(*) FROM context_events GROUP BY status"))
-                checks.append({"name": "inflight_events", "level": "pass", "message": json.dumps(events, ensure_ascii=False)})
-            sync_row = conn.execute(
-                "SELECT status,error,last_fetch_at,last_push_at FROM sync_state "
-                "ORDER BY COALESCE(last_fetch_at,last_push_at) DESC LIMIT 1"
-            ).fetchone()
-            if sync_row:
-                checks.append({"name": "sync", "level": "pass" if sync_row[0] == "ok" else "warn",
-                               "message": f"status={sync_row[0]} fetch={sync_row[2]} push={sync_row[3]} error={sync_row[1] or ''}"})
-            else:
-                checks.append({"name": "sync", "level": "warn", "message": "尚无远程同步记录"})
-        except Exception as exc:
-            checks.append({"name": "memory_db", "level": "fail", "message": repr(exc)})
-        finally:
-            try: conn.close()
-            except Exception: pass
-    try:
-        lines = gitops._run(rp, "status", "--porcelain", "--branch", timeout=5).splitlines()
-        dirty = max(0, len(lines) - 1)
-        checks.append({"name": "git", "level": "warn" if dirty else "pass",
-                       "message": f"{lines[0] if lines else 'unknown branch'}; dirty={dirty}"})
-    except Exception as exc:
-        checks.append({"name": "git", "level": "fail", "message": repr(exc)})
-    import importlib.util
-    parser_modules = ("pypdf", "docx", "openpyxl", "pptx", "PIL", "pytesseract")
-    missing = [m for m in parser_modules if importlib.util.find_spec(m) is None]
-    checks.append({"name": "parsers", "level": "warn" if missing else "pass",
-                   "message": "missing=" + (",".join(missing) if missing else "none")})
-    checks.append({"name": "ocr_binary", "level": "pass" if shutil.which("tesseract") else "warn",
-                   "message": shutil.which("tesseract") or "tesseract 未安装，图片 OCR 不可用"})
+def cmd_doctor(json_output: bool = False, probe_embedding=False) -> int:
+    """Read-only health checks; never runs migration, sync, or telemetry."""
+    from .doctor import inspect
+    checks = inspect(config.repo_path())
+    if probe_embedding:
+        from .model_setup import inspect_connection
+        result=inspect_connection()
+        checks.append({"name":"embedding_probe","level":"pass" if result.get("connection_verified") else "warn","message":json.dumps(result,ensure_ascii=False)})
     if json_output:
         print(json.dumps(checks, ensure_ascii=False, indent=2))
     else:
@@ -785,13 +734,34 @@ def _main(argv=None):
     p_init.add_argument("--scope", help="明确项目范围；通用资料用 global")
     p_init.add_argument("--type", choices=store.TYPES, default="workflow",
                         help="（已废弃，兼容保留：导入一律生成 source）")
+    p_init.add_argument("--agents", help="接入 claude-code,zcode,trae,codex,cursor,opencode")
+    p_init.add_argument("--embedding", choices=["skip","configure"], default="skip")
+    p_init.add_argument("--embedding-config", help="只含地址/模型/环境变量引用的JSON，不允许明文密钥")
+    p_init.add_argument("--probe-embedding", action="store_true")
+    p_init.add_argument("--list-embedding-models", action="store_true")
+    p_init.add_argument("--verify-mcp", action="store_true", help="在隔离库检查固定runtime的stdio/build，非真实宿主会话")
+    p_init.add_argument("--non-interactive", action="store_true")
+    p_init.add_argument("--plan", action="store_true", help="仅显示接入计划，不写库/配置")
     p_dash = sub.add_parser("dashboard", help="生成本地 HTML 知识治理看板")
     p_dash.add_argument("--output", default="knowbase-dashboard.html")
     p_dash.add_argument("--open", action="store_true")
     p_dash.add_argument("--team-data", default="", help="团队快照 JSON（knowbase value snapshot 生成）")
     p_history = sub.add_parser("history", help="查看搜索命中记录 JSON")
     p_history.add_argument("--limit", type=int, default=100)
-    sub.add_parser("reindex", help="全量重建索引")
+    p_reindex=sub.add_parser("reindex", help="全量重建索引")
+    p_reindex.add_argument("--embed", action="store_true", help="构建内网影子向量代际，质量合格后自动激活")
+    p_reindex.add_argument("--deadline-seconds", type=float, default=60)
+    p_sem=sub.add_parser("embedding-work", help="处理一个已有索引任务")
+    p_sem.add_argument("--deadline-seconds",type=float,default=60)
+    p_activate=sub.add_parser("embedding-activate", help="校验后激活/回切现有合格代际")
+    p_activate.add_argument("generation")
+    sub.add_parser("retrieval-report", help="只读汇总检索等级、降级、成本与采纳证据")
+    p_eval=sub.add_parser("retrieval-evaluate",help="离线五组重放，需要审核标签和模型缓存")
+    p_eval.add_argument("--dataset",required=True);p_eval.add_argument("--cache",required=True)
+    p_eval.add_argument("--baseline-source",required=True);p_eval.add_argument("--output",required=True)
+    p_eval.add_argument("--dense-min",required=True,type=float);p_eval.add_argument("--gate-dense-min",required=True,type=float)
+    p_cache=sub.add_parser("retrieval-cache",help="显式向内网模型缓存已批准的评测输入")
+    p_cache.add_argument("--dataset",required=True);p_cache.add_argument("--output",required=True)
     p_privacy = sub.add_parser("privacy-scrub", help="只报告或备份后清洗观察/提炼队列中的凭据，不输出命中原文")
     p_privacy.add_argument("--apply", action="store_true")
     p_privacy.add_argument("--backup-dir", help="apply 必填：仓库外的新私有备份目录")
@@ -818,12 +788,13 @@ def _main(argv=None):
     p_metrics.add_argument("--naive-timezone",default="local",help="旧无时区日志解释，建议IANA名如Asia/Shanghai")
     p_doc = sub.add_parser("doctor", help="单库健康检查（memory.db/FTS/Git/治理）")
     p_doc.add_argument("--json", action="store_true", help="以 JSON 列表输出")
+    p_doc.add_argument("--probe-embedding", action="store_true", help="显式发合成连接探针，不构建索引")
     p_alerts = sub.add_parser("alerts", help="输出单库异常状态，供调度器通知")
     p_alerts.add_argument("--dry-run", action="store_true",
                           help="不实际派发 webhook/文件，仅 stdout 打印事件清单")
     p_hook = sub.add_parser("hook", help="Agent hook 入口")
     p_hook.add_argument("event", choices=["session-start", "user-prompt", "stop", "tool-before", "tool-after", "tool-failure", "before-compact"])
-    p_hook.add_argument("--style", choices=["claude", "zcode", "trae"], default="claude")
+    p_hook.add_argument("--style", choices=["claude", "zcode", "trae", "codex"], default="claude")
     p_imp = sub.add_parser("import", help="批量导入为 source artifact（不产生知识卡、不进默认检索）")
     p_imp.add_argument("directory")
     p_imp.add_argument("--type", choices=store.TYPES, default="pitfall",
@@ -904,7 +875,59 @@ def _main(argv=None):
         return 2 if result.get("error") else 0
 
     if args.cmd == "init":
-        return cmd_init(args.import_from, args.scope, args.type)
+        from . import integration
+        agents = [v.strip() for v in (args.agents or "").split(",") if v.strip()]
+        if not args.agents and not args.non_interactive and sys.stdin.isatty():
+            available = integration.discover()
+            print("发现 Agent：" + ", ".join(h["id"] for h in available))
+            print("可选择 claude-code,zcode,trae,codex,cursor,opencode；Cursor/OpenCode先使用主动MCP。")
+            selected = input("接入哪些 Agent（逗号分隔；直接回车跳过）？ ").strip()
+            agents = [v.strip() for v in selected.split(",") if v.strip()]
+        model_options=None
+        from . import model_setup
+        if args.embedding_config:
+            try:model_options=model_setup.read_options(args.embedding_config)
+            except (integration.IntegrationError,OSError):
+                print("接入未完成：模型配置文件无效或不可读");return 3
+        elif args.embedding=="configure":
+            if args.non_interactive or not sys.stdin.isatty():
+                print("非交互模型配置需要 --embedding-config；基础检索无需模型")
+                return 2
+            model_options=model_setup.interactive()
+        elif not args.non_interactive and sys.stdin.isatty():
+            if input("配置公司内网 Embedding？[y/N] ").lower()=="y":model_options=model_setup.interactive()
+        try:
+            if not args.plan and (agents or model_options is not None):
+                integration.resume()
+            changes = integration.plan(agents)
+            if model_options is not None:
+                secret_change=getattr(model_options,"secret_change",None)
+                if secret_change:changes.append(secret_change)
+                changes.append(integration.model_change(model_options))
+            if args.plan:
+                print(json.dumps({"files": [c["path"] for c in changes], "agents": agents,
+                    "writes": False, "embedding": "not_configured", "session_effective": "unknown"}, ensure_ascii=False))
+                return 0
+            code = cmd_init(args.import_from, args.scope, args.type)
+            if code:return code
+            # Basic init may create the shared config. Re-plan its model diff to preserve it.
+            if model_options is not None:
+                changes=[c for c in changes if Path(c["path"])!=config.CONFIG_PATH.resolve()]
+                changes.append(integration.model_change(model_options))
+            if not changes and not agents and model_options is None and not (args.probe_embedding or args.list_embedding_models or args.verify_mcp):
+                return 0
+            result = integration.apply(changes,allowed_paths=(config.CONFIG_PATH.resolve(),))
+            print(json.dumps(result, ensure_ascii=False))
+            if args.probe_embedding:print(json.dumps(model_setup.inspect_connection(),ensure_ascii=False))
+            if args.list_embedding_models:print(json.dumps(model_setup.inspect_connection(models=True),ensure_ascii=False))
+            if args.verify_mcp:
+                import asyncio
+                print(json.dumps(asyncio.run(integration.probe_protocol()),ensure_ascii=False))
+            print("本地检索可用。请在宿主重连MCP并检查Hook开关/信任；配置、协议探针和真实会话生效分别验收。")
+            return 0
+        except (integration.IntegrationError, OSError) as exc:
+            print("接入未完成：" + str(exc) if isinstance(exc, integration.IntegrationError) else "接入未完成：配置I/O失败")
+            return 3
     if args.cmd == "privacy-scrub":
         from .privacy import scrub
         try:
@@ -939,7 +962,44 @@ def _main(argv=None):
             conn.close()
         return 0
     if args.cmd == "reindex":
-        return cmd_reindex()
+        code=cmd_reindex()
+        if code or not args.embed:return code
+        from .semantic_index import build
+        import time
+        result=build(config.repo_path(),deadline=time.monotonic()+max(1,min(3600,args.deadline_seconds)))
+        print(json.dumps(result,ensure_ascii=False));return 0 if result["state"] in {"active","ready","no_work"} else 2
+    if args.cmd == "embedding-work":
+        from .semantic_index import build
+        import time
+        result=build(config.repo_path(),deadline=time.monotonic()+max(1,min(3600,args.deadline_seconds)))
+        print(json.dumps(result,ensure_ascii=False));return 0 if result["state"] in {"active","ready","no_work"} else 2
+    if args.cmd == "embedding-activate":
+        from .semantic_index import activate
+        from .embedding_provider import ProviderError
+        conn=index.connect(config.repo_path())
+        try:
+            from .semantic_index import generation
+            from .retrieval_state import provider
+            g=generation(conn,args.generation)
+            if not g:raise ProviderError("index_not_ready")
+            provider().probe(g["identity"])
+            print(json.dumps({"generation":activate(conn,args.generation),"state":"active"}));return 0
+        except ProviderError as exc:
+            print(json.dumps({"state":"local","reason":exc.category}));return 2
+        finally:conn.close()
+    if args.cmd == "retrieval-evaluate":
+        from .retrieval_evaluation import run
+        result=run(config.repo_path(),args.dataset,args.cache,args.baseline_source,dense_min=args.dense_min,gate_dense_min=args.gate_dense_min)
+        Path(args.output).write_text(json.dumps(result,ensure_ascii=False,indent=2))
+        print(json.dumps({"state":result["state"],"reason":result.get("reason")}));return 0 if result["state"]=="COMPLETED_OFFLINE" else 2
+    if args.cmd == "retrieval-cache":
+        from .retrieval_evaluation import export_cache
+        try:result=export_cache(config.repo_path(),args.dataset,args.output)
+        except (ValueError,OSError) as exc:result={"state":"NOT_RUN","reason":type(exc).__name__}
+        print(json.dumps(result,ensure_ascii=False));return 0 if result["state"]=="cached" else 2
+    if args.cmd == "retrieval-report":
+        from .retrieval_metrics import report
+        print(json.dumps(report(config.repo_path()),ensure_ascii=False,indent=2));return 0
     if args.cmd == "verify":
         return cmd_verify(args.id, expect_revision=getattr(args, "expect_revision", ""))
     if args.cmd == "archive":
@@ -1137,7 +1197,7 @@ def main(argv=None):
         return code
     finally:
         # metrics导出及serve自身不落新日志；具体MCP调用单独记录。
-        if command != "privacy-scrub":
+        if command not in {"privacy-scrub", "doctor", "alerts", "retrieval-report", "retrieval-evaluate", "retrieval-cache"} and not (command == "init" and "--plan" in arguments):
             telemetry.record("cli",command,status,(monotonic()-started)*1000)
 
 

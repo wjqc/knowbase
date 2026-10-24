@@ -1,0 +1,137 @@
+{
+  "summary": {
+    "must": {
+      "passed": 8,
+      "total": 8
+    },
+    "gap": {
+      "passed": 4,
+      "total": 4
+    }
+  },
+  "rows": [
+    {
+      "query": "EasyConnect 死锁",
+      "expected": "P-2026-0001",
+      "kind": "must",
+      "ids": [
+        "P-2026-0016",
+        "P-2026-0001"
+      ],
+      "passed": true
+    },
+    {
+      "query": "vpn",
+      "expected": "P-2026-0001",
+      "kind": "must",
+      "ids": [
+        "P-2026-0001",
+        "W-b2021b74a0f5",
+        "P-2026-0021"
+      ],
+      "passed": true
+    },
+    {
+      "query": "Docker 镜像加速",
+      "expected": "P-2026-0005",
+      "kind": "must",
+      "ids": [
+        "P-2026-0005"
+      ],
+      "passed": true
+    },
+    {
+      "query": "docker pull 超时",
+      "expected": "P-2026-0005",
+      "kind": "must",
+      "ids": [
+        "P-2026-0026",
+        "P-2026-0005",
+        "P-2026-0039"
+      ],
+      "passed": true
+    },
+    {
+      "query": "根目录 git",
+      "expected": "P-2026-0004",
+      "kind": "must",
+      "ids": [
+        "P-2026-0016",
+        "P-2026-0004",
+        "P-2026-0026"
+      ],
+      "passed": true
+    },
+    {
+      "query": "门户加载慢",
+      "expected": "P-2026-0006",
+      "kind": "must",
+      "ids": [
+        "P-2026-0006"
+      ],
+      "passed": true
+    },
+    {
+      "query": "HAR",
+      "expected": "P-2026-0002",
+      "kind": "must",
+      "ids": [
+        "P-2026-0026",
+        "P-2026-0002",
+        "P-3345d3ee105f"
+      ],
+      "passed": true
+    },
+    {
+      "query": "asdfjkl3482019zxcv",
+      "expected": null,
+      "kind": "must",
+      "ids": [],
+      "passed": true
+    },
+    {
+      "query": "内网连不上怎么办",
+      "expected": "P-2026-0001",
+      "kind": "gap",
+      "ids": [
+        "P-2026-0001",
+        "P-2026-0036",
+        "W-b2021b74a0f5"
+      ],
+      "passed": true
+    },
+    {
+      "query": "系统很卡",
+      "expected": "P-2026-0006",
+      "kind": "gap",
+      "ids": [
+        "P-2026-0006",
+        "P-2026-0029",
+        "P-2026-0013"
+      ],
+      "passed": true
+    },
+    {
+      "query": "日报怎么写",
+      "expected": "W-2026-0001",
+      "kind": "gap",
+      "ids": [
+        "W-2026-0001"
+      ],
+      "passed": true
+    },
+    {
+      "query": "部署要问一下吗",
+      "expected": "PR-2026-0001",
+      "kind": "gap",
+      "ids": [
+        "P-2026-0016",
+        "PR-2026-0001",
+        "P-2026-0026"
+      ],
+      "passed": true
+    }
+  ],
+  "scope": "frozen SQLite lexical regression only; not live model quality",
+  "snapshot_sha256": "0a7646a48a3b17b1874e82d4da87055eabc2a40c5b579aeedde73b6ece703a14"
+}

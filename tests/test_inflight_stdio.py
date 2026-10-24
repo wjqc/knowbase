@@ -23,7 +23,9 @@ def test_registered_mcp_pipeline_creates_and_consumes_knowledge(memory_repo):
                 "KNOWBASE_AGENT_NAME": "stdio-probe"})
         async with stdio_client(parameters) as (read, write):
             async with ClientSession(read, write) as session:
-                await session.initialize()
+                initialized = await session.initialize()
+                assert "普通提炼待办不阻断主任务" in initialized.instructions
+                assert "入队后继续memory_job_claim" not in initialized.instructions
                 registered = {tool.name for tool in (await session.list_tools()).tools}
                 assert {"memory_context", "memory_job_material", "memory_job_submit", "memory_use", "memory_metrics"} <= registered
                 async def call(name, arguments):

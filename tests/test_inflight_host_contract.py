@@ -38,7 +38,7 @@ def test_tool_after_queues_increment_without_new_user_message(memory_repo, tmp_p
     payload = materials.payload_for_job(conn, jobs[0])
     assert len(payload["checkpoint"]["events"]) == 1
     assert "审批角色" in payload["segments"][0]["text"]
-    assert "memory_job_claim" in host_events.render(second)
+    assert "memory_job_claim" not in host_events.render(second)
     conn.close()
 
 
@@ -155,7 +155,7 @@ def test_unchanged_pending_job_does_not_repeat_context_on_every_tool(memory_repo
     transcript = tmp_path / "pending.jsonl"
     transcript.write_text(json.dumps({"role": "user", "text": "订单结算后禁止撤回。"}, ensure_ascii=False) + "\n")
     first = host_events.handle(event(tmp_path, transcript, "a"), event="tool-after", style="zcode")
-    assert first["notify_job_ids"]
+    assert first["job_ids"] and first["notify_job_ids"] == []
     repeated = host_events.handle(event(tmp_path, transcript, "b"), event="tool-before", style="zcode")
     assert repeated["job_ids"]
     assert repeated["notify_job_ids"] == []

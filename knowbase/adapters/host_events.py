@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -138,7 +139,7 @@ def _save_capture_checkpoint(conn, host, session_id, scope, coverage, events, so
     conn.commit()
 
 
-def capture_increment(repo, session_id, transcript_path, scope, host):
+def capture_increment(repo, session_id, transcript_path, scope, host, *, automatic=True):
     """只从显式宿主 transcript 引用采集未入队增量，不扫描聊天目录。"""
     path = Path(transcript_path or "")
     if path.is_file() and path.stat().st_size > 10 * 1024 * 1024:
@@ -163,8 +164,16 @@ def capture_increment(repo, session_id, transcript_path, scope, host):
         if cursor > len(events) or (cursor and prefix_hash != checkpoint.get("prefix_hash")):
             events = _observed_events(conn, session_id, scope, host)
             source_kind, cursor = "observations", 0
+        if not automatic:
+            # Explicit observation capture may revisit auto-filtered material;
+            # queued text hashes below still prevent duplicate extraction jobs.
+            cursor = 0
         delta = [e for e in events[cursor:] if not _is_self_event(e)]
         delta = _drop_distiller_echo(delta, events, coverage)
+        from ..hook_policy import filter_capture
+        if automatic:
+            delta, filtered = filter_capture(delta)
+            coverage["_hook_capture_filter"] = filtered
         if not delta:
             # 增量全被过滤（自身调用/提炼会话回声）：推进游标避免每次钩子重算。
             _save_capture_checkpoint(conn, host, session_id, scope, coverage, events, source_kind)
@@ -222,7 +231,7 @@ def pending_notifications(conn, job_ids, notices: dict, *, force: bool = False) 
 
 def handle(data: dict, *, event: str, style: str) -> dict:
     cfg = config.load_config()
-    if not cfg["inflight"]["enabled"]:
+    if not cfg["inflight"]["enabled"] or not cfg.get("hooks", {}).get("enabled", True):
         return {"status": "disabled"}
     session = str(data.get("session_id") or data.get("sessionId") or os.environ.get("CLAUDE_SESSION_ID")
                   or os.environ.get("ZCODE_SESSION_ID") or "")
@@ -344,10 +353,9 @@ def handle(data: dict, *, event: str, style: str) -> dict:
                 result["needs_query_plan"] = False
             else:
                 coverage["_hook_plan_notice"] = now.isoformat(timespec="seconds")
-        notices = coverage.get("_hook_notices", {})
-        result["notify_job_ids"] = pending_notifications(
-            conn, result.get("job_ids", []), notices, force=event in ("stop", "recover"))
-        coverage["_hook_notices"] = notices
+        # Jobs remain durable and visible through jobs/status. Foreground hooks
+        # never turn queued maintenance into instructions for the active task.
+        result["notify_job_ids"] = []
         conn.execute("UPDATE context_sessions SET coverage_json=? WHERE host_profile=? AND session_id=?",
                      (json.dumps(coverage), host, session))
         status = str(result["error"]).lower() if result.get("error") else result.get("retrieval_status", "executed")
@@ -385,8 +393,58 @@ def render(result):
         lines.append("[knowbase 执行中候选] 先核对适用条件，再按需 memory_read；命中不代表已经验证：")
         for c in result["candidates"]:
             lines.append(f"- [{c['id']}] {c['summary']}；适用：{c['applicable_when']}；{c['confidence']}")
-    notifications = result.get("notify_job_ids", result.get("job_ids", []))
-    if notifications:
-        lines.append("[knowbase 增量提炼待办] " + ", ".join(notifications) +
-            "。请 memory_job_claim(protocol_version=2) 领取，memory_job_material 续页，核对技术经验及业务规则，查重后提交；无价值片段给明确理由。")
     return "\n".join(lines)
+
+
+def render_foreground(result, data, *, event, style, prefix=""):
+    """At most two distinct, bounded notices per user input, across processes.
+
+    Stop is always silent. Budgets apply to automatic hints only; explicit MCP
+    phase retrieval/read/feedback and extraction APIs keep their full contracts.
+    """
+    if event in {"stop", "before-compact"}:
+        return ""
+    cfg = config.load_config()
+    if not cfg.get("hooks", {}).get("enabled", True):
+        return ""
+    session = str(data.get("session_id") or data.get("sessionId") or "")
+    if not session:
+        return ""
+    text = "\n".join(p for p in (prefix, render(result)) if p)
+    conn = index.connect(config.repo_path(cfg))
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        host = _host(style)
+        row = conn.execute("SELECT coverage_json FROM context_sessions WHERE host_profile=? AND session_id=?", (host, session)).fetchone()
+        coverage = json.loads(row[0]) if row else {}
+        notice = coverage.get("_hook_notice", {"count": 0, "keys": []})
+        if event == "user-prompt":
+            fingerprint = materials.digest(data)
+            if notice.get("prompt") != fingerprint:
+                notice = {"count": 0, "keys": [], "prompt": fingerprint}
+        if result.get("needs_query_plan"):
+            key = "plan"
+        elif result.get("scope_binding_required"):
+            key = "scope"
+        else:
+            key = materials.digest(text)
+        budget = max(0, min(2, int(cfg["inflight"].get("hook_notice_budget", 2))))
+        limit = max(0, min(900, int(cfg["inflight"].get("hook_notice_chars", 900))))
+        # Never truncate a session identity or evidence line into an invalid hint.
+        if not text or len(text) > limit or key in notice["keys"] or notice["count"] >= budget:
+            text = ""
+        else:
+            notice["count"] += 1
+            notice["keys"].append(key)
+        coverage["_hook_notice"] = notice
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        conn.execute("INSERT INTO context_sessions(host_profile,session_id,scope,coverage_json,updated_at) VALUES(?,?,?,?,?) "
+                     "ON CONFLICT(host_profile,session_id) DO UPDATE SET coverage_json=excluded.coverage_json",
+                     (host, session, "", json.dumps(coverage), now))
+        conn.commit()
+        return text
+    except (ValueError, TypeError, sqlite3.Error):
+        conn.rollback()
+        return ""
+    finally:
+        conn.close()

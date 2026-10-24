@@ -139,6 +139,13 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                 "SELECT e.memory_id,e.content_hash,m.confidence,m.status,m.staging,h.content_revision FROM embedding_index e "
                 "JOIN meta m ON m.id=e.memory_id LEFT JOIN entity_heads h ON h.entity_id=m.id "
                 "WHERE m.scope IN (?, 'global') ORDER BY e.memory_id", (scope,))))
+            from .retrieval_policy import local_policy
+            retrieval_policy, _ = local_policy()
+            result["retrieval"] = dict(retrieval_policy)
+            result["retrieval_queries"] = []
+            if not automatic:
+                from .retrieval_state import revision
+                retrieval_policy={**retrieval_policy,"semantic_revision":revision(conn)}
             seen, found = set(), []
             deferred_sync = False
             performed = 0
@@ -149,6 +156,8 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
             deferred = []
             for topic in topics:
                 tid = str(topic.get("topic_id", ""))
+                if automatic and stage == "observe" and observation and observation.get("hook_event") == "user-prompt":
+                    continue
                 if topic.get("status", "active") not in ("active", "current"):
                     deferred.append(topic)
                     continue
@@ -159,7 +168,7 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                 signature = materials.digest({"topic": topic, "knowledge": knowledge_version,
                     "scope": scope, "evidence": ([r.get("error_hash") for r in (evidence_refs or []) if isinstance(r, dict)]
                                                   if automatic else evidence_refs or []), "task_revision": task_revision,
-                    "automatic": automatic})
+                    "automatic": automatic, "retrieval": retrieval_policy})
                 cached = coverage.get(tid)
                 completed = (set(cached.get("queries", [])) if isinstance(cached, dict)
                              and cached.get("signature") == signature and stage != "recover" else set())
@@ -171,8 +180,22 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                     if (performed >= limit or topic_performed >= per_topic or
                             (time.monotonic() - started) * 1000 > options["fast_path_timeout_ms"]):
                         break
-                    hits = index.search(conn, query, scope=scope, limit=10)
-                    index.record_search(conn, query, scope, hits, tool="inflight_search")
+                    search_query = query
+                    if automatic:
+                        from .query_hygiene import prepare
+                        prepared = prepare(query)
+                        if prepared["action"] == "skip":
+                            completed.add(query)
+                            continue
+                        search_query = prepared["query"]
+                    diagnostics = {}
+                    hits = index.search(conn, search_query, scope=scope, limit=10,
+                        origin="hook_inflight" if automatic else "mcp_context", diagnostics=diagnostics,
+                        deadline=started+options["fast_path_timeout_ms"]/1000)
+                    diagnostics.update(context_event_id=event_id,session_id=session_id,task_id=task_id or session_id)
+                    index.record_search(conn, search_query, scope, hits, tool="inflight_search", retrieval=diagnostics)
+                    result["retrieval_queries"].append({"query_hash":materials.digest(search_query),**diagnostics})
+                    result["retrieval"]=diagnostics
                     performed += 1
                     topic_performed += 1
                     completed.add(query)
@@ -189,6 +212,8 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                             deferred_sync = True
                             break
                         if not candidate:
+                            continue
+                        if hit.get("content_revision") and candidate["content_revision"]!=hit["content_revision"]:
                             continue
                         candidate["topic_ids"] = [tid]
                         seen.add(hit["id"])

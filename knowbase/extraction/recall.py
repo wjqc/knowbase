@@ -17,7 +17,7 @@ def wide_recall(conn, query: str, scope: str, *,
 
     召回路：
     1. FTS5 词法匹配
-    2. 字符 n-gram 向量相似
+    2. 本地中文短词扩展（查重宽召回，不是语义向量）
     3. 标题关键词匹配
     4. code_refs 匹配
     """
@@ -38,11 +38,15 @@ def wide_recall(conn, query: str, scope: str, *,
         for mid, score in list(fts_ids.items())[:limit_per_route]:
             _merge(results, mid, score, "fts")
 
-    # 路 2: dense 向量
-    dense = index._dense_ids(conn, query, _all_ids(conn, scope, include_staging),
-                             limit=limit_per_route)
-    for mid, score in dense.items():
-        _merge(results, mid, score, "dense")
+    # 路 2: bounded literal CJK phrases. Keep duplicate review broad after retiring hash vectors.
+    allowed = _all_ids(conn, scope, include_staging)
+    pieces = []
+    for run in re.findall(r"[\u4e00-\u9fff]{2,}", query[:512]):
+        pieces.extend(run[i:i+2] for i in range(len(run)-1))
+    expanded = index._like_ids(conn, list(dict.fromkeys(pieces))[:48])
+    for mid, score in sorted(expanded.items(), key=lambda x:-x[1]):
+        if mid in allowed:
+            _merge(results, mid, score * 0.5, "cjk_literal")
 
     # 路 3: LIKE 扫描（标题关键词）
     like_ids = index._like_ids(conn, terms or [query[:20]])

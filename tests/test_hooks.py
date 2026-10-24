@@ -73,8 +73,7 @@ tr.write_text("\n".join([
 ]), encoding="utf-8")
 out1 = hooks.stop_event("sess-A", str(tr))
 out2 = hooks.stop_event("sess-A", str(tr))
-r1 = json.loads(out1)
-check("stop 首次阻断", r1["decision"] == "block" and "memory_save" in r1["reason"])
+check("stop 首次静默放行", out1 == "")
 check("stop 二次放行", out2 == "")
 
 # 5. 已沉淀会话 → 不阻断
@@ -87,13 +86,12 @@ tr2.write_text("\n".join([
 ]), encoding="utf-8")
 check("stop 已沉淀放行", hooks.stop_event("sess-B", str(tr2)) == "")
 
-# 5b. 读取过记忆但未回填 → 阻断提醒反馈
+# 5b. 读取过记忆但未回填 → 不强制延长会话
 tr2b = TMP / "transcript2b.jsonl"
 tr2b.write_text(json.dumps({"type": "assistant", "message": {"content": [
     {"type": "tool_use", "name": "memory_read", "input": {}}]}}), encoding="utf-8")
 out_fb = hooks.stop_event("sess-D", str(tr2b))
-rf = json.loads(out_fb)
-check("stop 读后未回填阻断", rf["decision"] == "block" and "memory_feedback" in rf["reason"], out_fb[:120])
+check("stop 读后未回填也放行", out_fb == "")
 
 # 5c. 读后已回填 → 放行
 tr2c = TMP / "transcript2c.jsonl"
@@ -114,7 +112,7 @@ check("stop 无操作放行", hooks.stop_event("sess-C", str(tr3)) == "")
 # 7. CLI 入口（管道模拟 stdin）
 import subprocess
 p = subprocess.run(
-    [".venv/bin/python", "-m", "knowbase", "hook", "user-prompt"],
+    [sys.executable, "-m", "knowbase", "hook", "user-prompt"],
     input=json.dumps({"prompt": "EasyConnect 死锁"}),
     capture_output=True, text=True)
 check("CLI hook 入口", pid in p.stdout, p.stdout[:80] + p.stderr[:80])
@@ -122,7 +120,7 @@ check("CLI hook 入口", pid in p.stdout, p.stdout[:80] + p.stderr[:80])
 # 7b. zcode 风格输出：严格 JSON additionalContext
 import json as _json
 out = subprocess.run(
-    [".venv/bin/python", "-m", "knowbase", "hook", "user-prompt", "--style", "zcode"],
+    [sys.executable, "-m", "knowbase", "hook", "user-prompt", "--style", "zcode"],
     input=_json.dumps({"prompt": "EasyConnect 死锁"}), capture_output=True, text=True).stdout
 parsed = _json.loads(out)
 check("zcode 风格 additionalContext", "additionalContext" in parsed and pid in parsed["additionalContext"], out[:100])

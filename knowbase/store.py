@@ -180,7 +180,11 @@ class LintError(Exception):
 # ---------- frontmatter I/O ----------
 
 def parse(path: Path) -> tuple[dict, str]:
-    text = Path(path).read_text(encoding="utf-8")
+    return parse_text(Path(path).read_text(encoding="utf-8"),str(path))
+
+
+def parse_text(text: str, source: str = "memory") -> tuple[dict, str]:
+    path=source
     if not text.startswith("---"):
         raise ValueError(f"{path} 缺少 frontmatter")
     end = text.find("\n---", 3)

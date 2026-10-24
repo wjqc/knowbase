@@ -5,6 +5,7 @@ collect_ignore = [
     "test_hooks.py",
     "test_import.py",
     "test_retrieval.py",
+    "test_query_hygiene_phase1.py",  # 脚本式测试：pytest 进程内导入顺序会破坏其 env 隔离
 ]
 
 
@@ -23,6 +24,7 @@ def memory_repo(tmp_path, monkeypatch):
         "git": {"auto_commit": False, "auto_push": False, "auto_pull": False},
     })))
     monkeypatch.setattr(config, "CONFIG_PATH", cfg_path)
+    monkeypatch.setenv("KNOWBASE_CONFIG", str(cfg_path))
     monkeypatch.setenv("KNOWBASE_REPO_PATH", str(repo))
     monkeypatch.setenv("KNOWBASE_AGENT_NAME", "pytest-inflight")
     assert cmd_init() == 0

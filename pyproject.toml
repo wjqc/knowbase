@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
   "mcp>=1.2,<2",
   "pyyaml>=6.0",
+  "tomli>=2; python_version < '3.11'",
   # 原地多格式摄取（PDF/DOCX/XLSX/PPTX/OCR）
   "pypdf>=5.0",
   "python-docx>=1.1",
@@ -26,6 +27,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["knowbase*"]
+
+[tool.setuptools.package-data]
+knowbase = ["data/*.json"]
 
 [project.scripts]
 knowbase = "knowbase.__main__:main"

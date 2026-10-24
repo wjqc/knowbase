@@ -1,8 +1,8 @@
-"""Hook 集成：会话开始提醒 / 提示词自动检索 / 会话结束漏存再判断。
+"""Hook 集成：轻量提示 / 阶段检索 / 静默增量入队。
 
 职责划分（设计 6.1）：Hook = 触发器，LLM = 相关性裁判，MCP = 持久化。
 核心函数供测试直接调用；cmd_* 包装层从 stdin 读 Claude Code hook JSON、
-向 stdout 产出注入文本或阻断 JSON。要求轻量导入（不引 mcp/server）。
+只注入有预算的相关提示，Stop 不输出阻断。要求轻量导入（不引 mcp/server）。
 """
 
 import json
@@ -13,8 +13,8 @@ from pathlib import Path
 
 from . import config, index, store
 
-MIN_PROMPT_LEN = 6
-MAX_HITS = 3
+MIN_PROMPT_LEN = 2
+MAX_HITS = 2
 MEMORY_WRITE_TOOLS = ("memory_save", "memory_update", "memory_feedback")
 MEMORY_READ_TOOLS = ("memory_read",)
 FEEDBACK_TOOL = "memory_feedback"
@@ -25,37 +25,25 @@ WORK_TOOLS = ("Edit", "Write", "NotebookEdit", "Bash")
 
 def session_start() -> str:
     return (
-        "[knowbase 经验库] 本会话任务规则：\n"
-        "1. 任务涉及具体项目/系统/报错/环境配置 → 先 memory_search（用 ≥3 字技术词，如\"EasyConnect 死锁\"）；\n"
-        "2. 任务结束先过可复用过滤：已修复的一次性 bug、repo/git/docs 能回答的事实、"
-        "一次性的评测/测试结果数字 → 不入库（放 progress/docs）；"
-        "剩下的\"下次还会踩/还会用\"→ memory_save（提示相似时改用 memory_update）。"
-        "新卡正文须含八项小节：结论/解决的问题/适用条件/不适用条件/可执行动作/关键证据/验证情况/未知与待确认；"
-        "业务规则的代码定位写入 code_refs 字段；"
-        "整篇文档等原始材料不入 memory_save，走 CLI knowbase import 导入为 source；\n"
-        "3. 按记忆行动并验证任务结果后回填 memory_feedback（helpful/not_helpful/outdated/incorrect），"
-        "携带expected_content_revision、memory_use的use_id、稳定task_outcome_id；同一结果重试不换结果ID。"
-        "旧调用仅记未绑定观察，不驱动晋升/淘汰；工具标签不是人工身份；\n"
-        "4. stale/once 状态的记忆采信前先在当前环境验证。\n"
-        "5. 执行中进入新子任务/模块、发现新错误、重要决策前，调用 memory_context 提交本阶段主题和具体查询；"
-        "无需等待下一条用户消息。长方案逐阶段查，不整篇只查一次；阶段完成同时检查技术经验与业务规则。\n"
-        "候选实际参考/采纳/无关/待验证时调用 memory_use，沿用实际 session_id/host_profile，"
-        "context_event_id 指向返回该卡的检索event_id，并携带 id/content_revision；不要命中即helpful。\n"
-        "已开启观察的会话可用 memory_capture(session_id,scope,host_profile) 直接抓取持久化增量，无需重新复制长原文。\n"
-        "业务规则 validation_candidates 仅供验证：带会话身份 memory_read，检查 provenance 与实际结果，"
-        "用 read_use_id 回填 task_result=completed/failed；服务按当前版本的独立证据自动晋升或淘汰。\n"
-        "6. 提炼使用 memory_job_claim(protocol_version=2)，材料未读完用 memory_job_material 续页；"
-        "候选注明 type/title/scope/八项 body/segment_ids/evidence_refs，业务规则含 provenance 和 rule_context；"
-        "memory_job_submit 后核对 memory_id/保存状态，queued 和 accepted 不代表已成卡。"
+        "[knowbase 经验库] 按需辅助当前任务：\n"
+        "1. 具体项目/新子任务/新错误先用 memory_context 分阶段检索，topics格式为"
+        '[{"topic_id":"本阶段","queries":["具体技术词"],"status":"active"}]；简单检索用memory_search，传正确scope。'
+        "只对相关候选memory_read；实际消费用memory_use绑定卡片版本与检索event_id，命中和阅读不等于有效帮助。\n"
+        "2. 验证实际结果后再memory_feedback，outcome为helpful/not_helpful/outdated/incorrect，"
+        "携带expected_content_revision、use_id、稳定task_outcome_id和真实task_result；没有采纳则无需反馈。\n"
+        "3. 高价值技术经验与业务规则可保存；业务规则须有出处，候选按实际验证反馈演进。"
+        "一次性评估/状态数字和repo/docs已有事实留在项目文档。\n"
+        "4. Hook自动采集入队，不阻断原任务；普通待办不要求本会话领取、分页或逐段处理，"
+        "无需为了入库或反馈继续回复。只有明确整理知识时再使用memory_job_*提炼协议。"
     )
 
 
 # ---------- 2. 用户提示词：统一检索并注入命中 ----------
 
 
-def _infer_scope(conn) -> str | None:
+def _infer_scope(conn, project_dir=None) -> str | None:
     """从 hook 环境变量的项目目录推断当前项目 scope（目录名与 scope 精确匹配，未知项目不退化为全库）。"""
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR") or os.environ.get("ZCODE_PROJECT_DIR")
+    project_dir = project_dir or os.environ.get("CLAUDE_PROJECT_DIR") or os.environ.get("ZCODE_PROJECT_DIR")
     if not project_dir:
         return None
     resolved = str(Path(project_dir).expanduser().resolve())
@@ -75,49 +63,76 @@ def has_project_context() -> bool:
     return bool(os.environ.get("CLAUDE_PROJECT_DIR") or os.environ.get("ZCODE_PROJECT_DIR"))
 
 
-def user_prompt(prompt: str) -> str:
-    """对用户输入做本地检索（自动推断当前项目 scope），命中则返回注入文本。"""
-    if not config.load_config().get("hooks", {}).get("enabled", True):
+def user_prompt(prompt: str, project_dir=None, delivery_info=None) -> str:
+    """对用户输入做本地检索（自动推断当前项目 scope），命中则返回注入文本。
+
+    Phase 1 查询卫生（02 号设计§5）：先过意图门控与保守蒸馏再检索；
+    长文/粘贴文档跳过检索与注入；技术标识原文保留。auto_search 永为本地检索。
+    """
+    hooks_cfg = config.load_config().get("hooks", {}) or {}
+    if not hooks_cfg.get("enabled", True):
         return ""
     prompt = (prompt or "").strip()
     if len(prompt) < MIN_PROMPT_LEN:
         return ""
+    from . import query_hygiene
+    hy = query_hygiene.prepare(prompt)  # V1 safety limits cannot be disabled by config.
     rp = config.repo_path()
     if not rp.exists():
         return ""
     conn = index.connect(rp)
-    inferred = _infer_scope(conn)
-    if has_project_context() and inferred is None:
+    try:
+        if hy["action"] == "skip":
+            # 跳过也留痕（query 存前 200 字符防日志膨胀），便于统计跳过原因分布。
+            index.record_search(conn, prompt[:200], "", [], tool="auto_search",
+                                query_class=f"skipped:{hy['reason']}", raw_len=len(prompt))
+            return ""
+        inferred = _infer_scope(conn, project_dir)
+        if (project_dir or has_project_context()) and inferred is None:
+            return "[knowbase] 当前项目未配置 scope_map，已跳过自动检索，避免跨项目召回。"
+        scope = inferred or "global"
+        diagnostics = {}
+        hits = index.search(conn, hy["query"], scope=scope, limit=100, origin="hook_prompt", diagnostics=diagnostics)
+        min_conf = hooks_cfg.get("inject_min_confidence", "verified")
+        if min_conf == "verified":
+            hits = [h for h in hits if h.get("confidence") == "verified"]  # 防污染开关：自动注入只取已验证经验
+        # 矛盾知识只供主动调查，不自动建议采用。
+        hits = [h for h in hits if not any(r.get("type") == "contradicts"
+                for r in (store.load(rp, h["id"])[0] or {}).get("relations", []))]
+        from .mutations import _compute_revision
+        version_safe = []
+        for hit in hits:
+            meta,body,_=store.load(rp,hit["id"])
+            if meta and (not meta.get("verified_content_revision") or
+                         meta.get("verified_content_revision")==_compute_revision(meta,body)):
+                version_safe.append(hit)
+        hits = version_safe
+        if min_conf == "verified_plus_once_gated":
+            verified=[h for h in hits if h.get("confidence")=="verified"]
+            once=[h for h in hits if h.get("confidence")=="once"][:1]
+            hits=verified+once
+        header = "[knowbase 自动检索] 本地候选；先核对项目、版本与证据，再按需 memory_read："
+        budget = max(0, min(900, int(hooks_cfg.get("inject_max_chars", 900))))
+        lines, delivered = [header], []
+        for hit in hits[:MAX_HITS]:
+            label="once·未验证" if hit["confidence"]=="once" else hit["confidence"]
+            line = f"- [{hit['id']}] {hit['title']}（{label}·{hit['status']} · scope={hit['scope']}）"
+            if len("\n".join(lines + [line])) > budget:
+                continue
+            lines.append(line)
+            delivered.append(hit)
+        text = "\n".join(lines) if delivered else ""
+        diagnostics.update(delivered_chars=len(text), delivered_count=len(delivered))
+        search_id=index.record_search(conn, hy["query"], scope, delivered, tool="auto_search",
+                            query_class=hy["query_class"], raw_len=len(prompt), retrieval=diagnostics)
+        if delivery_info is not None:delivery_info["search_id"]=search_id
+        return text
+    finally:
         conn.close()
-        return "[knowbase] 当前项目未配置 scope_map，已跳过自动检索，避免跨项目召回。"
-    scope = inferred or "global"
-    hits = index.search(conn, prompt, scope=scope, limit=100)
-    min_conf = (config.load_config().get("hooks", {}) or {}).get("inject_min_confidence", "verified")
-    if min_conf == "verified":
-        hits = [h for h in hits if h.get("confidence") == "verified"]  # 防污染开关：自动注入只取已验证经验
-    # 矛盾知识只供主动调查，不自动建议采用。
-    hits = [h for h in hits if not any(r.get("type") == "contradicts"
-            for r in (store.load(rp, h["id"])[0] or {}).get("relations", []))]
-    from .mutations import _compute_revision
-    version_safe = []
-    for hit in hits:
-        meta,body,_=store.load(rp,hit["id"])
-        if meta and (not meta.get("verified_content_revision") or
-                     meta["verified_content_revision"]==_compute_revision(meta,body)):
-            version_safe.append(hit)
-    hits = version_safe
-    hits = hits[:MAX_HITS]
-    index.record_search(conn, prompt, scope, hits, tool="auto_search")
-    conn.close()
-    if not hits:
-        return ""
-    lines = ["[knowbase 自动检索] 以下为统一混合检索候选，尚未确认适用；先核对项目、版本与证据，再按需 memory_read："]
-    for h in hits:
-        lines.append(f"- [{h['id']}] {h['title']}（{h['confidence']}·{h['status']} · scope={h['scope']}）")
-    return "\n".join(lines)
 
 
-# ---------- 3. 会话结束：漏存再判断 / 读后未回填提醒（每次会话最多阻断一次） ----------
+
+# ---------- 3. 会话结束：静默采集，不要求为沉淀/反馈延长任务 ----------
 
 def _transcript_stats(path: str) -> dict:
     """扫描会话 transcript：返回各类工具操作计数（记忆类为 0/1 标志，work_ops 为次数）。"""
@@ -185,52 +200,14 @@ def _maybe_trigger_mid_session_capture(session_id: str, transcript_path: str) ->
 
 
 def stop_event(session_id: str, transcript_path: str, *, allow_enqueue: bool = True) -> str:
-    """漏存（有操作无沉淀）→ 入队 + 阻断引导领取；读后未回填 → 阻断提醒。
-
-    M0 增强：漏存场景自动入队 capture 任务，阻断提示包含 job_id 和领取指引。
-    """
+    """Legacy hooks may queue material; knowledge maintenance never blocks Stop."""
     cfg = config.load_config()
     if not cfg.get("hooks", {}).get("enabled", True):
         return ""
     t = _transcript_stats(transcript_path)
-    job_hint = ""
-    if t["work_ops"] and not t["memory_write"]:
-        # 尝试入队 capture 任务
-        job_id = _try_enqueue_capture(session_id, transcript_path, cfg) if allow_enqueue else ""
-        reason = (
-            "[knowbase] 本次会话有代码/文件操作但未沉淀经验。"
-        )
-        if job_id:
-            reason += (
-                f"已自动入队提炼任务 {job_id}。请领取并提炼：\n"
-                f"  memory_job_claim(job_id=\"{job_id}\", host_session_id=\"<会话ID>\")\n"
-                "领取后按材料提炼候选，调用 memory_job_submit 提交。"
-                "若确认无值得复用经验，提交空结果即可。\n"
-            )
-        reason += (
-            "也可手动沉淀：先 memory_search 查重，再 memory_save（正文含八项小节）；"
-            "整篇文档走 CLI knowbase import。"
-            "本提醒每次会话最多出现一次。"
-        )
-    elif t["memory_read"] and not t["feedback"]:
-        reason = (
-            "[knowbase] 本次会话读取过记忆但未回填使用反馈。"
-            "请对实际参考/采纳的条目调用 "
-            "memory_feedback(id, helpful/not_helpful/outdated/incorrect)——"
-            "同时携带expected_content_revision、memory_use返回的use_id和稳定task_outcome_id。"
-            "若读过的条目均未采纳，直接回复'未采纳，无需回填'结束。"
-            "本提醒每次会话最多出现一次。"
-        )
-    else:
-        return ""
-    flag = _flag_path(session_id)
-    if flag.exists():
-        return ""  # 已提醒过一次，不再打断
-    try:
-        flag.write_text("1", encoding="utf-8")
-    except OSError:
-        pass
-    return json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False)
+    if allow_enqueue and t["work_ops"] and not t["memory_write"]:
+        _try_enqueue_capture(session_id, transcript_path, cfg)
+    return ""
 
 
 def _try_enqueue_capture(session_id: str, transcript_path: str, cfg: dict) -> str:
@@ -250,6 +227,10 @@ def _try_enqueue_capture(session_id: str, transcript_path: str, cfg: dict) -> st
                                                   default_scope=scope, strict=True)
         if not events:
             return ""
+        from .hook_policy import filter_capture
+        from .adapters.host_events import _is_self_event, _drop_distiller_echo
+        events = _drop_distiller_echo([e for e in events if not _is_self_event(e)], events, {})
+        events, _ = filter_capture(events)
         payload = materials.capture_payload(events, scope=scope, session_id=session_id)
         if not payload["segments"]:
             return ""
@@ -289,11 +270,13 @@ def _first(d: dict, *keys) -> str:
 def cmd_session_start(style: str = "claude"):
     os.environ.setdefault("KNOWBASE_AGENT_NAME", style)
     data = _read_stdin()
+    if not config.load_config().get("hooks", {}).get("enabled", True):
+        return
     text = session_start()
     if config.load_config()["inflight"]["enabled"] and (data.get("session_id") or data.get("sessionId")):
         from .adapters import host_events
         result = host_events.handle(data, event="recover", style=style)
-        text += "\n" + host_events.render(result)
+        text += "\n" + host_events.render_foreground(result, data, event="recover", style=style)
     _emit(text, style)
 
 
@@ -306,38 +289,36 @@ def cmd_user_prompt(style: str = "claude"):
     transcript = _first(data, "transcript_path", "transcriptPath", "transcript")
     if sid and transcript and not config.load_config()["inflight"]["enabled"]:
         _maybe_trigger_mid_session_capture(sid, transcript)
-    text = user_prompt(prompt)
+    delivery_info={}
+    text = user_prompt(prompt, data.get("cwd") or data.get("project_dir"), delivery_info)
     if config.load_config()["inflight"]["enabled"]:
         from .adapters import host_events
         observation = host_events.handle(data, event="user-prompt", style=style)
-        extra = host_events.render(observation)
-        text = "\n".join(part for part in (text, extra) if part)
+        text = host_events.render_foreground(observation, data, event="user-prompt", style=style, prefix=text)
+    from .retrieval_metrics import delivery
+    delivery(config.repo_path(),delivery_info.get("search_id"),text)
     _emit(text, style)
 
 
 def cmd_stop(style: str = "claude"):
+    """Always exit quietly: durable capture is independent of foreground continuation."""
     os.environ.setdefault("KNOWBASE_AGENT_NAME", style)
     data = _read_stdin()
-    if config.load_config()["inflight"]["enabled"] and config.load_config()["inflight"]["capture_enabled"]:
-        from .adapters import host_events
-        from .materials import digest
-        result = host_events.handle(data, event="stop", style=style)
-        rendered = host_events.render(result)
-        sid = str(data.get("session_id") or data.get("sessionId") or "unknown")
-        flag = _flag_path(digest({"session_id": sid, "jobs": result.get("job_ids", [])}))
-        if result.get("job_ids") and not flag.exists():
-            flag.write_text("1", encoding="utf-8")
-            print(json.dumps({"decision": "block", "reason": rendered}, ensure_ascii=False))
-        elif result.get("error"):
-            _emit(rendered, style)
-        return
-    sid = _first(data, "session_id", "sessionId") \
-        or os.environ.get("CLAUDE_SESSION_ID") or os.environ.get("ZCODE_SESSION_ID") or "unknown"
-    tp = _first(data, "transcript_path", "transcript", "transcriptPath")
     cfg = config.load_config()
-    out = stop_event(sid, tp, allow_enqueue=not cfg["inflight"]["enabled"] or cfg["inflight"]["capture_enabled"])
-    if out:
-        print(out)  # 顶层 decision/reason：claude 与 zcode 同形
+    if not cfg.get("hooks", {}).get("enabled", True):
+        return
+    try:
+        if cfg["inflight"]["enabled"] and cfg["inflight"]["capture_enabled"]:
+            from .adapters import host_events
+            result = host_events.handle(data, event="stop", style=style)
+            if result.get("error"):
+                print("[knowbase] Stop capture incomplete: " + str(result["error"]), file=sys.stderr)
+        elif not cfg["inflight"]["enabled"]:
+            sid = _first(data, "session_id", "sessionId") or "unknown"
+            tp = _first(data, "transcript_path", "transcript", "transcriptPath")
+            stop_event(sid, tp, allow_enqueue=cfg["inflight"]["capture_enabled"])
+    except Exception as exc:
+        print("[knowbase] Stop capture incomplete: " + type(exc).__name__, file=sys.stderr)
 
 
 def cmd_tool_event(style: str = "claude", event: str = "tool-after"):
@@ -346,12 +327,13 @@ def cmd_tool_event(style: str = "claude", event: str = "tool-after"):
     data = _read_stdin()
     try:
         result = host_events.handle(data, event=event, style=style)
-        text = host_events.render(result)
+        text = host_events.render_foreground(result, data, event=event, style=style)
     except Exception as exc:
-        text = "[knowbase] 执行中处理失败：" + type(exc).__name__ + "；原任务可继续，知识处理尚未完成。"
+        print("[knowbase] hook incomplete: " + type(exc).__name__, file=sys.stderr)
+        return
     if not text:
         return
-    if style in ("claude", "trae"):
+    if style in ("claude", "trae", "codex"):
         external = {"tool-before": "PreToolUse", "tool-after": "PostToolUse", "tool-failure": "PostToolUseFailure"}[event]
         print(json.dumps({"hookSpecificOutput": {"hookEventName": external, "additionalContext": text}}, ensure_ascii=False))
     else:
@@ -359,7 +341,7 @@ def cmd_tool_event(style: str = "claude", event: str = "tool-after"):
 
 
 def cmd_before_compact(style: str = "claude"):
-    if style != "claude":
+    if style not in {"claude","codex"}:
         _emit("[knowbase] unsupported_event：此宿主未验证支持压缩前 Hook，未执行。", style)
         return
     from .adapters import host_events
