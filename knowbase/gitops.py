@@ -137,40 +137,89 @@ def _remote_target(repo: Path, git_cfg: dict) -> tuple[str, str, str]:
     return remote, branch, actual_url
 
 
+# git 身份未配置时 rebase 的典型报错（新机器首跑最常见）：Committer/Author
+# identity unknown、Please tell me who you are、unable to auto-detect email。
+_IDENTITY_MARKERS = (
+    "please tell me who you are", "identity unknown", "unable to auto-detect email",
+    "empty ident name", "user.name", "user.email",
+)
+
+
+def _rebase_failure_kind(message: str, conflicted: str) -> str:
+    """rebase 失败分类：conflict=真实内容冲突 / identity=git 身份未配置 / other=其他。
+
+    未合并条目（diff-filter=U）是真实冲突的硬证据；git 明确报告 CONFLICT
+    次之。身份等环境问题没有任何冲突证据，不得归入 conflict。
+    """
+    if conflicted.strip():
+        return "conflict"
+    text = (message or "").lower()
+    if any(marker in text for marker in _IDENTITY_MARKERS):
+        return "identity"
+    if "conflict" in text:
+        return "conflict"
+    return "other"
+
+
+def _in_rebase_state(repo: Path, default: bool) -> bool:
+    """检查是否仍在 rebase 状态（.git/rebase-merge 或 .git/rebase-apply 存在）。"""
+    try:
+        git_dir = Path(_run(repo, "rev-parse", "--git-dir", timeout=2))
+        if not git_dir.is_absolute():
+            git_dir = Path(repo) / git_dir
+        return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
+    except Exception:
+        return default
+
+
+def _abort_rebase(repo: Path) -> bool:
+    """尝试 abort 并核实已退出 rebase 状态；返回 True 表示 abort 未能完成。
+
+    abort 命令本身失败（如 rebase 根本没启动、无 rebase 可 abort）不等于
+    abort 失败，以事后状态检查为准；状态无法核实时按 abort 命令结果取保守值。
+    """
+    try:
+        _run(repo, "rebase", "--abort", timeout=5)
+    except Exception:
+        return _in_rebase_state(repo, default=True)
+    return _in_rebase_state(repo, default=False)
+
+
 def _rebase_onto(repo: Path, remote_ref: str) -> None:
-    """把本地提交重放到远端；失败必须 abort，不能留下半截 rebase。"""
+    """把本地提交重放到远端；失败必须 abort，不能留下半截 rebase。
+
+    失败按原因分类报错：只有真实内容冲突才抛 GitSyncConflict；git 身份
+    未配置等环境问题误报“真实内容冲突”会把排查引向错误方向，故以
+    RuntimeError 写明真实原因。无论哪类失败都保留本地提交。
+    """
     try:
         _run(repo, "rebase", remote_ref, timeout=15)
+        return
     except Exception as exc:
-        try:
-            conflicted = _run(repo, "diff", "--name-only", "--diff-filter=U", timeout=3)
-        except Exception:
-            conflicted = ""
-        # 尝试 abort 并验证是否成功
-        abort_failed = False
-        try:
-            _run(repo, "rebase", "--abort", timeout=5)
-            # 验证 abort 后是否真的退出了 rebase 状态
-            in_rebase = False
-            try:
-                # 检查是否仍在 rebase 状态（.git/rebase-merge 或 .git/rebase-apply 存在）
-                git_dir = Path(_run(repo, "rev-parse", "--git-dir", timeout=2))
-                if not git_dir.is_absolute():
-                    git_dir = Path(repo) / git_dir
-                in_rebase = (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
-            except Exception:
-                pass
-            if in_rebase:
-                abort_failed = True
-        except Exception:
-            abort_failed = True
+        original = exc
+    try:
+        conflicted = _run(repo, "diff", "--name-only", "--diff-filter=U", timeout=3)
+    except Exception:
+        conflicted = ""
+    kind = _rebase_failure_kind(str(original), conflicted)
+    abort_failed = _abort_rebase(repo)
+    abort_note = "；rebase abort 失败，请手动检查 .git 状态" if abort_failed else ""
+    if kind == "conflict":
         files = "、".join(line for line in conflicted.splitlines() if line.strip())
         detail = f"：{files}" if files else ""
         if abort_failed:
             raise GitSyncConflict(
                 f"检测到真实内容冲突{detail}；rebase abort 失败，请手动检查 .git 状态"
-            ) from exc
-        raise GitSyncConflict(f"检测到真实内容冲突{detail}；已取消 rebase 并保留本地提交") from exc
+            ) from original
+        raise GitSyncConflict(f"检测到真实内容冲突{detail}；已取消 rebase 并保留本地提交") from original
+    if kind == "identity":
+        raise RuntimeError(
+            "git 身份未配置（user.name/user.email 缺失），rebase 无法重放本地提交；"
+            f"已取消 rebase 并保留本地提交，请先用 git config 配置身份后重试{abort_note}"
+        ) from original
+    raise RuntimeError(
+        f"rebase 失败（非内容冲突）：{str(original)[:200]}；已取消 rebase 并保留本地提交{abort_note}"
+    ) from original
 
 
 def _is_ancestor(repo: Path, older: str, newer: str) -> bool:

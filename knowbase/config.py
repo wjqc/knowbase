@@ -68,10 +68,35 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
+class ConfigError(ValueError):
+    """配置文件存在但无法使用：消息带文件路径与损坏原因，禁止静默回退。
+
+    继承 ValueError，兼容既有按 ValueError 捕获配置错误的调用方。
+    不回退默认配置：repo_path 等关键路径被悄悄换掉后，工具会在错误
+    的仓库上读写，风险高于立刻报错；报错后由人修复或删除配置文件。
+    """
+
+
 def load_config() -> dict:
     cfg = copy.deepcopy(DEFAULTS)
     if CONFIG_PATH.exists():
-        cfg = _deep_merge(cfg, json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+        try:
+            raw = CONFIG_PATH.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ConfigError(f"配置文件无法读取: {CONFIG_PATH}: {exc}") from exc
+        try:
+            override = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ConfigError(
+                f"配置文件损坏（JSON 解析失败）: {CONFIG_PATH}: {exc}；"
+                "请修复或删除该文件，未回退默认配置"
+            ) from exc
+        if not isinstance(override, dict):
+            raise ConfigError(
+                f"配置文件格式错误（顶层必须是 JSON 对象）: {CONFIG_PATH}；"
+                "请修复或删除该文件，未回退默认配置"
+            )
+        cfg = _deep_merge(cfg, override)
     env_repo = os.environ.get("KNOWBASE_REPO_PATH")
     if env_repo:
         cfg["repo_path"] = env_repo

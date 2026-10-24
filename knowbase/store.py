@@ -244,7 +244,13 @@ def load(repo: Path, mid: str) -> tuple[dict | None, str | None, Path | None]:
     return meta, body, p
 
 
-def iter_all(repo: Path, include_staging: bool = False):
+def iter_all(repo: Path, include_staging: bool = False, errors: list | None = None):
+    """遍历全部可解析卡片，产出 (meta, body, path)；解析失败的文件默认跳过。
+
+    传入 errors 列表时，每张被跳过的坏卡追加一条 (路径, 异常)，供 doctor
+    等诊断方显性报告；不传时行为与从前完全一致（坏卡静默跳过，各调用方
+    语义不变）——但坏卡若无人收集 errors，就对全系统不可见。
+    """
     repo = Path(repo)
     dirs = ALL_DIRS if include_staging else ALL_DIRS[:-1]
     for d in dirs:
@@ -254,7 +260,9 @@ def iter_all(repo: Path, include_staging: bool = False):
         for f in sorted(dd.glob("*.md")):
             try:
                 meta, body = parse(f)
-            except Exception:
+            except Exception as exc:
+                if errors is not None:
+                    errors.append((f, exc))
                 continue
             yield meta, body, f
 
@@ -305,11 +313,13 @@ def _sections(body: str) -> dict[str, str]:
 
 
 def _card_section_text(secs: dict[str, str], name: str) -> str | None:
-    """按包含匹配取小节正文；小节不存在返回 None（与旧 REQUIRED_SECTIONS 匹配口径一致）。"""
-    for key, text in secs.items():
-        if name in key:
-            return text
-    return None
+    """按小节标题精确匹配取正文；小节不存在返回 None。
+
+    不能用包含匹配：「不适用条件」包含「适用条件」，子串匹配会让缺失
+    「适用条件」的卡片借道「不适用条件」的正文通过 card-v2 校验，
+    八项小节门禁形同虚设。标题合法形态以卡片模板与测试为准（纯标题名）。
+    """
+    return secs.get(name)
 
 
 def card_v2_errors(body: str) -> list[str]:

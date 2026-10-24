@@ -36,7 +36,19 @@ def inspect(repo):
                 f"version={max(applied, default=0)}; checksum_mismatch={bad}; pending={missing}")
             meta_n = conn.execute("SELECT count(*) FROM meta").fetchone()[0]
             fts_n = conn.execute("SELECT count(*) FROM mem_fts").fetchone()[0]
-            cards = list(store.iter_all(repo, include_staging=True))
+            parse_errors: list = []
+            cards = list(store.iter_all(repo, include_staging=True, errors=parse_errors))
+            # 坏卡（frontmatter/正文解析失败）会被 iter_all 跳过：若从未入库，
+            # markdown/meta/fts 三边计数仍然自洽、index_parity 照样 pass，
+            # 坏卡对全系统不可见。这里独立成一项检查，显性列出文件与错误。
+            if parse_errors:
+                detail = "; ".join(
+                    f"{p.relative_to(repo) if p.is_relative_to(repo) else p}: "
+                    f"{type(e).__name__}: {e}" for p, e in parse_errors[:10])
+                add("unparseable_cards", "fail",
+                    f"count={len(parse_errors)}; {detail}")
+            else:
+                add("unparseable_cards", "pass", "count=0")
             md_n = len(cards)
             missing_fts = conn.execute("SELECT count(*) FROM meta WHERE id NOT IN (SELECT id FROM mem_fts)").fetchone()[0]
             conn.execute("SELECT id FROM mem_fts WHERE mem_fts MATCH 'doctor' LIMIT 1").fetchall()
