@@ -63,6 +63,43 @@ def has_project_context() -> bool:
     return bool(os.environ.get("CLAUDE_PROJECT_DIR") or os.environ.get("ZCODE_PROJECT_DIR"))
 
 
+def _tier_hits(conn, hits, min_conf):
+    """Phase 2 tiered injection. Returns (kept, dropped_once).
+
+    kept is a list of (hit, kind): kind 'full' injects the normal line,
+    kind 'summary' injects a pointer-only line. Verified cards inject in
+    full; once cards inject a summary pointer only when their current
+    revision carries adopted helpful evidence, otherwise they are dropped;
+    staging/non-active cards never inject in any mode. Modes outside the
+    verified family keep their previous full-line behaviour.
+    """
+    from . import evolution
+    kept, dropped_once = [], 0
+    once_cap = 1 if min_conf == "verified_plus_once_gated" else None
+    once_summaries = 0
+    for h in hits:
+        if h.get("staging") or (h.get("status") is not None and h["status"] != "active"):
+            continue
+        conf = h.get("confidence")
+        if min_conf in ("verified", "verified_plus_once_gated"):
+            if conf == "verified":
+                kept.append((h, "full"))
+            elif conf == "once":
+                if once_cap is not None and once_summaries >= once_cap:
+                    dropped_once += 1
+                    continue
+                ev = evolution.evidence_for_revision(conn, h["id"], h.get("content_revision", ""))
+                if ev.get("helpful_tasks", 0) >= 1:
+                    kept.append((h, "summary"))
+                    once_summaries += 1
+                else:
+                    dropped_once += 1
+            # any other confidence is dropped in the verified family
+        else:
+            kept.append((h, "full"))
+    return kept, dropped_once
+
+
 def user_prompt(prompt: str, project_dir=None, delivery_info=None) -> str:
     """对用户输入做本地检索（自动推断当前项目 scope），命中则返回注入文本。
 
@@ -94,8 +131,6 @@ def user_prompt(prompt: str, project_dir=None, delivery_info=None) -> str:
         diagnostics = {}
         hits = index.search(conn, hy["query"], scope=scope, limit=100, origin="hook_prompt", diagnostics=diagnostics)
         min_conf = hooks_cfg.get("inject_min_confidence", "verified")
-        if min_conf == "verified":
-            hits = [h for h in hits if h.get("confidence") == "verified"]  # 防污染开关：自动注入只取已验证经验
         # 矛盾知识只供主动调查，不自动建议采用。
         hits = [h for h in hits if not any(r.get("type") == "contradicts"
                 for r in (store.load(rp, h["id"])[0] or {}).get("relations", []))]
@@ -106,26 +141,35 @@ def user_prompt(prompt: str, project_dir=None, delivery_info=None) -> str:
             if meta and (not meta.get("verified_content_revision") or
                          meta.get("verified_content_revision")==_compute_revision(meta,body)):
                 version_safe.append(hit)
-        hits = version_safe
-        if min_conf == "verified_plus_once_gated":
-            verified=[h for h in hits if h.get("confidence")=="verified"]
-            once=[h for h in hits if h.get("confidence")=="once"][:1]
-            hits=verified+once
+        kept, dropped_once = _tier_hits(conn, version_safe, min_conf)
         header = "[knowbase 自动检索] 本地候选；先核对项目、版本与证据，再按需 memory_read："
         budget = max(0, min(900, int(hooks_cfg.get("inject_max_chars", 900))))
         lines, delivered = [header], []
-        for hit in hits[:MAX_HITS]:
-            label="once·未验证" if hit["confidence"]=="once" else hit["confidence"]
-            line = f"- [{hit['id']}] {hit['title']}（{label}·{hit['status']} · scope={hit['scope']}）"
+        for hit, kind in kept[:MAX_HITS]:
+            if kind == "summary":
+                line = f"- [{hit['id']}] {hit['title']}（once·未验证，仅指针：用 memory_read 读原文核对后再用 · scope={hit['scope']}）"
+            else:
+                label="once·未验证" if hit["confidence"]=="once" else hit["confidence"]
+                line = f"- [{hit['id']}] {hit['title']}（{label}·{hit['status']} · scope={hit['scope']}）"
             if len("\n".join(lines + [line])) > budget:
                 continue
             lines.append(line)
             delivered.append(hit)
         text = "\n".join(lines) if delivered else ""
-        diagnostics.update(delivered_chars=len(text), delivered_count=len(delivered))
+        kind_by_id = {h["id"]: kind for h, kind in kept}
+        delivered_tiers = {}
+        for h in delivered:
+            kind = kind_by_id[h["id"]]
+            tier = "once_summary" if kind == "summary" else ("verified_full" if h.get("confidence") == "verified" else "full")
+            delivered_tiers.setdefault(tier, []).append(h["id"])
+        diagnostics.update(delivered_chars=len(text), delivered_count=len(delivered),
+                           delivered_tiers=delivered_tiers, dropped_once=dropped_once)
         search_id=index.record_search(conn, hy["query"], scope, delivered, tool="auto_search",
                             query_class=hy["query_class"], raw_len=len(prompt), retrieval=diagnostics)
-        if delivery_info is not None:delivery_info["search_id"]=search_id
+        if delivery_info is not None:
+            delivery_info["search_id"]=search_id
+            delivery_info["tiers"]=delivered_tiers
+            delivery_info["dropped_once"]=dropped_once
         return text
     finally:
         conn.close()
@@ -296,7 +340,8 @@ def cmd_user_prompt(style: str = "claude"):
         observation = host_events.handle(data, event="user-prompt", style=style)
         text = host_events.render_foreground(observation, data, event="user-prompt", style=style, prefix=text)
     from .retrieval_metrics import delivery
-    delivery(config.repo_path(),delivery_info.get("search_id"),text)
+    delivery(config.repo_path(),delivery_info.get("search_id"),text,
+             tiers=delivery_info.get("tiers"), dropped_once=delivery_info.get("dropped_once",0))
     _emit(text, style)
 
 

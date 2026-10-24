@@ -25,16 +25,20 @@ def observe(conn,event_id,origin,detail):
         else:conn.rollback()
 
 
-def delivery(repo,parent_id,text):
+def delivery(repo,parent_id,text,tiers=None,dropped_once=0):
     if not parent_id:return
     conn=None
     try:
         conn=sqlite3.connect(index.db_path(repo).resolve().as_uri()+'?mode=rw',uri=True,timeout=.05)
         import re
-        observe(conn,uuid.uuid4().hex,'hook_delivery',{'search_id':parent_id,'level':'local',
+        detail={'search_id':parent_id,'level':'local',
             'delivered_ids':re.findall(r'\[([A-Z]-(?:[a-f0-9]{12}|\d{4}-\d{4}))\]',text),
             'injected_chars':len(text),'injected_tokens_estimated':(len(text)+1)//2,
-            'estimator':'chars-div2-v1','currency_cost_actual':None})
+            'estimator':'chars-div2-v1','currency_cost_actual':None}
+        if tiers is not None:
+            detail['injection_tiers']={k:list(v) for k,v in tiers.items()}
+            detail['dropped_once']=dropped_once
+        observe(conn,uuid.uuid4().hex,'hook_delivery',detail)
     except (sqlite3.Error,OSError):pass
     finally:
         if conn:conn.close()
@@ -52,10 +56,18 @@ def report(repo):
     try:
         levels=Counter();reasons=Counter()
         tables={r[0] for r in conn.execute('SELECT name FROM sqlite_master')}
+        tier_triples=[]
         if 'retrieval_observations' in tables:
             for origin,level,reason,raw in conn.execute('SELECT origin,level,reason,detail_json FROM retrieval_observations'):
                 d=json.loads(raw)
-                if origin=='hook_delivery':result['injected_tokens_estimated']+=d.get('injected_tokens_estimated',0);continue
+                if origin=='hook_delivery':
+                    result['injected_tokens_estimated']+=d.get('injected_tokens_estimated',0)
+                    for tier,ids in (d.get('injection_tiers') or {}).items():
+                        if isinstance(ids,list) and ids:
+                            tier_triples.append((d.get('search_id'),tier,ids))
+                    if d.get('dropped_once'):
+                        result['dropped_once_injections']=result.get('dropped_once_injections',0)+d['dropped_once']
+                    continue
                 if origin=='embedding_worker':
                     result['remote_network_calls']+=d.get('remote_calls',0);continue
                 if (d.get('query_class') or '').startswith('skipped:'):continue
@@ -63,6 +75,16 @@ def report(repo):
                 if reason:reasons[reason]+=1
                 result['remote_network_calls']+=d.get('remote_calls',0)
             result.update(levels=dict(levels),degradation_reasons=dict(reasons),executed_queries=sum(levels.values()))
+        if tier_triples and 'knowledge_uses' in tables:
+            delivered={};adopted={}
+            for search_id,tier,ids in tier_triples:
+                delivered[tier]=delivered.get(tier,0)+len(ids)
+                if not search_id:continue
+                q='SELECT COUNT(DISTINCT memory_id) FROM knowledge_uses WHERE event_id=? AND current_version=1 AND state=? AND memory_id IN (%s)'%','.join('?'*len(ids))
+                adopted[tier]=adopted.get(tier,0)+conn.execute(q,(search_id,'adopted',*ids)).fetchone()[0]
+            result['injection_tiers']=delivered
+            result['tier_adoption']={t:{'delivered':delivered[t],'adopted':adopted.get(t,0),
+                'rate':adopted.get(t,0)/delivered[t] if delivered[t] else None} for t in delivered}
         if 'knowledge_uses' in tables:
             result['use_receipts']=dict(conn.execute('SELECT state,COUNT(*) FROM knowledge_uses GROUP BY state'))
         if 'task_outcomes' in tables:

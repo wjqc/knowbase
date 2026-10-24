@@ -29,8 +29,13 @@ def validate_labels(rows):
     for r in rows:
         label=r.get('labels',{})
         positive=bool(label.get('relevant_ids'))
-        if (label.get('status') not in {'reviewed','adjudicated'} or not label.get('labeler') or
-                type(label.get('unanswerable')) is not bool or positive==label['unanswerable'] or
+        # Irrelevant execution-derived samples legitimately carry no relevant
+        # ids and are not unanswerable; every other row must keep the two
+        # fields inconsistent (a relevant answer exists iff the query is
+        # answerable). Human rows keep the old rule (no sample_class).
+        if (label.get('status') not in {'reviewed','adjudicated','execution_derived'} or not label.get('labeler') or
+                type(label.get('unanswerable')) is not bool or
+                (positive==label['unanswerable'] and label.get('sample_class')!='irrelevant') or
                 not label.get('corpus_revision')):
             problems.append(r['id'])
     return problems
@@ -116,9 +121,59 @@ def paired_interval(rows, left, right):
     boot=sorted(sum(rng.choice(deltas) for _ in deltas)/len(deltas) for _ in range(1000))
     return {'metric':'Recall@5','delta':sum(deltas)/len(deltas),'CI95':[boot[24],boot[974]],'positive_n':len(deltas),'method':'paired_query_bootstrap; task-cluster bootstrap still required for formal acceptance'}
 
+def freeze_report(comparison, *, dataset_sha256, vectors_sha256, provider_fp, space_id,
+                  covered_scopes, deployment_id, dense_min, derived_stats):
+    """Freeze a completed offline comparison into a knowbase.retrieval-evaluation.v1 report.
+
+    Gates are mechanical, derived from the comparison arms; no human sign-off
+    is consulted anywhere:
+    - quality: hybrid (D) Recall@5 >= lexical (B) Recall@5 AND >=
+      si.ABSOLUTE_MIN_RECALL_AT_5 (absolute floor, so a weak lexical
+      baseline cannot make a poor hybrid pass on the relative win alone)
+    - rejection: negative queries exist and D correct_rejection >= B correct_rejection
+    - regression: paired D-B Recall@5 CI95 lower bound >= 0
+    - latency: p95 lexical compute <= LATENCY_P95_MS_MAX (1000 ms proposal)
+    verdict is PASS iff all four gates hold. The report's annotation_status
+    is 'execution_derived'; the dataset digest links each sample to its
+    task-evidence binding in the derived dataset file.
+    """
+    metrics = comparison.get('metrics', {}) or {}
+    b, d = metrics.get('B', {}) or {}, metrics.get('D', {}) or {}
+    paired = (comparison.get('paired_intervals') or {}).get('D-B') or {}
+    ci = paired.get('CI95')
+    gates = {
+        'quality': (d.get('Recall@5') is not None and b.get('Recall@5') is not None
+                    and d['Recall@5'] >= b['Recall@5']
+                    and d['Recall@5'] >= si.ABSOLUTE_MIN_RECALL_AT_5),
+        'rejection': ((d.get('negative_queries') or 0) > 0
+                      and d.get('correct_rejection') is not None
+                      and b.get('correct_rejection') is not None
+                      and d['correct_rejection'] >= b['correct_rejection']),
+        'regression': (isinstance(ci, list) and len(ci) == 2 and ci[0] >= 0),
+        'latency': (comparison.get('p95_lexical_compute_ms') is not None
+                    and comparison['p95_lexical_compute_ms'] <= 1000),
+    }
+    return {'schema': 'knowbase.retrieval-evaluation.v1',
+            'verdict': 'PASS' if all(gates.values()) else 'FAIL',
+            'annotation_status': 'execution_derived',
+            'derived_sample_count': derived_stats.get('derived', 0),
+            'derived_positive': derived_stats.get('positive', 0),
+            'derived_negative': derived_stats.get('negative', 0),
+            'derived_irrelevant': derived_stats.get('irrelevant', 0),
+            'excluded_for_privacy': derived_stats.get('excluded_for_privacy', 0),
+            'confidence_interval': {'metric': 'Recall@5', 'delta': paired.get('delta'),
+                                    'CI95': ci, 'positive_n': paired.get('positive_n'),
+                                    'method': paired.get('method')},
+            'hybrid_recall_at_5': d.get('Recall@5'),
+            'dataset_sha256': dataset_sha256, 'vectors_sha256': vectors_sha256,
+            'retrieval_code': si.code_profile(), 'covered_scopes': covered_scopes,
+            'provider_fp': provider_fp, 'space_id': space_id,
+            'deployment_id': deployment_id, 'dense_min': dense_min, 'gates': gates}
+
+
 def run(repo,source,cache_path,baseline_source, *, dense_min,gate_dense_min):
     rows=dataset(source);bad=validate_labels(rows)
-    if bad:return {'state':'NOT_RUN','reason':'human_qrels_incomplete','pending':len(bad)}
+    if bad:return {'state':'NOT_RUN','reason':'qrels_incomplete','pending':len(bad)}
     cache=json.loads(Path(cache_path).read_text());checksum=cache.pop('checksum',None)
     if (cache.get('schema')!='knowbase.embedding-cache.v1' or checksum!=digest(cache) or cache.get('dataset_digest')!=digest(rows)):
         return {'state':'NOT_RUN','reason':'cache_identity_or_checksum_invalid'}

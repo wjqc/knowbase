@@ -45,7 +45,16 @@ def code_profile():
 
 
 def quality(options, identity):
-    """Validate a frozen evaluation report, never a boolean 'approved' config flag."""
+    """Validate a frozen evaluation report, never a boolean 'approved' config flag.
+
+    Since Phase 2 the only accepted provenance is execution-derived: the
+    report must carry enough derived samples and a paired confidence
+    interval whose lower bound shows no regression. Human annotation counts
+    and named reviewers are no longer enabling conditions; a report that
+    only carries them fails this gate. The hybrid arm must additionally
+    clear an absolute Recall@5 floor, so a weak lexical baseline cannot
+    make a poor hybrid look good by relative comparison alone.
+    """
     p=options.get("quality_report")
     if not p:return None
     try:
@@ -54,9 +63,13 @@ def quality(options, identity):
         report=json.loads(path.read_text())
         if not isinstance(report,dict) or not isinstance(report.get("gates"),dict):return None
         threshold=report.get("dense_min")
+        ci=report.get("confidence_interval") or {}
+        ci95=ci.get("CI95")
         if (report.get("schema")!="knowbase.retrieval-evaluation.v1" or report.get("verdict")!="PASS" or
-                report.get("annotation_status") not in {"reviewed","adjudicated"} or
-                report.get("human_query_count",0)<60 or not report.get("reviewer") or
+                report.get("annotation_status")!="execution_derived" or
+                report.get("derived_sample_count",0)<DERIVED_MIN_SAMPLES or
+                not (isinstance(ci95,list) and len(ci95)==2 and ci95[0]>=0) or
+                type(report.get("hybrid_recall_at_5")) not in {int,float} or not math.isfinite(report["hybrid_recall_at_5"]) or report["hybrid_recall_at_5"]<ABSOLUTE_MIN_RECALL_AT_5 or
                 not re.fullmatch(r"[a-f0-9]{64}",str(report.get("dataset_sha256",""))) or
                 not re.fullmatch(r"[a-f0-9]{64}",str(report.get("vectors_sha256",""))) or
                 report.get("retrieval_code")!=code_profile() or
@@ -67,6 +80,18 @@ def quality(options, identity):
         if not all(report.get("gates",{}).get(k) is True for k in ["quality","rejection","regression","latency"]):return None
         return {"digest":digest(report),"dense_min":threshold}
     except (OSError,ValueError,TypeError,KeyError):return None
+
+
+# Minimum execution-derived samples for a frozen report to enable dense
+# retrieval. Mirrors the retired 60-query human floor, now counting derived
+# samples (positive + negative + irrelevant) instead of hand labels.
+DERIVED_MIN_SAMPLES=60
+
+
+# Absolute floor for the hybrid arm's Recall@5. A report whose hybrid arm
+# sits below this fails the quality gate even when it beats the lexical
+# arm, so a weak lexical baseline cannot launder a poor hybrid through.
+ABSOLUTE_MIN_RECALL_AT_5=0.5
 
 
 def generation(conn, gid=None):
