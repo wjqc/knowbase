@@ -332,3 +332,156 @@ def apply_submission(repo, conn, job_id, request_id):
 def recover(repo, conn, job_id):
     receipts = conn.execute("SELECT request_id FROM job_submissions WHERE job_id=? AND state!='done'", (job_id,)).fetchall()
     return [apply_submission(repo, conn, job_id, r[0]) for r in receipts]
+
+
+def resubmit_review(repo, conn, job_id, candidate_key, new_candidate):
+    """Phase 1：needs_review 候选的 Agent 重提交出口（G6）。
+
+    原候选行须存在且 materialization_state == 'needs_review'；新候选须用不同
+    candidate_key（candidates 表对 (job_id, candidate_key) 唯一，同键改内容会判
+    CANDIDATE_VERSION_CONFLICT）、action 不得为 review、segment_ids 须与原候选
+    一致。新候选走与正常提交相同的 _candidate_errors 校验与 _apply_candidate
+    成卡路径；成功后原行置 superseded，相关 segment 的 settlement_state 按新
+    结果更新；仅当本 job 再无 needs_review 段且游标已满时才把 job 状态翻为
+    succeeded。失败时原行不动，可换新 key 再次重提交。
+    防伪底线不变：action 非 review 时不再豁免“业务规则必须带出处”校验，
+    无出处内容永不进库；新行用 duplicate_of 列指向原候选 id，可审计。
+    """
+    if not isinstance(new_candidate, dict):
+        return {"error": "INVALID_CANDIDATE"}
+    new_key = new_candidate.get("candidate_key", "")
+    if not isinstance(new_key, str) or not new_key.strip():
+        return {"error": "CANDIDATE_KEY_REQUIRED"}
+    if new_key == candidate_key:
+        return {"error": "CANDIDATE_KEY_REUSE",
+                "message": "重提交须用新的 candidate_key（同键改内容会被判版本冲突）"}
+    if new_candidate.get("action", "create") == "review":
+        return {"error": "RESUBMIT_MUST_NOT_BE_REVIEW",
+                "message": "重提交须补充出处并给出 create/update/link_existing，不得再次 review"}
+    orig = conn.execute("SELECT candidate_id,batch_id,scope,payload_json,materialization_state "
+                        "FROM candidates WHERE job_id=? AND candidate_key=?",
+                        (job_id, candidate_key)).fetchone()
+    if not orig:
+        return {"error": "CANDIDATE_NOT_FOUND"}
+    orig_id, batch_id, scope, orig_payload, orig_state = orig
+    # 新 key 的幂等重放先于原行状态检查：原行已因本次重提交 superseded 后，
+    # 再次提交相同 key 与内容应重放结果，而非报 CANDIDATE_NOT_IN_REVIEW。
+    existing = conn.execute("SELECT candidate_id,materialization_state,memory_id,memory_revision,payload_hash "
+                            "FROM candidates WHERE job_id=? AND candidate_key=?", (job_id, new_key)).fetchone()
+    if existing:
+        if existing[4] != materials.digest(new_candidate):
+            return {"error": "CANDIDATE_VERSION_CONFLICT"}
+        if existing[1] in ("saved", "updated", "linked_existing", "needs_review"):
+            return {"candidate_id": existing[0], "outcome": existing[1], "memory_id": existing[2],
+                    "content_revision": existing[3], "superseded_candidate_key": candidate_key,
+                    "replayed": True}
+        return {"error": "CANDIDATE_KEY_CONFLICT",
+                "message": "该 key 已有一行未完成记录（中断的重提交），请换新 key"}
+    if orig_state != "needs_review":
+        return {"error": "CANDIDATE_NOT_IN_REVIEW", "state": orig_state}
+    try:
+        orig_segment_ids = json.loads(orig_payload).get("segment_ids", [])
+    except ValueError:
+        orig_segment_ids = []
+    if not orig_segment_ids:
+        return {"error": "CANDIDATE_SEGMENTS_UNKNOWN"}
+    if set(new_candidate.get("segment_ids", [])) != set(orig_segment_ids):
+        return {"error": "SEGMENT_MISMATCH",
+                "message": "重提交的 segment_ids 须与原候选一致"}
+    owned = delivered = set(orig_segment_ids)
+    manifest = {s["segment_id"]: s for s in materials.manifest_for_job(conn, job_id)}
+    problems = _candidate_errors(repo, new_candidate, scope, owned, delivered, manifest)
+    if problems:
+        return {"error": "VALIDATION_FAILED",
+                "errors": [{"candidate_key": new_key, "errors": problems}]}
+    now = _now()
+    cid = "C-" + uuid.uuid4().hex[:12]
+    request_id = "resubmit-" + uuid.uuid4().hex
+    conn.execute("INSERT INTO candidates(candidate_id,job_id,batch_id,candidate_key,scope,"
+                 "body_json,evidence_json,decision,version,request_id,created_at,updated_at,"
+                 "payload_json,payload_hash,materialization_state,duplicate_of) "
+                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (cid, job_id, batch_id, new_key, scope,
+                  json.dumps(new_candidate["body"], ensure_ascii=False),
+                  json.dumps(new_candidate["evidence_refs"]), "pending", 1, request_id, now, now,
+                  json.dumps(new_candidate, ensure_ascii=False, sort_keys=True),
+                  materials.digest(new_candidate), "pending", orig_id))
+    conn.commit()
+    try:
+        applied = _apply_candidate(repo, conn, job_id, new_candidate, (cid, "pending", "", ""))
+    except Exception as exc:
+        applied = {"candidate_id": cid, "error": type(exc).__name__, "retryable": True}
+    outcome = applied.get("outcome", "retry_wait")
+    conn.execute("UPDATE candidates SET materialization_state=?,memory_id=?,memory_revision=?,"
+                 "decision=?,updated_at=? WHERE candidate_id=?",
+                 (outcome, applied.get("memory_id", ""), applied.get("content_revision", ""),
+                  outcome if not applied.get("error") else "failed", _now(), cid))
+    if applied.get("error"):
+        conn.commit()
+        return applied
+    conn.execute("UPDATE candidates SET decision='superseded',materialization_state='superseded',"
+                 "updated_at=? WHERE candidate_id=?", (_now(), orig_id))
+    for sid in orig_segment_ids:
+        still_review = False
+        for (other_payload,) in conn.execute("SELECT payload_json FROM candidates WHERE job_id=? "
+                                             "AND materialization_state='needs_review' AND candidate_id!=?",
+                                             (job_id, cid)).fetchall():
+            try:
+                if sid in json.loads(other_payload).get("segment_ids", []):
+                    still_review = True
+                    break
+            except ValueError:
+                continue
+        settlement = "needs_review" if (outcome == "needs_review"
+                                        or applied.get("governance_status") == "staging") else "saved"
+        if still_review:
+            settlement = "needs_review"
+        conn.execute("UPDATE segment_results SET settlement_state=?,candidate_id=?,"
+                     "linked_ids_json=?,updated_at=? WHERE job_id=? AND segment_id=? "
+                     "AND settlement_state='needs_review'",
+                     (settlement, cid,
+                      json.dumps([applied["memory_id"]] if applied.get("memory_id") else []),
+                      _now(), job_id, sid))
+    job_row = conn.execute("SELECT state,batch_total FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+    if job_row and job_row[0] == "needs_review":
+        review = conn.execute("SELECT COUNT(*) FROM segment_results WHERE job_id=? "
+                              "AND settlement_state='needs_review'", (job_id,)).fetchone()[0]
+        cursor = materials.contiguous_cursor(conn, job_id)
+        if review == 0 and cursor == job_row[1]:
+            conn.execute("UPDATE jobs SET state='succeeded',batch_cursor=?,updated_at=? "
+                         "WHERE job_id=?", (cursor, _now(), job_id))
+            _settle_session_cursor(conn, job_id)
+    conn.commit()
+    return {**applied, "superseded_candidate_key": candidate_key}
+
+
+def sweep_review_candidates(conn, *, today=None, ttl_days=None):
+    """Phase 1：review 候选超期自动丢弃（G6）。
+
+    materialization_state='needs_review' 且 created_at 距今超过 ttl_days 天的行，
+    置 decision/materialization_state='discarded' 并记入返回清单。只动候选行本身，
+    不改 segment_results 与 job 状态（丢弃是候选级记账；job 仍可凭其余段结算，
+    丢弃清单由 doctor 的 review_discard_ledger 检查项呈现）。
+    created_at 无法解析的行保守跳过（不丢弃）。ttl_days 默认 30，与配置默认值一致；
+    CLI 应传入配置的 evolution.review_candidate_ttl_days。"""
+    if today is None:
+        today = datetime.now(timezone.utc).date()
+    elif isinstance(today, datetime):
+        today = today.date()
+    ttl = 30 if ttl_days is None else int(ttl_days)
+    discarded = []
+    for cid, jid, key, created in conn.execute("SELECT candidate_id,job_id,candidate_key,created_at "
+                                              "FROM candidates WHERE materialization_state='needs_review'").fetchall():
+        try:
+            created_day = datetime.fromisoformat(created.replace("Z", "+00:00")).date()
+        except (ValueError, AttributeError):
+            continue
+        if (today - created_day).days <= ttl:
+            continue
+        conn.execute("UPDATE candidates SET decision='discarded',materialization_state='discarded',"
+                     "updated_at=? WHERE candidate_id=?", (_now(), cid))
+        discarded.append({"candidate_id": cid, "job_id": jid, "candidate_key": key,
+                          "created_at": created, "discarded_at": today.isoformat()})
+    if discarded:
+        conn.commit()
+    return discarded

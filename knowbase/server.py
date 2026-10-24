@@ -728,6 +728,25 @@ def job_submit_impl(job_id: str = "", batch_id: str = "", lease_token: str = "",
         conn.close()
 
 
+def job_resubmit_review_impl(job_id: str = "", candidate_key: str = "",
+                             candidate: dict | None = None) -> str:
+    """补充出处后重提交 needs_review 候选：新候选须用新 candidate_key、action 不为
+    review、segment_ids 与原候选一致；走正常 lint 与证据校验后成卡。"""
+    rp, err = _repo()
+    if err:
+        return err
+    if not job_id or not candidate_key or not isinstance(candidate, dict):
+        return "错误：job_id/candidate_key/candidate 必填"
+    conn = index.connect(rp)
+    try:
+        import json
+        from .extraction import materialize
+        result = materialize.resubmit_review(rp, conn, job_id, candidate_key, candidate)
+        return json.dumps(result, ensure_ascii=False)
+    finally:
+        conn.close()
+
+
 def job_status_impl(job_id: str = "", protocol_version: int = 1) -> str:
     """查询任务状态。"""
     rp, err = _repo()
@@ -882,6 +901,7 @@ mcp.tool(name="memory_job_material", description="分页读取已领取批次材
 mcp.tool(name="memory_job_renew", description="续租当前批次。延长 lease 到期时间")(_observe(job_renew_impl,"memory_job_renew"))
 mcp.tool(name="memory_job_submit", description="提交提炼结果；先读完对应材料。候选scope填顶层，body为八项结构对象；code_refs是[{repo,path,symbol?,lines?}]对象列表，不能是字符串。候选须有candidate_key/type/title/action/segment_ids/evidence_refs；业务规则附 provenance 及 rule_context；受治理候选在 staging 积累验证证据，达标后自动激活")(_observe(job_submit_impl,"memory_job_submit"))
 mcp.tool(name="memory_job_status", description="查询任务状态。返回 state/cursor/error 等信息")(_observe(job_status_impl,"memory_job_status"))
+mcp.tool(name="memory_job_resubmit_review", description="补充出处后重提交 needs_review 候选：新候选须用新 candidate_key、action 不为 review、segment_ids 与原候选一致；走正常 lint 与证据校验后成卡，无出处内容不进库")(_observe(job_resubmit_review_impl,"memory_job_resubmit_review"))
 mcp.tool(name="memory_import", description="M4-5: 导入文档目录，入队 extract 任务供提炼。支持 Markdown/HTML/代码等多种格式")(_observe(import_impl,"memory_import"))
 
 mcp.tool(name="memory_metrics", description="只读导出本机隐私最小化汇总（schema knowbase.metrics.v1）；UTC时间窗，缺数据返回null，不含查询/对话/业务正文，不自动上传。source_label只是操作者标签，不认证人数")(metrics_impl)
