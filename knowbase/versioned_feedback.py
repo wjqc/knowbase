@@ -179,11 +179,14 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
             after[key]=int(after.get(key,0))+1
             if outcome in ("outdated","incorrect") and after.get("status")=="active":
                 after["status"]="stale"
+                # Phase 1 归档时钟起点：stale 起始日，之后自动归档据此计时。
+                after["stale_since"]=date.today().isoformat()
                 events.append(f"status: active → stale（{outcome}，版本绑定）")
             from .evolution import decide
             decision=decide(conn,mid,current,meta,use,task_key,outcome,task_result,staged=staged)
             if decision["retire"] and after.get("status")=="active":
                 after["status"]="stale"
+                after["stale_since"]=date.today().isoformat()
                 events.append("status: active → stale（独立任务负面反馈，自动淘汰）")
             if decision["promote"] and after.get("confidence") in ("once","staging"):
                 after["confidence"]="verified";after["last_verified"]=date.today().isoformat()
@@ -191,8 +194,10 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
                 if after.get("status")=="stale" and after.get("revalidation_pending"):
                     # 严格语义复活：只有修订过的 stale 卡能走到这里；晋升时
                     # status 回 active 并清除修订标记，标记的使命即告完成。
+                    # stale 时钟同步清除：复活后的卡不再是 stale 计时对象。
                     after["status"]="active"
                     after.pop("revalidation_pending", None)
+                    after.pop("stale_since", None)
                     events.append("status: stale → active（修订后新版本证据达标，自动复活）")
                 auto_activation=staged
                 events.append(f"confidence: {meta.get('confidence')} → verified（{decision['helpful_tasks']}个独立任务，{decision['sessions']}个会话）")

@@ -58,7 +58,7 @@ def create(repo, dtype: str, title: str, body: str, *, scope: str, tags=None,
             current, saved_body, path = store.load(repo, mid)
             if not current or path is None:
                 return {"error": "READBACK_FAILED", "entity_id": mid, "retryable": True}
-            notes, modified = _relation_side_effects(repo, current)
+            notes, modified = _relation_side_effects(repo, current, conn)
             if not result.get("idempotent"):
                 index.record_usage(conn, "save", mid, title)
             git_warning = _post_save(repo, cfg, current, saved_body, path,
@@ -105,6 +105,13 @@ def update(repo, mid: str, *, request_id="", expected_content_revision="",
     cfg = config.load_config()
     conn = index.connect(repo)
     try:
+        # 裁决用证据口径：relations 计入内容修订号，声明矛盾的更新本身会改变
+        # 修订号并清 last_verified，使新版本暂时无证据；裁决须用声明方更新前的
+        # 修订号与 verified 日期比较，否则声明方永远先丢证据、必输。
+        # 新建卡无更新前版本，用当前修订号与 verified 日期（新建卡证据为零）。
+        from .mutations import _compute_revision
+        source_prior = {"content_revision": _compute_revision(meta, old_body),
+                        "last_verified": meta.get("last_verified", "")}
         result = commit_adapter.adapter_update(repo, conn, mid, request_id=request_id,
             expected_content_revision=expected_content_revision,
             expected_governance_revision=expected_governance_revision,
@@ -116,7 +123,8 @@ def update(repo, mid: str, *, request_id="", expected_content_revision="",
             current, body, path = store.load(repo, mid)
             if not current:
                 return {"error": "READBACK_FAILED", "retryable": True}
-            notes, modified = _relation_side_effects(repo, current)
+            notes, modified = _relation_side_effects(repo, current, conn,
+                                                     source_prior=source_prior)
             if not result.get("idempotent"):
                 index.record_usage(conn, "update", mid)
             git_warning = _post_save(repo, cfg, current, body, path, path.parent.name == "staging",
@@ -158,9 +166,12 @@ def _push_after_write(rp, cfg, git_warn):
     return gitops.schedule_push(rp, cfg["git"])
 
 
-def _relation_side_effects(rp, meta):
+def _relation_side_effects(rp, meta, conn=None, source_prior=None):
     """supersedes：被取代条目自动标 stale；
-    contradicts：被矛盾方 relations 自动回指形成双向标记（状态不动，由人裁决）。
+    contradicts：被矛盾方 relations 自动回指形成双向标记，并按执行证据强度自动裁决
+    （conn 为 None 时只双向标记不裁决；裁决仅在关系新建时进行一次）。
+    source_prior：声明方更新前的 {"content_revision", "last_verified"}（update 路径
+    传入；新建卡无此值，用当前修订号与 verified 日期）。
     返回 (notes, modified)：modified 为被改动的目标记忆，调用方须同步索引。"""
     notes, modified = [], []
     today = date.today().isoformat()
@@ -174,18 +185,105 @@ def _relation_side_effects(rp, meta):
             continue
         if rtype == "supersedes" and tmeta.get("status") == "active":
             tmeta["status"] = "stale"
+            tmeta["stale_since"] = today
             tmeta["updated"] = today
             tpath.write_text(store.render(tmeta, tbody), encoding="utf-8")
             modified.append((tmeta, tbody, tpath))
             notes.append(f"{rid} 已因被取代标记为 stale")
         elif rtype == "contradicts":
             rels = tmeta.get("relations") or []
-            if not any(x.get("id") == meta["id"] and x.get("type") == "contradicts" for x in rels):
+            newly = not any(x.get("id") == meta["id"] and x.get("type") == "contradicts" for x in rels)
+            target_prior = None
+            if newly:
+                # 回指写入本身会改变对方修订号、使其新版本暂时无证据；
+                # 裁决前先捕获对方更新前的修订号与 verified 日期（与声明方同理）。
+                from .mutations import _compute_revision
+                target_prior = {"content_revision": _compute_revision(tmeta, tbody),
+                                "last_verified": tmeta.get("last_verified", "")}
                 tmeta["relations"] = rels + [{"id": meta["id"], "type": "contradicts"}]
                 tmeta["updated"] = today
                 tpath.write_text(store.render(tmeta, tbody), encoding="utf-8")
                 modified.append((tmeta, tbody, tpath))
-            notes.append(f"注意：与 {rid} 存在矛盾关系（{tmeta.get('title','')}），已双向标记，建议人工裁决")
+            if conn is not None and newly:
+                sub_notes, sub_modified = _adjudicate_contradiction(
+                    rp, conn, meta, tmeta, tbody, tpath, today, source_prior, target_prior)
+                notes.extend(sub_notes)
+                modified.extend(sub_modified)
+                if not sub_notes:
+                    notes.append(f"注意：与 {rid} 存在矛盾关系（{tmeta.get('title','')}），已双向标记（当前状态不满足自动裁决条件）")
+            else:
+                notes.append(f"注意：与 {rid} 存在矛盾关系（{tmeta.get('title','')}），已双向标记")
+    return notes, modified
+
+
+def _adjudicate_contradiction(rp, conn, meta, tmeta, tbody, tpath, today,
+                              source_prior=None, target_prior=None):
+    """Phase 1：contradicts 自动裁决（仅在关系新建时调用一次）。
+
+    比较双方已采纳执行证据：(helpful 任务数, 最新 verified 日期)。
+    relations 计入内容修订号，声明更新与回指写入本身都会使新版本暂时无证据
+    并清 verified 日期；因此双方均取关系建立前的修订号与 verified 日期比较，
+    否则先写关系的一方必输。新建卡无更新前值时用当前修订号与 verified 日期。
+    强者保留、弱者标 stale 并附裁决说明；证据打平或双方均有负面证据时，
+    双方同时降 stale 并挂隔离标记——绝不在证据打平的情况下自动选边。
+    任一方已 stale/archived 或在 staging 目录时不裁决：stale 方本就不可见，
+    staging 卡的复活通道要求非 staging，裁决会制造无法复活的状态。
+    返回 (notes, modified)。"""
+    from .evolution import evidence_for_revision
+    from .mutations import _compute_revision
+    notes, modified = [], []
+    src_path = store.find_file(rp, meta["id"])
+    if (meta.get("status") in ("stale", "archived") or tmeta.get("status") in ("stale", "archived")
+            or (src_path and src_path.parent.name == "staging") or tpath.parent.name == "staging"):
+        return notes, modified
+    _, src_body, _ = store.load(rp, meta["id"])
+    if src_body is None or src_path is None:
+        return notes, modified
+    if source_prior:
+        src_rev = source_prior["content_revision"]
+        src_verified = source_prior["last_verified"]
+    else:
+        src_rev = _compute_revision(meta, src_body)
+        src_verified = meta.get("last_verified") or ""
+    if target_prior:
+        tgt_rev = target_prior["content_revision"]
+        tgt_verified = target_prior["last_verified"]
+    else:
+        tgt_rev = _compute_revision(tmeta, tbody)
+        tgt_verified = tmeta.get("last_verified") or ""
+    src_ev = evidence_for_revision(conn, meta["id"], src_rev)
+    tgt_ev = evidence_for_revision(conn, tmeta["id"], tgt_rev)
+    src_strength = (src_ev["helpful_tasks"], src_verified)
+    tgt_strength = (tgt_ev["helpful_tasks"], tgt_verified)
+    both_negative = src_ev["negative_evidence_tasks"] > 0 and tgt_ev["negative_evidence_tasks"] > 0
+
+    def _to_stale(m, body, path):
+        m["status"] = "stale"
+        m["stale_since"] = today
+        m["updated"] = today
+        path.write_text(store.render(m, body), encoding="utf-8")
+        modified.append((m, body, path))
+
+    if both_negative or src_strength == tgt_strength:
+        reason = "双方均有负面证据" if both_negative else "执行证据打平"
+        for m, body, path, other in ((meta, src_body, src_path, tmeta["id"]),
+                                     (tmeta, tbody, tpath, meta["id"])):
+            m["contradiction_quarantine"] = True
+            m["adjudication_note"] = (f"contradiction adjudication: {reason}，与 {other} 同时降 stale 并隔离，"
+                                      "不自动选边；修订后可凭新版本证据重新晋升")
+            _to_stale(m, body, path)
+        notes.append(f"矛盾裁决：{reason}，双方同时降 stale 并隔离（{meta['id']} / {tmeta['id']}）")
+        return notes, modified
+    if src_strength > tgt_strength:
+        winner, loser, loser_body, loser_path = meta["id"], tmeta, tbody, tpath
+        loser_strength, winner_strength = tgt_strength, src_strength
+    else:
+        winner, loser, loser_body, loser_path = tmeta["id"], meta, src_body, src_path
+        loser_strength, winner_strength = src_strength, tgt_strength
+    loser["adjudication_note"] = (f"contradiction adjudication: 执行证据弱于 {winner} "
+                                  f"（helpful 任务 {loser_strength[0]} vs {winner_strength[0]}），自动标 stale")
+    _to_stale(loser, loser_body, loser_path)
+    notes.append(f"矛盾裁决：{loser['id']} 执行证据弱于 {winner}，自动标 stale")
     return notes, modified
 
 

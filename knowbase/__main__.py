@@ -727,6 +727,33 @@ def cmd_jobs_expire() -> int:
     return 0
 
 
+def cmd_archive_sweep() -> int:
+    """Phase 1：自动归档 stale 满期且近 X 天内无成功复验证据的卡片。"""
+    from .lifecycle import auto_archive_sweep
+    rp = config.repo_path()
+    conn = index.connect(rp)
+    try:
+        archived = auto_archive_sweep(rp, conn)
+        print(json.dumps({"archived": archived}, ensure_ascii=False, indent=2))
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_review_sweep() -> int:
+    """Phase 1：自动丢弃超期未补充出处的 needs_review 候选。"""
+    from .extraction import materialize
+    rp = config.repo_path()
+    ttl = config.load_config().get("evolution", {}).get("review_candidate_ttl_days", 30)
+    conn = index.connect(rp)
+    try:
+        discarded = materialize.sweep_review_candidates(conn, ttl_days=ttl)
+        print(json.dumps({"discarded": discarded}, ensure_ascii=False, indent=2))
+    finally:
+        conn.close()
+    return 0
+
+
 def _main(argv=None):
     parser = argparse.ArgumentParser(prog="knowbase", description="薪火：跨 Agent 经验记忆库")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -839,6 +866,8 @@ def _main(argv=None):
     p_jobs_retry = jobs_sub.add_parser("retry", help="重试失败任务")
     p_jobs_retry.add_argument("job_id")
     jobs_sub.add_parser("expire", help="回收过期租约")
+    sub.add_parser("archive-sweep", help="自动归档 stale 满期且近 X 天内无成功复验证据的卡片（Phase 1）")
+    sub.add_parser("review-sweep", help="自动丢弃超期未补充出处的 needs_review 候选（Phase 1）")
     p_value = sub.add_parser("value", help="团队价值事件文件汇总（显式导出/导入/快照，不自动上传）")
     value_sub = p_value.add_subparsers(dest="value_cmd", required=True)
     p_value_export = value_sub.add_parser("export", help="导出本机最小事件包（不改变事件状态）")
@@ -1239,6 +1268,10 @@ def _main(argv=None):
         if args.jobs_cmd == "expire":
             return cmd_jobs_expire()
         return 1
+    if args.cmd == "archive-sweep":
+        return cmd_archive_sweep()
+    if args.cmd == "review-sweep":
+        return cmd_review_sweep()
     return 1
 
 
