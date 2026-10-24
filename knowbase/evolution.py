@@ -26,6 +26,9 @@ def evidence(conn, mid, revision, use, task_key, outcome, task_result):
 
 
 def decide(conn, mid, revision, meta, use, task_key, outcome, task_result, *, staged=False):
+    # 延迟导入：writer→commit_adapter 链在模块加载期有循环风险；decide 只在运行时调用。
+    # auto_activate_bizrules 现为全类型统一自动激活出口的总开关（历史名称保留）。
+    from .writer import GOVERNED
     policy = config.load_config().get("evolution", {})
     counts = evidence(conn, mid, revision, use, task_key, outcome, task_result)
     counts["promote"] = counts["retire"] = False
@@ -33,9 +36,15 @@ def decide(conn, mid, revision, meta, use, task_key, outcome, task_result, *, st
         return counts
     counts["retire"] = outcome in ("incorrect", "outdated") or \
         counts["negative_tasks"] >= max(2, int(policy.get("retire_not_helpful_tasks", 2)))
-    promotable = meta.get("status") == "active" and (not staged or (
-        meta.get("type") == "bizrule" and bool(meta.get("provenance")) and
-        policy.get("auto_activate_bizrules", True)))
+    # 严格语义的复活通道：仅当 stale 卡带有修订标记（内容已修订产生新版本）
+    # 且不在 staging 目录时，才放开 status 要求；未修订的 stale 卡永远不
+    # 满足 promotable。标记本身不降低阈值：仍需独立 helpful 任务 ≥ 下限、
+    # 独立会话 ≥ 下限且零阻断。
+    revalidation = (meta.get("status") == "stale"
+                    and bool(meta.get("revalidation_pending")) and not staged)
+    promotable = (meta.get("status") == "active" and (not staged or (
+        meta.get("type") in GOVERNED and bool(meta.get("provenance")) and
+        policy.get("auto_activate_bizrules", True)))) or revalidation
     counts["promote"] = bool(promotable and outcome == "helpful" and not counts["blocked"]
         and counts["helpful_tasks"] >= max(2, int(policy.get("min_helpful_tasks", 3)))
         and counts["sessions"] >= max(2, int(policy.get("min_sessions", 2))))

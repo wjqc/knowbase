@@ -86,8 +86,18 @@ def update(repo, mid: str, *, request_id="", expected_content_revision="",
     meta, old_body, path = store.load(repo, mid)
     if not meta:
         return {"error": "not_found"}
+    # 自进化：已生效受治理卡允许 Agent 修订，不再以 GOVERNANCE_DENIED 硬拒。
+    # 修订即降权——内容变化时 adapter_update 会把 confidence 重置为 once 并
+    # 清空验证与计数，verified 的帽子不会被改版后继续保留。治理字段仍由
+    # 服务端状态机管理，调用方不可直接指定（MCP 层本就不暴露这些字段，
+    # 这里再对直接调用做一道防线）。
     if meta.get("type") in GOVERNED and path.parent.name != "staging":
-        return {"error": "GOVERNANCE_DENIED", "message": "已生效规则须由人工 knowbase revise 修订"}
+        reserved = {"status", "confidence", "last_verified", "verified_content_revision",
+                    "helpful_count", "unhelpful_count"} & set(updates)
+        if reserved:
+            return {"error": "GOVERNANCE_FIELDS_RESERVED",
+                    "message": "confidence/status 等治理字段由服务端状态机管理，调用方不可指定",
+                    "fields": sorted(reserved)}
     preview = {**meta, **{k: v for k, v in updates.items() if k != "body"}}
     errors = store.lint(preview, updates.get("body", old_body), repo)
     if errors:

@@ -1,10 +1,11 @@
 """生命周期状态机：Agent 提交 evidence，服务端决定 state。
 
-once/staging(bizrule) ──(本版本≥3 个已完成独立任务 helpful，≥2 个会话)──▶ verified
+once/staging（受治理卡）──(本版本≥3 个已完成独立任务 helpful，≥2 个会话)──▶ verified
 旧反馈兼容：once 的无 task_result 反馈保留两工具标签晋升条件。
 verified ──(outdated / incorrect 反馈)──▶ stale
 active ──(≥2 个独立任务 not_helpful)──▶ stale
-stale ──(人工修订 + verify)──▶ verified
+stale ──(修订置 revalidation_pending，仍 stale 不可见；新版本证据达标)──▶ active/verified（人工 verify 保留为兼容入口）
+revalidation_pending：stale 卡内容修订时由服务端置位、晋升时清除的复活通道标记；未修订的 stale 卡无此标记，永不自动晋升。
 any ──(人工 archive)──▶ archived
 """
 
