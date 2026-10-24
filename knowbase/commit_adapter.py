@@ -74,6 +74,17 @@ def _fail_intent(conn, intent_id: str, error: str) -> None:
     conn.commit()
 
 
+def _discard_intent(conn, intent_id: str) -> None:
+    """删除从未执行的 intent（CAS 冲突、目标不存在、查重拦截等）。
+
+    这类失败没有产生任何写入，不留 failed 记录：否则同 request_id 的
+    后续重试会被 _check_intent_completed 以 INTENT_FAILED 永久短路，
+    与服务端"获取最新 revision 后重试"的提示自相矛盾。
+    """
+    conn.execute("DELETE FROM write_intents WHERE intent_id=?", (intent_id,))
+    conn.commit()
+
+
 def _check_intent_completed(conn, request_id: str, entity_id: str, payload_hash: str) -> dict | None:
     """检查 intent 是否已完成（崩溃恢复场景）。
 
@@ -159,11 +170,11 @@ def adapter_create(repo: Path, conn, dtype: str, title: str, body: str, *,
             completed = _check_intent_completed(conn, request_id, "", phash)
             if completed:
                 return completed
-            # 锁内查重
+            # 锁内查重（未执行任何写入，失败不留痕，见 _discard_intent）
             sim = store.find_similar(repo, title, scope=scope)
             if sim:
                 _, smeta, spath = sim
-                _fail_intent(conn, intent_id, f"similar:{smeta['id']}")
+                _discard_intent(conn, intent_id)
                 return {
                     "error": "DUPLICATE",
                     "existing_id": smeta["id"],
@@ -258,7 +269,7 @@ def adapter_update(repo: Path, conn, mid: str, *,
             # 加载当前卡片
             meta, body, path = store.load(repo, mid)
             if not meta:
-                _fail_intent(conn, intent_id, "not_found")
+                _discard_intent(conn, intent_id)
                 return {"error": "not_found"}
 
             # 读取当前 revision
@@ -269,12 +280,13 @@ def adapter_update(repo: Path, conn, mid: str, *,
             current_content_rev = _compute_revision(meta, body)
             current_gov_rev = _compute_governance_revision(meta)
 
-            # CAS 检查
+            # CAS 检查（冲突意味着本次更新根本没有执行，失败不留痕，
+            # 客户端可按提示带最新 revision 用同一 request_id 重试）
             if expected_content_revision and expected_content_revision != current_content_rev:
-                _fail_intent(conn, intent_id, "revision_conflict")
+                _discard_intent(conn, intent_id)
                 return {"error": REVISION_CONFLICT, "current_content_revision": current_content_rev}
             if expected_governance_revision and expected_governance_revision != current_gov_rev:
-                _fail_intent(conn, intent_id, "governance_revision_conflict")
+                _discard_intent(conn, intent_id)
                 return {"error": REVISION_CONFLICT, "current_governance_revision": current_gov_rev}
 
             # 应用更新
@@ -356,7 +368,13 @@ def adapter_feedback(repo: Path, conn, mid: str, outcome: str, by: str, *,
 
 
 def recover_intents(repo: Path, conn) -> dict:
-    """崩溃恢复：扫描未入账的 pending intent，检查文件是否已落盘。
+    """崩溃恢复：扫描未入账的 pending intent，核验写入是否已落盘。
+
+    update/feedback 类 intent 只有取得落盘证据（文件 revision 与
+    entity_heads 已提交 revision 不一致，或同 request_id 已由重试完成）
+    才标记 recovered；无证据的保留 pending，等待客户端重试真正执行，
+    不得凭"文件存在"假报成功。create 类 intent 无法定位目标文件，
+    仍标记 failed 交人工核查。
 
     返回 {"recovered": int, "failed": int, "details": [...]}.
     """
@@ -380,33 +398,71 @@ def recover_intents(repo: Path, conn) -> dict:
             details.append({"intent_id": intent_id, "kind": kind, "status": "failed",
                            "reason": "pending create requires manual review"})
         elif kind in (OP_UPDATE, OP_FEEDBACK):
-            # 更新/反馈操作：检查 entity_id 对应的文件是否存在
+            # 更新/反馈操作：必须核验更新是否真的落盘，不能只看文件存在。
+            # 落盘判据：文件当前 revision（内容/治理哈希）与 entity_heads
+            # 记录的已提交 revision 不一致——说明新内容已原子写盘、但
+            # intent 与 entity_heads 的事务未提交即崩溃。两者一致时没有
+            # 任何证据表明本次更新落盘，不得标记完成（否则客户端同
+            # request_id 重试会被误判为幂等成功，更新被静默吞掉）。
             path = store.find_file(repo, entity_id)
-            if path:
-                # 文件存在，检查内容哈希是否匹配
-                meta, body, _ = store.load(repo, entity_id)
-                if meta:
-                    current_hash = _payload_hash({
-                        "entity_id": entity_id,
-                        # 这里简化：假设更新后的内容哈希与 intent 记录一致
-                        # 实际应该存储更详细的 payload 信息
-                    })
-                    # 标记为 recovered（文件存在即认为成功）
-                    _complete_intent(conn, intent_id, f"crash_recovery:recovered:{entity_id}")
-                    recovered += 1
-                    details.append({"intent_id": intent_id, "kind": kind,
-                                   "entity_id": entity_id, "status": "recovered"})
-                else:
-                    _fail_intent(conn, intent_id, "crash_recovery:load_failed")
-                    failed += 1
-                    details.append({"intent_id": intent_id, "kind": kind,
-                                   "entity_id": entity_id, "status": "failed",
-                                   "reason": "file exists but load failed"})
-            else:
+            if not path:
                 _fail_intent(conn, intent_id, "crash_recovery:file_not_found")
                 failed += 1
                 details.append({"intent_id": intent_id, "kind": kind,
                                "entity_id": entity_id, "status": "failed",
                                "reason": "file not found"})
+                continue
+            meta, body, _ = store.load(repo, entity_id)
+            if not meta:
+                _fail_intent(conn, intent_id, "crash_recovery:load_failed")
+                failed += 1
+                details.append({"intent_id": intent_id, "kind": kind,
+                               "entity_id": entity_id, "status": "failed",
+                               "reason": "file exists but load failed"})
+                continue
+            file_content_rev = _compute_revision(meta, body)
+            file_gov_rev = _compute_governance_revision(meta)
+            head = conn.execute(
+                "SELECT content_revision, governance_revision "
+                "FROM entity_heads WHERE entity_id=?",
+                (entity_id,),
+            ).fetchone()
+            if head and (head[0] != file_content_rev or head[1] != file_gov_rev):
+                # 更新已落盘但事务未入账：以文件（唯一真相）修复
+                # entity_heads，再完成 intent。
+                now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                conn.execute(
+                    "INSERT OR REPLACE INTO entity_heads(entity_id,content_revision,"
+                    "governance_revision,updated_at) VALUES(?,?,?,?)",
+                    (entity_id, file_content_rev, file_gov_rev, now),
+                )
+                conn.commit()
+                _complete_intent(conn, intent_id, f"crash_recovery:recovered:{entity_id}")
+                recovered += 1
+                details.append({"intent_id": intent_id, "kind": kind,
+                               "entity_id": entity_id, "status": "recovered"})
+                continue
+            # 同一 request_id + payload 已由重试完成时，本条只是崩溃残留
+            # 的重复 intent，按已完成收账。
+            sibling = None
+            if request_id:
+                sibling = conn.execute(
+                    "SELECT intent_id FROM write_intents WHERE request_id=? "
+                    "AND payload_hash=? AND status='completed' AND intent_id != ?",
+                    (request_id, payload_hash, intent_id),
+                ).fetchone()
+            if sibling:
+                _complete_intent(conn, intent_id, f"crash_recovery:recovered:{entity_id}")
+                recovered += 1
+                details.append({"intent_id": intent_id, "kind": kind,
+                               "entity_id": entity_id, "status": "recovered",
+                               "reason": "same request already completed by retry"})
+                continue
+            # 无落盘证据：保留 pending，等待客户端以同一 request_id 重试
+            # 真正执行（pending 不短路重试路径）。既不计 recovered 也不计
+            # failed——结论尚未确定。
+            details.append({"intent_id": intent_id, "kind": kind,
+                           "entity_id": entity_id, "status": "pending",
+                           "reason": "no evidence update landed; awaiting client retry"})
 
     return {"recovered": recovered, "failed": failed, "details": details}

@@ -194,6 +194,40 @@ class TestAdapterUpdate:
         finally:
             conn.close()
 
+    def test_revision_conflict_does_not_poison_request_id(self, isolated_repo):
+        """M1 回归：revision 冲突是"根本没执行"的失败，不得毒化 request_id。
+
+        旧行为把冲突 intent 标 failed，客户端按服务端提示"获取最新
+        revision 后重试"、用同一 request_id 重提时被 INTENT_FAILED
+        永久短路。本测试要求：带正确 revision 的同 request_id 重试成功。
+        """
+        conn = index.connect(isolated_repo)
+        try:
+            r1 = commit_adapter.adapter_create(
+                isolated_repo, conn, "pitfall", "冲突重试测试",
+                "## 结论\n原始内容\n## 解决的问题\n问题",
+                scope="test-proj",
+            )
+            mid = r1["entity_id"]
+
+            conflict = commit_adapter.adapter_update(
+                isolated_repo, conn, mid,
+                expected_content_revision="stale_revision",
+                request_id="REQ-CONFLICT-RETRY",
+                body="## 结论\n更新后内容\n## 解决的问题\n问题",
+            )
+            assert conflict.get("error") == REVISION_CONFLICT
+
+            retry = commit_adapter.adapter_update(
+                isolated_repo, conn, mid,
+                expected_content_revision=r1["content_revision"],
+                request_id="REQ-CONFLICT-RETRY",
+                body="## 结论\n更新后内容\n## 解决的问题\n问题",
+            )
+            assert retry.get("updated") is True
+        finally:
+            conn.close()
+
     def test_update_idempotent(self, isolated_repo):
         """同 request_id + 同 payload 的 update 应幂等。"""
         conn = index.connect(isolated_repo)
@@ -268,39 +302,93 @@ class TestAdapterFeedback:
 # ---------- 崩溃恢复 ----------
 
 class TestCrashRecovery:
+    @staticmethod
+    def _insert_pending_update(conn, intent_id, request_id, mid, new_body):
+        """插入一条 pending update intent，模拟"intent 已持久化即崩溃"。"""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        phash = commit_adapter._payload_hash({"entity_id": mid, "body": new_body})
+        conn.execute(
+            "INSERT INTO write_intents(intent_id,request_id,entity_id,scope,kind,"
+            "payload_hash,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (intent_id, request_id, mid, "test-proj", "update", phash, "pending", now),
+        )
+        conn.commit()
+
     def test_recover_pending_intent(self, isolated_repo):
-        """pending intent 应被恢复。"""
+        """未落盘的 pending update 不得被判恢复成功。
+
+        旧期望错误：本测试曾断言只要卡片文件存在，recover 就把 intent
+        标 completed——但这里模拟的更新从未写进文件，文件里还是旧正文。
+        那等于宣布一次没发生的更新"成功"：之后客户端用同一 request_id
+        重试会收到"幂等成功"回执，更新被静默吞掉（H1）。正确行为是
+        无落盘证据时保留 pending，等客户端重试真正执行。
+        """
         conn = index.connect(isolated_repo)
         try:
-            # 先创建一个卡片
             r1 = commit_adapter.adapter_create(
                 isolated_repo, conn, "pitfall", "恢复测试",
                 "## 结论\n内容\n## 解决的问题\n问题",
                 scope="test-proj",
             )
             mid = r1["entity_id"]
+            new_body = "## 结论\n新内容\n## 解决的问题\n新问题"
+            self._insert_pending_update(conn, "INT-test12345678", "REQ-RECOVER", mid, new_body)
 
-            # 手动插入一个 pending intent（模拟崩溃）
-            from datetime import datetime, timezone
-            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            conn.execute(
-                "INSERT INTO write_intents(intent_id,request_id,entity_id,scope,kind,"
-                "payload_hash,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                ("INT-test12345678", "REQ-RECOVER", mid, "test-proj",
-                 "update", "abc123", "pending", now),
-            )
-            conn.commit()
-
-            # 执行恢复
             recovery = commit_adapter.recover_intents(isolated_repo, conn)
-            assert recovery["recovered"] >= 1
+            assert recovery["recovered"] == 0
 
-            # 验证 intent 状态已更新
             row = conn.execute(
                 "SELECT status FROM write_intents WHERE intent_id=?",
                 ("INT-test12345678",),
             ).fetchone()
+            assert row[0] == "pending"
+
+            # 客户端同 request_id 重试必须真正执行更新
+            retry = commit_adapter.adapter_update(
+                isolated_repo, conn, mid,
+                expected_content_revision=r1["content_revision"],
+                request_id="REQ-RECOVER",
+                body=new_body,
+            )
+            assert retry.get("updated") is True
+            _, body_now, _ = store.load(isolated_repo, mid)
+            assert "新内容" in body_now
+        finally:
+            conn.close()
+
+    def test_recover_landed_update(self, isolated_repo):
+        """H1 回归（正例）：文件已落盘、事务未入账的 update 应被恢复，
+        且 entity_heads 被修复到与文件一致。"""
+        conn = index.connect(isolated_repo)
+        try:
+            r1 = commit_adapter.adapter_create(
+                isolated_repo, conn, "pitfall", "落盘恢复测试",
+                "## 结论\n内容\n## 解决的问题\n问题",
+                scope="test-proj",
+            )
+            mid = r1["entity_id"]
+            new_body = "## 结论\n已落盘内容\n## 解决的问题\n问题"
+            self._insert_pending_update(conn, "INT-landed000001", "REQ-LANDED", mid, new_body)
+            # 模拟崩溃点在原子写之后：文件已是新正文，entity_heads 仍是旧 revision
+            meta, _body, path = store.load(isolated_repo, mid)
+            path.write_text(store.render(meta, new_body), encoding="utf-8")
+
+            recovery = commit_adapter.recover_intents(isolated_repo, conn)
+            assert recovery["recovered"] >= 1
+            row = conn.execute(
+                "SELECT status FROM write_intents WHERE intent_id=?",
+                ("INT-landed000001",),
+            ).fetchone()
             assert row[0] == "completed"
+
+            from knowbase.mutations import _compute_revision
+            meta2, body2, _ = store.load(isolated_repo, mid)
+            head = conn.execute(
+                "SELECT content_revision FROM entity_heads WHERE entity_id=?",
+                (mid,),
+            ).fetchone()
+            assert head[0] == _compute_revision(meta2, body2)
         finally:
             conn.close()
 

@@ -358,7 +358,6 @@ def submit(conn, job_id: str, batch_id: str, lease_token: str, request_id: str,
 
     # M3-3: 持久化 segment_results
     segment_results = segment_results or []
-    processed_segments = 0
     for sr in segment_results:
         seg_id = sr.get("segment_id", "")
         if not seg_id:
@@ -372,13 +371,17 @@ def submit(conn, job_id: str, batch_id: str, lease_token: str, request_id: str,
             "reason,candidate_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
             (seg_id, job_id, batch_id, decision, reason, cid, now_str, now_str),
         )
-        # 只有 decision 不是 pending 的 segment 才算已处理
-        if decision != "pending":
-            processed_segments += 1
 
-    # 更新游标：如果有 segment_results，按已处理的 segment 数量推进；否则按 candidates 数量推进
+    # 更新游标：有 segment_results 时按 segment_results 表中实际已结算
+    # （decision 非 pending）的片段总数计算，与 v2 路径按实际结算状态算
+    # 游标的口径一致；重复提交已结算片段不得再次推进游标。
+    # 无 segment_results 时按本次 candidates 数量推进。
     if segment_results:
-        new_cursor = cursor + processed_segments
+        new_cursor = conn.execute(
+            "SELECT COUNT(*) FROM segment_results "
+            "WHERE job_id=? AND decision != 'pending'",
+            (job_id,),
+        ).fetchone()[0]
     else:
         new_cursor = cursor + len(candidates)
     new_state = STATE_VALIDATING

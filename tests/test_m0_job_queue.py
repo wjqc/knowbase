@@ -183,6 +183,40 @@ class TestJobs:
         finally:
             conn.close()
 
+    def test_duplicate_segment_submit_does_not_advance_cursor(self, isolated_repo):
+        """H2 回归：换 request_id 重复提交已结算片段不得推进游标。
+
+        旧实现按"本次提交的非 pending 条数"累加游标：total=2 的任务
+        把 s1 重提两次即可被判 succeeded，s2 从未处理。修复后游标按
+        segment_results 表中实际已结算片段数计算，与 v2 路径口径一致。
+        """
+        conn = index.connect(isolated_repo)
+        try:
+            r = jobs.enqueue(conn, jobs.KIND_EXTRACT, "proj-a", {"data": "x"})
+            job_id = r["job_id"]
+            jobs.set_preparing(conn, job_id)
+            jobs.set_awaiting(conn, job_id, 2)
+
+            c1 = jobs.claim(conn, job_id, "host-1")
+            res1 = jobs.submit(conn, job_id, c1["batch_id"], c1["lease_token"], "req-s1",
+                               [], [{"segment_id": "s1", "decision": "distilled"}])
+            assert res1["next_cursor"] == 1
+            assert res1["state"] == jobs.STATE_AWAITING
+
+            c2 = jobs.claim(conn, job_id, "host-1")
+            res2 = jobs.submit(conn, job_id, c2["batch_id"], c2["lease_token"], "req-s1-again",
+                               [], [{"segment_id": "s1", "decision": "distilled"}])
+            assert res2["next_cursor"] == 1
+            assert res2["state"] == jobs.STATE_AWAITING
+
+            c3 = jobs.claim(conn, job_id, "host-1")
+            res3 = jobs.submit(conn, job_id, c3["batch_id"], c3["lease_token"], "req-s2",
+                               [], [{"segment_id": "s2", "decision": "skipped"}])
+            assert res3["next_cursor"] == 2
+            assert res3["state"] == jobs.STATE_SUCCEEDED
+        finally:
+            conn.close()
+
     def test_fail_and_retry(self, isolated_repo):
         conn = index.connect(isolated_repo)
         try:
