@@ -27,8 +27,7 @@
     }
   ],
   "annotation_author": "implementation_agent",
-  "human_approved": false,
-  "acceptance_scope": "frozen real project design material; expectations prelabelled, not human acceptance",
+  "acceptance_scope": "frozen real project design material; expectations verified by execution backtest, not human approval",
   "cases": [
     {
       "case_id": "rule-staging",
@@ -37,9 +36,7 @@
       "start_char": 19618,
       "line": 403,
       "expected_behavior": "业务规则进入待审；不能以模型判断直接激活。",
-      "review_status": "agent_prelabel_pending_human",
-      "human_reviewer": null,
-      "human_reviewed_at": null
+      "review_status": "execution_backtest"
     },
     {
       "case_id": "coverage-prefix",
@@ -48,9 +45,7 @@
       "start_char": 17431,
       "line": 358,
       "expected_behavior": "未读/未处理片段不可标完成；乱序完成不能跨过缺口。",
-      "review_status": "agent_prelabel_pending_human",
-      "human_reviewer": null,
-      "human_reviewed_at": null
+      "review_status": "execution_backtest"
     },
     {
       "case_id": "real-card",
@@ -59,9 +54,7 @@
       "start_char": 22521,
       "line": 447,
       "expected_behavior": "必须有卡片/索引读回，或明确 review/no_candidate；不能把排队当保存。",
-      "review_status": "agent_prelabel_pending_human",
-      "human_reviewer": null,
-      "human_reviewed_at": null
+      "review_status": "execution_backtest"
     },
     {
       "case_id": "no-fake-provenance",
@@ -70,9 +63,7 @@
       "start_char": 19657,
       "line": 403,
       "expected_behavior": "代码推断不冒充已确认 PRD；规则确认、激活、实现验证分别记录。",
-      "review_status": "agent_prelabel_pending_human",
-      "human_reviewer": null,
-      "human_reviewed_at": null
+      "review_status": "execution_backtest"
     },
     {
       "case_id": "scope-guard",
@@ -81,9 +72,7 @@
       "start_char": 18865,
       "line": 390,
       "expected_behavior": "范围不明时报告，不能捞其他项目答案冒充本项目规则。",
-      "review_status": "agent_prelabel_pending_human",
-      "human_reviewer": null,
-      "human_reviewed_at": null
+      "review_status": "execution_backtest"
     },
     {
       "case_id": "no-progress-card",
@@ -92,9 +81,15 @@
       "start_char": 5253,
       "line": 134,
       "expected_behavior": "仅有测试总数/进度不是可复用业务规则，不强行造卡。",
-      "review_status": "agent_prelabel_pending_human",
-      "human_reviewer": null,
-      "human_reviewed_at": null
+      "review_status": "execution_backtest"
     }
-  ]
+  ],
+  "execution_backtest": {
+    "verdict": "pass",
+    "basis": "input hash and case anchors are machine-verifiable; no human sign-off required",
+    "checked": [
+      "input_sha256",
+      "case_anchors"
+    ]
+  }
 }

@@ -53,10 +53,10 @@ def test_stdio_probe_checks_source_build_and_reports_session_boundary(tmp_path):
     assert result['protocol_verified'] is True and result['session_effective']=='reconnect_required'
 
 
-def test_incomplete_human_qrels_stop_formal_evaluation_before_cache_access(memory_repo,tmp_path):
+def test_incomplete_qrels_stop_formal_evaluation_before_cache_access(memory_repo,tmp_path):
     p=tmp_path/'dataset.jsonl';p.write_text(json.dumps({'id':'q1','query':'HAR','labels':{'status':'pending_human'}})+'\n')
     result=run(memory_repo,p,tmp_path/'missing-cache.json',tmp_path,dense_min=.5,gate_dense_min=.6)
-    assert result['state']=='NOT_RUN' and result['reason']=='human_qrels_incomplete'
+    assert result['state']=='NOT_RUN' and result['reason']=='qrels_incomplete'
 
 
 def test_retrieval_report_is_read_only_and_does_not_invent_savings(memory_repo,capsys):

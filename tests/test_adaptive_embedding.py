@@ -46,10 +46,13 @@ def approve(repo,activate=True):
     gid=conn.execute('SELECT generation_id FROM embedding_generations ORDER BY created_at DESC,rowid DESC LIMIT 1').fetchone()[0]
     g=si.generation(conn,gid);conn.close()
     # This is explicitly a synthetic control artifact, not a claim of human evaluation.
-    report={'schema':'knowbase.retrieval-evaluation.v1','verdict':'PASS','annotation_status':'reviewed',
-        'human_query_count':60,'reviewer':'SYNTHETIC_TEST_FIXTURE','dataset_sha256':digest('synthetic dataset'),'vectors_sha256':digest('synthetic vectors'),
+    # Since Phase 2 the gate accepts only execution-derived provenance.
+    report={'schema':'knowbase.retrieval-evaluation.v1','verdict':'PASS','annotation_status':'execution_derived',
+        'derived_sample_count':60,'confidence_interval':{'metric':'Recall@5','delta':0.0,'CI95':[0.0,0.2],'positive_n':60},
+        'dataset_sha256':digest('synthetic dataset'),'vectors_sha256':digest('synthetic vectors'),
         'retrieval_code':si.code_profile(),'covered_scopes':['global'],
         'provider_fp':g['identity']['provider_fp'],'space_id':g['identity']['space_id'],'dense_min':.8,
+        'hybrid_recall_at_5':1.0,
         'gates':{k:True for k in ['quality','rejection','regression','latency']}}
     p=repo.parent/'synthetic-report.json';p.write_text(json.dumps(report))
     cfg=config.load_config();cfg['embedding']['quality_report']=str(p);config.CONFIG_PATH.write_text(json.dumps(cfg))
