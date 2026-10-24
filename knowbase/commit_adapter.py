@@ -242,6 +242,11 @@ def adapter_update(repo: Path, conn, mid: str, *,
     CAS 校验（与锁内重读的当前 revision 不符返回 REVISION_CONFLICT）；
     不携带则不校验。
 
+    内容变化时 confidence 回 once、验证与计数清零；stale 卡被修订后产生
+    新版本并置 revalidation_pending 标记，但 status 保持 stale、修订后仍
+    不可见，只有凭新版本证据重新晋升时才回 active——旧版本证据因版本绑定
+    不会复活，未修订的 stale 卡也绝不凭证据单独晋升。
+
     返回 {"entity_id", "content_revision", "governance_revision", "updated": True}
     或 {"error": REVISION_CONFLICT / IDEMPOTENCY_CONFLICT}。
     """
@@ -315,6 +320,13 @@ def adapter_update(repo: Path, conn, mid: str, *,
                 meta["verified_content_revision"] = ""
                 meta["helpful_count"] = 0
                 meta["unhelpful_count"] = 0
+                # 严格语义：stale 卡被修订产生新版本，但 status 保持 stale，
+                # 修订本身不恢复可见性；revalidation_pending 是修订打开复活
+                # 通道的显性标记——仅当旧 status 为 stale 且内容确实变化时置
+                # 位，晋升时清除。未修订的 stale 卡没有该标记，decide 绝不
+                # 对其放开 status 要求；旧版本证据因版本绑定不会复活。
+                if meta.get("status") == "stale":
+                    meta["revalidation_pending"] = True
             new_gov_rev = _compute_governance_revision(meta)
 
             # 原子写文件

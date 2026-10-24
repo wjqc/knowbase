@@ -146,7 +146,11 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
             return {"error":"not_found"}
         policy=config.load_config().get("evolution",{})
         staged=path.parent.name=="staging"
-        validation=bool(bound and use[6]=="read" and meta.get("type")=="bizrule"
+        # 自进化统一出口：全部受治理类型（standard/preference/bizrule）的 staged 卡
+        # 均可凭绑定 read 回执的真实任务验证积累激活证据；激活阈值见 decide()。
+        # 延迟导入：与本文件内其他运行时导入一致，避免模块加载期循环。
+        from .writer import GOVERNED
+        validation=bool(bound and use[6]=="read" and meta.get("type") in GOVERNED
                         and policy.get("enabled",True) and policy.get("auto_activate_bizrules",True)
                         and task_result in ("completed","failed"))
         if bound and use[6]=="read" and not validation:
@@ -184,10 +188,16 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
             if decision["promote"] and after.get("confidence") in ("once","staging"):
                 after["confidence"]="verified";after["last_verified"]=date.today().isoformat()
                 after["verified_content_revision"]=current
+                if after.get("status")=="stale" and after.get("revalidation_pending"):
+                    # 严格语义复活：只有修订过的 stale 卡能走到这里；晋升时
+                    # status 回 active 并清除修订标记，标记的使命即告完成。
+                    after["status"]="active"
+                    after.pop("revalidation_pending", None)
+                    events.append("status: stale → active（修订后新版本证据达标，自动复活）")
                 auto_activation=staged
                 events.append(f"confidence: {meta.get('confidence')} → verified（{decision['helpful_tasks']}个独立任务，{decision['sessions']}个会话）")
                 if auto_activation:
-                    events.append("业务规则自动激活：staging → bizrules（当前版本验证证据达标）")
+                    events.append(f"自动激活：staging → {store.TYPE_DIR.get(meta.get('type'), meta.get('type'))}（当前版本验证证据达标）")
             # 兼容既有无任务结果字段的工具反馈；新显式验证统一使用独立任务策略。
             if (not task_result and not staged and policy.get("enabled",True) and outcome=="helpful"
                     and after.get("confidence")=="once" and after.get("status")=="active"
