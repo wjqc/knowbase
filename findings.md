@@ -437,3 +437,13 @@ fi
 - 独立探针发现：Authorization: Bearer 被通用 key=value 规则先吞掉前缀，留下原 token；异种引号或反斜杠转义引号令 shell 凭据只删前缀；引号中的 REDACTED 占位符被误报。
 - 新增直接原值/后缀断言先运行得到 8 failed/2 passed，证明旧全绿检测未覆盖这些结果。已调整规则优先级及同类引号/占位符匹配，正在验证。
 - 当前 active.json/manifest.json 仍记 rc5，runtime 尚有旧 rc5 wheel；知识库新增文档未提交。继续只处理本轮尾项，不动其他会话已提交内容。
+
+## 2026-10-23 ZCode 前台噪音核查
+- 用户要求聚焦功能，网卡/代理适配已全部移除，不修改全局VPN/Git配置。
+- knowbase项目目标会话session_255c...：68次实调中37次知识工具，24次提炼协议。原评估09:56:50完成，Stop先后两次block，43轮额外模型请求到10:23:06才结束。
+- claim/material独立输出441639字符，占工具结果约82.8%；两个提示仅各198字符，主要是强制后续工作造成干扰。
+- 账本J-887619034daa=1no_value；J-95f05965d244=50no_value+4distilled关联一张卡，不能照抄Agent自述52/54无价值。部分错误契约增加修复轮次。
+- 只读审核产物 docs/reviews/zcode-noise-audit-2026-10-23.md；未修改Hook、未自动关闭采集。
+
+## 2026-10-24 本机升级取证
+Windows worker安装分支缺失；现有macOS/Linux安装前先停旧任务，失败缺回滚。需要补相同固定runtime的Windows XML任务、配置传递、单实例与恢复，不新增运行环境。当前统计仅1条待确认，旧120全待发记录不可当现状。版本号rc7不足区别新能力，本轮将发布rc8并保留build标记校验。

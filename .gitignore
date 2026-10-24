@@ -11,3 +11,6 @@ knowbase-dashboard.html
 .codegraph/
 
 build/
+
+# macOS metadata
+.DS_Store
