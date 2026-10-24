@@ -175,7 +175,7 @@ def _human_op(rp, fn, mid, label, expect_revision: str = ""):
     RepoLock 内执行，与随后的写入处于同一临界区：锁外检查通过后、
     写入执行前状态可被其他写入者改变（TOCTOU），检查结论会失效。
     """
-    from .mutations import _compute_governance_revision, REVISION_CONFLICT
+    from .mutations import _compute_governance_revision, _compute_revision, REVISION_CONFLICT
 
     cfg = config.load_config()
 
@@ -217,7 +217,10 @@ def _human_op(rp, fn, mid, label, expect_revision: str = ""):
         conn.close()
         index.build_index_md(rp, cfg)  # 本地重建，不提交
         # INDEX.md 已退役，不再提交到 Git
-        git_warn = gitops.commit_paths(rp, f"{label}({mid}): by human", [path]) \
+        # verify/archive 只改治理字段，内容修订号不变，写前版本即当前版本
+        git_warn = gitops.commit_paths(
+            rp, gitops.with_base_trailers(f"{label}({mid}): by human",
+                                          [(mid, _compute_revision(meta2, body))]), [path]) \
             if cfg["git"].get("auto_commit", True) else None
     push_warn = None if git_warn or not cfg["git"].get("auto_push") else \
         gitops.schedule_push(rp, cfg["git"])
@@ -271,7 +274,9 @@ def cmd_promote(mid: str) -> int:
         index.build_index_md(rp, cfg)  # 本地重建，不提交
         # INDEX.md 已退役，不再提交到 Git
         git_warn = gitops.commit_paths(
-            rp, f"promote({mid}): staging → {store.TYPE_DIR[dtype]}（人工审核通过）",
+            rp, gitops.with_base_trailers(
+                f"promote({mid}): staging → {store.TYPE_DIR[dtype]}（人工审核通过）",
+                [(mid, _compute_revision(meta, body))]),
             [path, target],
         ) if cfg["git"].get("auto_commit", True) else None
     push_warn = None if git_warn or not cfg["git"].get("auto_push") else \
@@ -356,8 +361,10 @@ def cmd_revise(mid: str, body_file: str, title: str | None = None,
         conn.close()
         index.build_index_md(rp, cfg)  # 本地重建，不提交
         # INDEX.md 已退役，不再提交到 Git
-        git_warn = gitops.commit_paths(rp, f"revise({mid}): {meta['title']} by human",
-                                       [path]) \
+        git_warn = gitops.commit_paths(
+            rp, gitops.with_base_trailers(f"revise({mid}): {meta['title']} by human",
+                                          [(mid, prior_content_revision)]),
+            [path]) \
             if cfg["git"].get("auto_commit", True) else None
     push_warn = None if git_warn or not cfg["git"].get("auto_push") else \
         gitops.schedule_push(rp, cfg["git"])

@@ -109,6 +109,7 @@ def auto_archive_sweep(repo, conn, *, today=None):
     cfg = config.load_config()
     days = int(cfg.get("evolution", {}).get("archive_after_stale_days", 90))
     archived = []
+    archive_bases = []
     with RepoLock(repo, cfg.get("lock_timeout", 10)):
         for meta, body, path in store.iter_all(repo):
             if meta.get("status") != "stale":
@@ -119,6 +120,8 @@ def auto_archive_sweep(repo, conn, *, today=None):
             success_day, ev_summary = _last_evidence(conn, meta["id"])
             if success_day is not None and (today - success_day).days < days:
                 continue
+            from .mutations import _compute_revision as _cr
+            archive_bases.append((meta["id"], _cr(meta, body)))
             meta["status"] = "archived"
             meta["archived_at"] = today.isoformat()
             meta["archive_reason"] = f"no successful revalidation evidence in last {days}d"
@@ -144,5 +147,7 @@ def auto_archive_sweep(repo, conn, *, today=None):
             conn.commit()
             if cfg.get("git", {}).get("auto_commit", True):
                 paths = [store.find_file(repo, a["id"]) for a in archived]
-                gitops.commit_paths(repo, f"auto-archive {len(archived)} stale memories", [p for p in paths if p])
+                gitops.commit_paths(repo, gitops.with_base_trailers(
+                    f"auto-archive {len(archived)} stale memories", archive_bases),
+                    [p for p in paths if p])
     return archived

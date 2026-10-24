@@ -58,11 +58,13 @@ def create(repo, dtype: str, title: str, body: str, *, scope: str, tags=None,
             current, saved_body, path = store.load(repo, mid)
             if not current or path is None:
                 return {"error": "READBACK_FAILED", "entity_id": mid, "retryable": True}
-            notes, modified = _relation_side_effects(repo, current, conn)
+            bases_out = []
+            notes, modified = _relation_side_effects(repo, current, conn, bases_out=bases_out)
             if not result.get("idempotent"):
                 index.record_usage(conn, "save", mid, title)
             git_warning = _post_save(repo, cfg, current, saved_body, path,
-                                    path.parent.name == "staging", f"memory({mid}): {title} [{src}]", modified)
+                                    path.parent.name == "staging", f"memory({mid}): {title} [{src}]", modified,
+                                    bases=[(mid, "none")] + bases_out)
         checked = _readback(conn, current, saved_body, path.parent.name == "staging")
         if checked.get("error"):
             return checked
@@ -123,12 +125,14 @@ def update(repo, mid: str, *, request_id="", expected_content_revision="",
             current, body, path = store.load(repo, mid)
             if not current:
                 return {"error": "READBACK_FAILED", "retryable": True}
+            bases_out = []
             notes, modified = _relation_side_effects(repo, current, conn,
-                                                     source_prior=source_prior)
+                                                     source_prior=source_prior, bases_out=bases_out)
             if not result.get("idempotent"):
                 index.record_usage(conn, "update", mid)
             git_warning = _post_save(repo, cfg, current, body, path, path.parent.name == "staging",
-                                    f"update({mid}): {current['title']}", modified)
+                                    f"update({mid}): {current['title']}", modified,
+                                    bases=[(mid, source_prior["content_revision"])] + bases_out)
         checked = _readback(conn, current, body, path.parent.name == "staging")
         if checked.get("error"):
             return checked
@@ -142,7 +146,7 @@ def update(repo, mid: str, *, request_id="", expected_content_revision="",
         result["push_warning"] = _push_after_write(repo, cfg, git_warning)
     return result
 
-def _post_save(rp, cfg, meta, body, path, staging, commit_msg, modified=()):
+def _post_save(rp, cfg, meta, body, path, staging, commit_msg, modified=(), bases=None):
     """锁内本地事务：同步索引 → INDEX → git commit。远程 push 必须在锁外。"""
     conn = index.connect(rp)
     index.upsert(conn, meta, body, path, staging)
@@ -155,7 +159,7 @@ def _post_save(rp, cfg, meta, body, path, staging, commit_msg, modified=()):
     if cfg["git"].get("auto_commit", True):
         # INDEX.md 已退役，不再提交到 Git（本地重建供速览）
         owned_paths = [path] + [item[2] for item in modified]
-        git_warn = gitops.commit_paths(rp, commit_msg, owned_paths)
+        git_warn = gitops.commit_paths(rp, gitops.with_base_trailers(commit_msg, bases), owned_paths)
     return git_warn
 
 
@@ -166,13 +170,16 @@ def _push_after_write(rp, cfg, git_warn):
     return gitops.schedule_push(rp, cfg["git"])
 
 
-def _relation_side_effects(rp, meta, conn=None, source_prior=None):
+def _relation_side_effects(rp, meta, conn=None, source_prior=None, bases_out=None):
     """supersedes：被取代条目自动标 stale；
     contradicts：被矛盾方 relations 自动回指形成双向标记，并按执行证据强度自动裁决
     （conn 为 None 时只双向标记不裁决；裁决仅在关系新建时进行一次）。
     source_prior：声明方更新前的 {"content_revision", "last_verified"}（update 路径
     传入；新建卡无此值，用当前修订号与 verified 日期）。
+    bases_out：可选列表，收集本次连带改动的目标卡 (id, 改前 content_revision)，
+    供调用方写提交附带 base trailer（B-(1)）。
     返回 (notes, modified)：modified 为被改动的目标记忆，调用方须同步索引。"""
+    from .mutations import _compute_revision
     notes, modified = [], []
     today = date.today().isoformat()
     for r in meta.get("relations") or []:
@@ -184,6 +191,8 @@ def _relation_side_effects(rp, meta, conn=None, source_prior=None):
             notes.append(f"警告：关系指向的 {rid} 不存在")
             continue
         if rtype == "supersedes" and tmeta.get("status") == "active":
+            if bases_out is not None:
+                bases_out.append((rid, _compute_revision(tmeta, tbody)))
             tmeta["status"] = "stale"
             tmeta["stale_since"] = today
             tmeta["updated"] = today
@@ -200,6 +209,8 @@ def _relation_side_effects(rp, meta, conn=None, source_prior=None):
                 from .mutations import _compute_revision
                 target_prior = {"content_revision": _compute_revision(tmeta, tbody),
                                 "last_verified": tmeta.get("last_verified", "")}
+                if bases_out is not None:
+                    bases_out.append((rid, target_prior["content_revision"]))
                 tmeta["relations"] = rels + [{"id": meta["id"], "type": "contradicts"}]
                 tmeta["updated"] = today
                 tpath.write_text(store.render(tmeta, tbody), encoding="utf-8")

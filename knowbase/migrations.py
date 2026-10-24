@@ -351,6 +351,21 @@ MIGRATIONS: list[tuple[int, str]] = [
       origin TEXT NOT NULL, level TEXT NOT NULL, reason TEXT NOT NULL,
       detail_json TEXT NOT NULL);
     """),
+    (23, """
+    CREATE TABLE IF NOT EXISTS card_conflicts(
+      conflict_id TEXT PRIMARY KEY, card_id TEXT NOT NULL,
+      base_content_revision TEXT NOT NULL DEFAULT '',
+      local_content_revision TEXT NOT NULL DEFAULT '',
+      remote_content_revision TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'open',
+      source TEXT NOT NULL DEFAULT '',
+      local_file TEXT NOT NULL DEFAULT '', remote_file TEXT NOT NULL DEFAULT '',
+      merged_file TEXT NOT NULL DEFAULT '',
+      adjudication_note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_card_conflicts_card ON card_conflicts(card_id, status);
+    """),
 
 ]
 

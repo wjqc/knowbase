@@ -400,6 +400,19 @@ def recover_intents(repo: Path, conn) -> dict:
     failed = 0
     details = []
 
+    # 极端双崩溃遗留边界：同一张卡同时存在两条以上 pending update/feedback
+    # intent 时，文件修订号与 entity_heads 的差异无法严格归属到某一条
+    # intent（payload 本身不落盘，只有哈希）。此时不得凭修订号差异猜测
+    # 任何一条已落盘——猜错会把未落盘的更新误标完成、静默吞掉。这些 intent
+    # 跳过修订号恢复分支（同 request_id 已由重试完成的重复 intent 仍按
+    # sibling 规则收账），保持 pending 等客户端重试真正执行，并由 doctor
+    # 显性报告；绝不标记 failed（failed 会毒化同 request_id 的重试）。
+    from collections import Counter
+    pending_counts = Counter(
+        entity_id for _i, _r, entity_id, kind, _p in rows
+        if kind in (OP_UPDATE, OP_FEEDBACK) and entity_id)
+    ambiguous_entities = {e for e, n in pending_counts.items() if n > 1}
+
     for intent_id, request_id, entity_id, kind, payload_hash in rows:
         # 检查文件是否已落盘
         if kind == OP_CREATE:
@@ -440,7 +453,8 @@ def recover_intents(repo: Path, conn) -> dict:
                 "FROM entity_heads WHERE entity_id=?",
                 (entity_id,),
             ).fetchone()
-            if head and (head[0] != file_content_rev or head[1] != file_gov_rev):
+            if (entity_id not in ambiguous_entities and head
+                    and (head[0] != file_content_rev or head[1] != file_gov_rev)):
                 # 更新已落盘但事务未入账：以文件（唯一真相）修复
                 # entity_heads，再完成 intent。
                 now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -473,9 +487,12 @@ def recover_intents(repo: Path, conn) -> dict:
                 continue
             # 无落盘证据：保留 pending，等待客户端以同一 request_id 重试
             # 真正执行（pending 不短路重试路径）。既不计 recovered 也不计
-            # failed——结论尚未确定。
+            # failed——结论尚未确定。双崩溃歧义实体额外标注原因。
             details.append({"intent_id": intent_id, "kind": kind,
                            "entity_id": entity_id, "status": "pending",
-                           "reason": "no evidence update landed; awaiting client retry"})
+                           "reason": ("ambiguous: multiple pending intents for same entity; "
+                                      "not attributed, awaiting client retry")
+                           if entity_id in ambiguous_entities else
+                           "no evidence update landed; awaiting client retry"})
 
     return {"recovered": recovered, "failed": failed, "details": details}

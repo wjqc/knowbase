@@ -301,10 +301,14 @@ def feedback_impl(id: str, outcome: str, context: str = "",
                         _compute_governance_revision(meta)==result["governance_revision"]):
                     sync_current = True
                     gw = _post_save(rp, cfg, meta, body, path, path.parent.name=="staging",
-                                    f"feedback({id}): {outcome} by {by}")
+                                    f"feedback({id}): {outcome} by {by}",
+                                    bases=[(id, result["content_revision"])])
                     if result.get("auto_activation") and cfg.get("git",{}).get("auto_commit",True):
                         old_path=store.mem_path(rp,meta["type"],id,staging=True)
-                        move_warning=gitops.commit_paths(rp,f"auto activate({id})",[old_path,path])
+                        move_warning=gitops.commit_paths(
+                            rp, gitops.with_base_trailers(
+                                f"auto activate({id})", [(id, result["content_revision"])]),
+                            [old_path,path])
                         gw=gw or move_warning
     finally:
         conn.close()
@@ -316,6 +320,19 @@ def feedback_impl(id: str, outcome: str, context: str = "",
         out.append(gw)
     if pw:
         out.append(pw)
+    # B 轻量路线：新反馈可能打破隔离区打平——对本卡的 open 冲突重新裁决，
+    # 后续执行反馈自然淘汰的触发点；无 open 冲突时不取锁、不写库。
+    if result.get("governance_applied"):
+        try:
+            from . import quarantine as _quarantine
+            _qconn = index.connect(rp)
+            try:
+                for _cid, _status, _note in _quarantine.readjudicate_card(rp, _qconn, id):
+                    out.append(f"冲突重裁决：{_cid} {_status}（{_note}）")
+            finally:
+                _qconn.close()
+        except Exception:
+            pass
     return "\n".join(out)
 
 

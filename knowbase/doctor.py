@@ -76,6 +76,23 @@ def inspect(repo):
                            if m.get("contradiction_quarantine")]
             add("contradiction_quarantine", "warn" if quarantined else "pass", json.dumps(
                 [{"id": i, "note": n} for i, n in quarantined], ensure_ascii=False))
+            # B 轻量路线：同卡并发冲突隔离区（card_conflicts 表，迁移 v23）。
+            if "card_conflicts" in tables:
+                open_rows = conn.execute(
+                    "SELECT conflict_id,card_id,status,source FROM card_conflicts "
+                    "WHERE status='open' ORDER BY created_at").fetchall()
+                add("card_conflicts", "warn" if open_rows else "pass", json.dumps(
+                    [{"conflict_id": c, "card_id": i, "status": s, "source": src}
+                     for c, i, s, src in open_rows], ensure_ascii=False))
+            # 双崩溃遗留边界：同一张卡多条 pending intent 时恢复不猜测归属，
+            # 这里显性报告，供人工/客户端重试跟进。
+            if "write_intents" in tables:
+                multi = conn.execute(
+                    "SELECT entity_id,COUNT(*) FROM write_intents WHERE status='pending' "
+                    "AND entity_id != '' AND kind IN ('update','feedback') "
+                    "GROUP BY entity_id HAVING COUNT(*)>1").fetchall()
+                add("ambiguous_pending_intents", "warn" if multi else "pass", json.dumps(
+                    [{"entity_id": e, "pending": n} for e, n in multi], ensure_ascii=False))
             if "candidates" in tables:
                 discarded = conn.execute("SELECT candidate_id,job_id,candidate_key,created_at,updated_at "
                                          "FROM candidates WHERE decision='discarded'").fetchall()

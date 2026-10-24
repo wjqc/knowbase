@@ -57,6 +57,9 @@ def _run_git(cmd: list[str], timeout: float) -> tuple[int, str, str]:
     """
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
+    # rebase --continue 等流程不得打开编辑器（自动化下会永久挂起）
+    env["GIT_EDITOR"] = "true"
+    env["GIT_SEQUENCE_EDITOR"] = "true"
     kwargs: dict = {}
     if _IS_WINDOWS:
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -89,6 +92,44 @@ def _run(repo: Path, *args, timeout: float = 15.0) -> str:
 
 def is_repo(repo: Path) -> bool:
     return (Path(repo) / ".git").exists()
+
+
+def with_base_trailers(message: str, bases: list[tuple[str, str]] | None) -> str:
+    """B-(1)：写提交附带 base content_revision 元数据。
+
+    bases 为 [(卡片 ID, 写前 content_revision)]，新建卡用 "none"。
+    以 Git trailer 形式附在提交消息尾部，不进卡片正文、不改变修订号
+    计算，Markdown 仍是唯一真相。
+    """
+    if not bases:
+        return message
+    seen: dict[str, str] = {}
+    for cid, rev in bases:
+        if cid and cid not in seen:
+            seen[cid] = rev or "none"
+    if not seen:
+        return message
+    trailers = "\n".join(f"Knowbase-Base: {cid}={rev}" for cid, rev in seen.items())
+    return message.rstrip("\n") + "\n\n" + trailers + "\n"
+
+
+# 知识卡所在目录（与 store.ALL_DIRS 保持一致）；只有这些目录下的 .md
+# 才按卡片做同卡并发隔离，其他路径的冲突仍走旧的整单 abort。
+_CARD_DIRS = frozenset(("standards", "pitfalls", "decisions", "workflows",
+                        "preferences", "references", "bizrules", "staging"))
+_ID_RE = None  # 延迟初始化，避免模块加载期多余导入
+
+
+def _is_card_path(path: str) -> bool:
+    """判断仓库相对路径是否为知识卡文件。"""
+    import re
+    global _ID_RE
+    if _ID_RE is None:
+        _ID_RE = re.compile(r"^[A-Z]{1,2}-\d{4}-\d{4}$|^[A-Z]{1,2}-[0-9a-f]{12}$")
+    parts = Path(path).parts
+    if len(parts) != 2 or parts[0] not in _CARD_DIRS or not path.endswith(".md"):
+        return False
+    return bool(_ID_RE.match(Path(path).stem))
 
 
 def commit_all(repo: Path, message: str) -> str | None:
@@ -185,23 +226,8 @@ def _abort_rebase(repo: Path) -> bool:
     return _in_rebase_state(repo, default=False)
 
 
-def _rebase_onto(repo: Path, remote_ref: str) -> None:
-    """把本地提交重放到远端；失败必须 abort，不能留下半截 rebase。
-
-    失败按原因分类报错：只有真实内容冲突才抛 GitSyncConflict；git 身份
-    未配置等环境问题误报“真实内容冲突”会把排查引向错误方向，故以
-    RuntimeError 写明真实原因。无论哪类失败都保留本地提交。
-    """
-    try:
-        _run(repo, "rebase", remote_ref, timeout=15)
-        return
-    except Exception as exc:
-        original = exc
-    try:
-        conflicted = _run(repo, "diff", "--name-only", "--diff-filter=U", timeout=3)
-    except Exception:
-        conflicted = ""
-    kind = _rebase_failure_kind(str(original), conflicted)
+def _raise_rebase_failure(repo: Path, original: Exception, conflicted: str, kind: str) -> None:
+    """按旧口径把 rebase 失败分类报错（先 abort，再按原因抛错）。"""
     abort_failed = _abort_rebase(repo)
     abort_note = "；rebase abort 失败，请手动检查 .git 状态" if abort_failed else ""
     if kind == "conflict":
@@ -220,6 +246,59 @@ def _rebase_onto(repo: Path, remote_ref: str) -> None:
     raise RuntimeError(
         f"rebase 失败（非内容冲突）：{str(original)[:200]}；已取消 rebase 并保留本地提交{abort_note}"
     ) from original
+
+
+def _rebase_onto(repo: Path, remote_ref: str, on_card_conflict=None) -> list[str]:
+    """把本地提交重放到远端；失败必须 abort，不能留下半截 rebase。
+
+    on_card_conflict 为空时行为与旧版完全一致：任何失败都 abort 并按
+    原因分类报错。传入时：若全部未合并路径都是知识卡文件，则逐文件隔离
+    ——回调负责把本地版（rebase 语义的 theirs）记入隔离区、把远端版
+    （ours）检出到工作树并 git add——然后 rebase --continue；只要有
+    一条非卡片路径冲突，仍走旧的整单 abort。返回本次隔离解决的卡片路径。
+    """
+    try:
+        _run(repo, "rebase", remote_ref, timeout=15)
+        return []
+    except Exception as exc:
+        original = exc
+    resolved: list[str] = []
+    for _ in range(50):
+        try:
+            conflicted = _run(repo, "diff", "--name-only", "--diff-filter=U", timeout=3)
+        except Exception:
+            conflicted = ""
+        kind = _rebase_failure_kind(str(original), conflicted)
+        paths = [line for line in conflicted.splitlines() if line.strip()]
+        card_paths = [p for p in paths if _is_card_path(p)]
+        if (on_card_conflict is None or kind != "conflict" or not paths
+                or len(card_paths) != len(paths)):
+            _raise_rebase_failure(repo, original, conflicted, kind)
+        try:
+            on_card_conflict(repo, card_paths)
+        except Exception as exc:
+            abort_failed = _abort_rebase(repo)
+            raise GitSyncConflict(
+                "冲突卡隔离失败，已取消 rebase 并保留本地提交"
+                + ("；rebase abort 失败，请手动检查 .git 状态" if abort_failed else "")
+            ) from exc
+        resolved.extend(card_paths)
+        try:
+            _run(repo, "rebase", "--continue", timeout=15)
+            return resolved
+        except Exception as exc:
+            if _in_rebase_state(repo, default=True):
+                original = exc
+                continue
+            abort_failed = _abort_rebase(repo)
+            raise GitSyncConflict(
+                "rebase --continue 失败，已取消 rebase 并保留本地提交"
+                + ("；rebase abort 失败，请手动检查 .git 状态" if abort_failed else "")
+            ) from exc
+    abort_failed = _abort_rebase(repo)
+    raise GitSyncConflict(
+        "rebase 冲突隔离轮次过多，已取消 rebase 并保留本地提交"
+        + ("；rebase abort 失败，请手动检查 .git 状态" if abort_failed else ""))
 
 
 def _is_ancestor(repo: Path, older: str, newer: str) -> bool:
@@ -265,7 +344,7 @@ def _is_network_error(exc: Exception) -> bool:
     ))
 
 
-def _integrate_remote(repo: Path, remote: str, branch: str) -> tuple[bool, bool]:
+def _integrate_remote(repo: Path, remote: str, branch: str, on_card_conflict=None) -> tuple[bool, bool]:
     """收敛到远端最新提交，返回 (本地 HEAD 是否变化, 是否需要 push)。"""
     remote_ref = f"{remote}/{branch}"
     local = _run(repo, "rev-parse", "HEAD", timeout=3)
@@ -277,8 +356,149 @@ def _integrate_remote(repo: Path, remote: str, branch: str) -> tuple[bool, bool]
         return True, False
     if _is_ancestor(repo, remote_rev, local):
         return False, True
-    _rebase_onto(repo, remote_ref)
+    _rebase_onto(repo, remote_ref, on_card_conflict=on_card_conflict)
     return True, True
+
+
+def detect_divergent_cards(repo: Path, base_rev: str, local_rev: str,
+                           remote_rev: str, skip_paths: tuple = ()) -> list[dict]:
+    """B-(2)：合流后冲突检测——即使 git 静默 auto-merge 也要判定。
+
+    两边相对 merge-base 都改了同一张卡、且两边 blob 不同，即判定为同卡
+    并发写。两边改成相同内容不算冲突；任一侧删除不由本函数判定（那种
+    情况 rebase 本就会停在 modify/delete 冲突上，走隔离回调）。
+    返回 [{path, card_id, base_sha, local_sha, remote_sha}]。
+    """
+    if not base_rev or base_rev in (local_rev, remote_rev):
+        return []
+    try:
+        local_changed = set(_run(repo, "diff", "--name-only", base_rev, local_rev,
+                                 timeout=10).splitlines())
+        remote_changed = set(_run(repo, "diff", "--name-only", base_rev, remote_rev,
+                                  timeout=10).splitlines())
+    except Exception:
+        return []
+    skip = set(skip_paths)
+    found = []
+    for path in sorted(local_changed & remote_changed):
+        if path in skip or not _is_card_path(path):
+            continue
+        try:
+            local_sha = _run(repo, "rev-parse", f"{local_rev}:{path}", timeout=3)
+        except Exception:
+            local_sha = ""
+        try:
+            remote_sha = _run(repo, "rev-parse", f"{remote_rev}:{path}", timeout=3)
+        except Exception:
+            remote_sha = ""
+        if local_sha and remote_sha and local_sha != remote_sha:
+            try:
+                base_sha = _run(repo, "rev-parse", f"{base_rev}:{path}", timeout=3)
+            except Exception:
+                base_sha = ""
+            found.append({"path": path, "card_id": Path(path).stem,
+                          "base_sha": base_sha, "local_sha": local_sha,
+                          "remote_sha": remote_sha})
+    return found
+
+
+def _quarantine_from_rebase(repo: Path, conn, path: str) -> dict:
+    """rebase 冲突回调：本地版（theirs，第 3 阶段）进隔离区，远端版
+    （ours，第 2 阶段）检出到工作树并 git add。返回冲突记录。"""
+    from . import quarantine
+    try:
+        local_text = _run(repo, "show", f":3:{path}", timeout=3)
+    except Exception as exc:
+        raise RuntimeError(f"读取冲突本地版失败 {path}: {exc}") from exc
+    try:
+        remote_text = _run(repo, "show", f":2:{path}", timeout=3)
+    except Exception as exc:
+        raise RuntimeError(f"读取冲突远端版失败 {path}: {exc}") from exc
+    card_id = Path(path).stem
+    record = quarantine.record_conflict(repo, conn, card_id, base_rev="",
+                                        local_text=local_text, remote_text=remote_text,
+                                        source="rebase")
+    _run(repo, "checkout", "--ours", "--", path, timeout=3)
+    _run(repo, "add", "--", path, timeout=3)
+    return record
+
+
+def integrate_with_conflicts(repo: Path, remote: str, branch: str) -> tuple[bool, bool, list]:
+    """B-(2)+(3)：合流 + 合流后冲突检测 + 按文件隔离 + 自动裁决。
+
+    在 _integrate_remote 外包一层：合流前记下本地 HEAD、远端 HEAD 与
+    merge-base；rebase 真冲突时回调隔离（远端进树、本地进隔离区，其余
+    文件继续同步）；合流成功后对 auto-merge 的同卡改动做检测并隔离
+    （本地/远端/合并产物三份原文都保留）；最后对全部冲突记录做证据
+    强度自动裁决（打平保持 open，不选边）。
+    返回 (HEAD 是否变化, 是否需要 push, 冲突记录列表)。
+    调用方须持有 RepoLock（与原 _integrate_remote 的调用约定一致）。
+    """
+    from . import index, quarantine
+    local_pre = remote_rev = base = ""
+    try:
+        local_pre = _run(repo, "rev-parse", "HEAD", timeout=3)
+    except Exception:
+        pass
+    try:
+        remote_rev = _run(repo, "rev-parse", f"{remote}/{branch}", timeout=3)
+    except Exception:
+        pass
+    if local_pre and remote_rev and local_pre != remote_rev:
+        try:
+            base = _run(repo, "merge-base", local_pre, remote_rev, timeout=3)
+        except Exception:
+            base = ""
+    diverged = bool(base and base != local_pre and base != remote_rev)
+    records: list[dict] = []
+    resolved_paths: list[str] = []
+
+    def _on_card_conflict(r: Path, paths: list[str]) -> None:
+        conn = index.connect(r)
+        try:
+            for p in paths:
+                records.append(_quarantine_from_rebase(r, conn, p))
+                resolved_paths.append(p)
+        finally:
+            conn.close()
+
+    changed, push_needed = _integrate_remote(
+        repo, remote, branch,
+        on_card_conflict=_on_card_conflict if diverged else None)
+    if not diverged:
+        return changed, push_needed, records
+    # 合流后检测：git 静默 auto-merge 的同卡改动（已隔离的路径跳过）。
+    conn = index.connect(repo)
+    try:
+        for found in detect_divergent_cards(repo, base, local_pre, remote_rev,
+                                            skip_paths=tuple(resolved_paths)):
+            try:
+                local_text = _run(repo, "show", f"{local_pre}:{found['path']}", timeout=3)
+            except Exception:
+                local_text = None
+            try:
+                remote_text = _run(repo, "show", f"{remote_rev}:{found['path']}", timeout=3)
+            except Exception:
+                remote_text = None
+            merged_text = None
+            try:
+                merged_text = (Path(repo) / found["path"]).read_text(encoding="utf-8")
+            except Exception:
+                pass
+            records.append(quarantine.record_conflict(
+                repo, conn, found["card_id"], base_rev="",
+                local_text=local_text, remote_text=remote_text,
+                merged_text=merged_text, source="auto_merge"))
+        # 自动裁决全部冲突记录；胜者版写回产生新提交时需要继续推送。
+        for record in records:
+            _status, _note, restored = quarantine.adjudicate(repo, conn, record)
+            record["status"] = _status
+            if restored:
+                changed = True
+                push_needed = True
+    finally:
+        conn.close()
+    return changed, push_needed, records
 
 
 def push(repo: Path, remote_url: str, allowed_prefixes: list[str]) -> str | None:
@@ -304,7 +524,7 @@ def push(repo: Path, remote_url: str, allowed_prefixes: list[str]) -> str | None
                 dirty = _run(repo, "status", "--porcelain", timeout=3)
                 if _has_user_changes(dirty):
                     raise RuntimeError("工作区存在未提交修改，未自动 rebase/push")
-                _integrate_remote(repo, remote, branch)
+                integrate_with_conflicts(repo, remote, branch)
             # 记录即将推送的 SHA
             push_sha = _run(repo, "rev-parse", "HEAD", timeout=3)
             try:
@@ -570,7 +790,7 @@ def sync_before_read(repo: Path, cfg: dict, *, lease_owner: str | None = None,
             if _has_user_changes(dirty) and local != remote_rev:
                 raise RuntimeError("工作区有未提交内容，保留 last-known-good，未自动合并")
             if not _has_user_changes(dirty):
-                changed, push_needed = _integrate_remote(repo, remote, branch)
+                changed, push_needed, _conflicts = integrate_with_conflicts(repo, remote, branch)
                 if changed:
                     from . import index
                     index.rebuild(repo)
