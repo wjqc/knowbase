@@ -366,6 +366,12 @@ MIGRATIONS: list[tuple[int, str]] = [
     );
     CREATE INDEX IF NOT EXISTS idx_card_conflicts_card ON card_conflicts(card_id, status);
     """),
+    # v24: create intent 期望定位字段（Phase 3-C）：create 持久化时写入期望
+    # entity_id/路径，崩溃恢复时按期望定位落盘文件；只加字段，不改现有语义。
+    (24, """
+    ALTER TABLE write_intents ADD COLUMN expected_entity_id TEXT NOT NULL DEFAULT '';
+    ALTER TABLE write_intents ADD COLUMN expected_path TEXT NOT NULL DEFAULT '';
+    """),
 
 ]
 

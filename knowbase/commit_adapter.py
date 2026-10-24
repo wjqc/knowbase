@@ -32,14 +32,21 @@ def _payload_hash(data: dict) -> str:
 
 
 def _persist_intent(conn, kind: str, entity_id: str, scope: str,
-                    request_id: str, payload_hash: str) -> str:
-    """持久化写入意图（pending 状态），返回 intent_id。"""
+                    request_id: str, payload_hash: str,
+                    expected_entity_id: str = "", expected_path: str = "") -> str:
+    """持久化写入意图（pending 状态），返回 intent_id。
+
+    create 意图同时写入期望 entity_id/路径（Phase 3-C）：崩溃恢复时按期望
+    定位落盘文件；update/feedback 不用这两个字段，缺省为空。
+    """
     intent_id = f"INT-{uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     conn.execute(
         "INSERT INTO write_intents(intent_id,request_id,entity_id,scope,kind,"
-        "payload_hash,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
-        (intent_id, request_id, entity_id, scope, kind, payload_hash, "pending", now),
+        "payload_hash,status,created_at,expected_entity_id,expected_path) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (intent_id, request_id, entity_id, scope, kind, payload_hash, "pending", now,
+         expected_entity_id, expected_path),
     )
     conn.commit()
     return intent_id
@@ -160,8 +167,23 @@ def adapter_create(repo: Path, conn, dtype: str, title: str, body: str, *,
         if row and row[1] != phash:
             return {"error": IDEMPOTENCY_CONFLICT, "existing_entity": row[0]}
 
-    # 持久化 intent
-    intent_id = _persist_intent(conn, OP_CREATE, "", scope, request_id, phash)
+    # 期望定位（Phase 3-C）：ID 分配是纯 uuid、无需持锁，先分配并算出期望
+    # 路径，随 intent 一起持久化；崩溃恢复时按期望定位落盘文件。meta 构建
+    # 也是纯构造（new_meta 只定 confidence=once），提前构建不改变写语义；
+    # 锁内复用同一份 mid/meta/path，不再二次分配。
+    mid = store.alloc_id(repo, dtype)
+    meta = store.new_meta(dtype, title, scope, tags or [], source)
+    # 合并 extra_meta，确保列表字段不为 None
+    for k, v in extra_meta.items():
+        if v is not None:
+            meta[k] = v
+    meta["id"] = mid
+    staging = meta.get("confidence") == "staging" or dtype in ("standard", "preference", "bizrule")
+    path = store.mem_path(repo, dtype, mid, staging=staging)
+
+    # 持久化 intent（含期望 entity_id/路径）
+    intent_id = _persist_intent(conn, OP_CREATE, "", scope, request_id, phash,
+                                expected_entity_id=mid, expected_path=str(path))
 
     # 短 RepoLock 内执行
     try:
@@ -182,22 +204,11 @@ def adapter_create(repo: Path, conn, dtype: str, title: str, body: str, *,
                     "existing_path": str(spath),
                 }
 
-            # 分配 ID，构建 meta
-            mid = store.alloc_id(repo, dtype)
-            meta = store.new_meta(dtype, title, scope, tags or [], source)
-            # 合并 extra_meta，确保列表字段不为 None
-            for k, v in extra_meta.items():
-                if v is not None:
-                    meta[k] = v
-            meta["id"] = mid
-
-            # 计算 revision
+            # 计算 revision（meta/path 已在锁外备好，复用同一份）
             content_rev = _compute_revision(meta, body)
             gov_rev = _compute_governance_revision(meta)
 
             # 原子写文件
-            staging = meta.get("confidence") == "staging" or dtype in ("standard", "preference", "bizrule")
-            path = store.mem_path(repo, dtype, mid, staging=staging)
             _atomic_write(path, store.render(meta, body))
 
             # 更新 entity_heads
@@ -386,13 +397,16 @@ def recover_intents(repo: Path, conn) -> dict:
     update/feedback 类 intent 只有取得落盘证据（文件 revision 与
     entity_heads 已提交 revision 不一致，或同 request_id 已由重试完成）
     才标记 recovered；无证据的保留 pending，等待客户端重试真正执行，
-    不得凭"文件存在"假报成功。create 类 intent 无法定位目标文件，
-    仍标记 failed 交人工核查。
+    不得凭"文件存在"假报成功。create 类 intent 按持久化的期望 entity_id/
+    路径定位落盘文件（Phase 3-C），定位到则按 update 同款证据规则收账
+    （以文件为唯一真相修复 entity_heads 再完成 intent）；定位不到则保留
+    pending 等重试，绝不标 failed、绝不留"需人工核查"残留。
 
     返回 {"recovered": int, "failed": int, "details": [...]}.
     """
     rows = conn.execute(
-        "SELECT intent_id, request_id, entity_id, kind, payload_hash "
+        "SELECT intent_id, request_id, entity_id, kind, payload_hash, "
+        "expected_entity_id, expected_path "
         "FROM write_intents WHERE status='pending'"
     ).fetchall()
 
@@ -409,20 +423,74 @@ def recover_intents(repo: Path, conn) -> dict:
     # 显性报告；绝不标记 failed（failed 会毒化同 request_id 的重试）。
     from collections import Counter
     pending_counts = Counter(
-        entity_id for _i, _r, entity_id, kind, _p in rows
+        entity_id for _i, _r, entity_id, kind, _p, _e, _x in rows
         if kind in (OP_UPDATE, OP_FEEDBACK) and entity_id)
     ambiguous_entities = {e for e, n in pending_counts.items() if n > 1}
 
-    for intent_id, request_id, entity_id, kind, payload_hash in rows:
+    for intent_id, request_id, entity_id, kind, payload_hash, expected_id, expected_path in rows:
         # 检查文件是否已落盘
         if kind == OP_CREATE:
-            # 创建操作：检查 entity_id 对应的文件是否存在
-            # 由于创建时 entity_id 可能为空，需要通过其他方式检查
-            # 这里简化处理：标记为 failed，由人工核查
-            _fail_intent(conn, intent_id, "crash_recovery:pending_create")
-            failed += 1
-            details.append({"intent_id": intent_id, "kind": kind, "status": "failed",
-                           "reason": "pending create requires manual review"})
+            # 创建操作：先按同 request_id 已由重试完成的 sibling 规则收账
+            # （重复 intent 不重复建卡）；再按期望定位落盘文件。
+            sibling = None
+            if request_id:
+                sibling = conn.execute(
+                    "SELECT intent_id FROM write_intents WHERE request_id=? "
+                    "AND payload_hash=? AND status='completed' AND intent_id != ?",
+                    (request_id, payload_hash, intent_id),
+                ).fetchone()
+            if sibling:
+                _complete_intent(conn, intent_id, f"crash_recovery:recovered:{expected_id or entity_id}")
+                recovered += 1
+                details.append({"intent_id": intent_id, "kind": kind,
+                               "entity_id": expected_id or entity_id, "status": "recovered",
+                               "reason": "same request already completed by retry"})
+                continue
+            located = None
+            if expected_path and Path(expected_path).exists():
+                located = Path(expected_path)
+            elif expected_id:
+                located = store.find_file(repo, expected_id)
+            if located is None:
+                # 定位不到：保留 pending 等客户端重试真正执行；绝不标 failed，
+                # 不留"需人工核查"残留——结论尚未确定，不是失败。
+                details.append({"intent_id": intent_id, "kind": kind,
+                               "entity_id": expected_id or entity_id, "status": "pending",
+                               "reason": ("expected file not located; awaiting client retry")
+                               if expected_id else
+                               "no expected location recorded; awaiting client retry"})
+                continue
+            try:
+                meta, body = store.parse(located)
+            except Exception:
+                meta, body = None, None
+            if not meta or (expected_id and meta.get("id") != expected_id):
+                # 定位到的文件无法解析，或内容 id 与期望不符：不猜测归属，
+                # 保留 pending（update 同款规则里"文件存在但解析失败"标 failed
+                # 是因为 update 的目标身份无歧义；create 的期望身份一旦对不上
+                # 就不能把别人的卡算成自己的创建结果）。
+                details.append({"intent_id": intent_id, "kind": kind,
+                               "entity_id": expected_id or entity_id, "status": "pending",
+                               "reason": "located file id mismatch or unparsable; awaiting client retry"})
+                continue
+            # 定位到：按 update 同款证据规则收账——以文件（唯一真相）修复
+            # entity_heads，再完成 intent。
+            file_content_rev = _compute_revision(meta, body)
+            file_gov_rev = _compute_governance_revision(meta)
+            effective_id = meta["id"]
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            conn.execute(
+                "INSERT OR REPLACE INTO entity_heads(entity_id,content_revision,"
+                "governance_revision,updated_at) VALUES(?,?,?,?)",
+                (effective_id, file_content_rev, file_gov_rev, now),
+            )
+            conn.commit()
+            _complete_intent(conn, intent_id, f"crash_recovery:recovered:{effective_id}",
+                             entity_id=effective_id)
+            recovered += 1
+            details.append({"intent_id": intent_id, "kind": kind,
+                           "entity_id": effective_id, "status": "recovered",
+                           "reason": "expected file located; entity_heads reconciled from file"})
         elif kind in (OP_UPDATE, OP_FEEDBACK):
             # 更新/反馈操作：必须核验更新是否真的落盘，不能只看文件存在。
             # 落盘判据：文件当前 revision（内容/治理哈希）与 entity_heads
