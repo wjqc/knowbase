@@ -113,3 +113,14 @@ def test_hook_shell_commands_quote_special_home_paths_without_expansion(tmp_path
                 for entry in entries:
                     for handler in entry['hooks']:
                         assert shlex.split(handler['command'])[0]==integration.runtime_command(home.resolve())
+
+
+def test_trae_merges_native_mcpservers_without_shadow_root(tmp_path):
+    path=tmp_path/'Library/Application Support/Trae CN/User/mcp.json'
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({'mcpServers':{'other':{'command':'keep'}}}))
+    integration.apply(integration.plan(['trae'],tmp_path),tmp_path)
+    doc=json.loads(path.read_text())
+    assert set(doc)=={'mcpServers'} and doc['mcpServers']['other']=={'command':'keep'}
+    assert next(h for h in integration.discover(tmp_path) if h['id']=='trae')['configured']
+    assert integration.plan(['trae'],tmp_path)==[]

@@ -3,6 +3,8 @@ import json
 import os
 import platform
 import sqlite3
+import subprocess
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,10 +18,64 @@ from .contracts import canonical, digest, identifier, safe_label, stamp, validat
 from .transport import GitData, TransportError, receive, send
 
 
+def _machine_identifier():
+    """Stable OS identity; never derive a sender from DHCP names/random MACs."""
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            result = subprocess.run(["/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                                    capture_output=True, text=True, timeout=5, check=True)
+            match = re.search(r'"IOPlatformUUID"\s*=\s*"([A-Fa-f0-9-]+)"', result.stdout)
+            value = match.group(1) if match else ""
+        elif system == "Windows":
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography",
+                                0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+                value = winreg.QueryValueEx(key, "MachineGuid")[0]
+        else:
+            value = Path("/etc/machine-id").read_text().strip()
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Fa-f0-9-]{16,64}", value):
+            raise ValueError("stable local machine identity unavailable")
+        return value.lower()
+    except (OSError, subprocess.SubprocessError):
+        raise ValueError("stable local machine identity unavailable") from None
+
+
 def device_fingerprint():
-    # Local only, never included in summaries or Git. A copied data directory
-    # must not silently turn another physical computer into the same sender.
-    return digest([platform.system(), platform.node(), str(uuid.getnode())])
+    # Only the digest stays local; the raw OS identity is never persisted/uploaded.
+    return digest(["machine-v2", platform.system(), _machine_identifier()])
+
+
+def rebind_device():
+    """Explicit operator recovery; preserve sender, epoch, queued data and ACKs."""
+    cfg = config.load_config(); root = root_path(cfg); repo = config.repo_path(cfg)
+    with RepoLock(root), RepoLock(repo):
+        conn = state.connect(root)
+        try:
+            e = state.get(conn, "enrollment")
+            if not e:
+                raise ValueError("team enrollment required")
+            with sqlite3.connect(index.db_path(repo).resolve().as_uri() + "?mode=ro", uri=True) as db:
+                if identity._get(db, "installation_id") != e["installation_id"]:
+                    raise ValueError("local database identity mismatch; inspect before device rebind")
+            fingerprint = device_fingerprint()
+            if e.get("device_fingerprint") == fingerprint:
+                return {"device_binding": "unchanged"}
+            backup = root / "backups" / ("device-rebind-" + uuid.uuid4().hex)
+            backup.mkdir(parents=True, mode=0o700)
+            target = sqlite3.connect(backup / "state.db")
+            try:
+                conn.backup(target)
+            finally:
+                target.close()
+            (backup / "state.db").chmod(0o600)
+            state.put(conn, "device_rebind", {"at": stamp(), "previous": e.get("device_fingerprint"),
+                                             "reason": "explicit_local_device_confirmation"})
+            e["device_fingerprint"] = fingerprint
+            state.put(conn, "enrollment", e); conn.commit()
+            return {"device_binding": "rebound", "identity_preserved": True}
+        finally:
+            conn.close()
 
 
 def root_path(cfg=None):

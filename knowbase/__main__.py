@@ -762,6 +762,8 @@ def _main(argv=None):
     p_member.add_argument("--status", choices=["pending", "active", "retired"], required=True)
     p_recover = team_sub.add_parser("recover", help="检查恢复库来源后，保留旧日桶并开启恢复 epoch")
     p_recover.add_argument("--confirm-local-database", action="store_true", required=True)
+    p_rebind = team_sub.add_parser("rebind-device", help="确认原本机数据库后重新绑定稳定设备标识；保留历史与ACK")
+    p_rebind.add_argument("--confirm-local-device", action="store_true", required=True)
     p_publisher = team_sub.add_parser("publisher", help="明确转交 README 发布角色；先关闭原发布机")
     p_publisher.add_argument("--enable", action="store_true")
     p_history = sub.add_parser("history", help="查看搜索命中记录 JSON")
@@ -1067,6 +1069,8 @@ def _main(argv=None):
                 if action == "disable":
                     cfg = config.load_config(); cfg["team"]["enabled"] = False
                     service._save_config(cfg)
+            elif action == "rebind-device":
+                result = service.rebind_device()
             elif action == "recover":
                 result = service.recover()
             else:

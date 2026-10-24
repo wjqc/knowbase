@@ -11,7 +11,7 @@ HOSTS = {
     "cursor": {"mcp": ".cursor/mcp.json", "key": ("mcpServers",), "hooks": None, "style": None},
     "claude-code": {"mcp": ".claude.json", "key": ("mcpServers",), "hooks": ".claude/settings.json", "style": "claude"},
     "zcode": {"mcp": ".zcode/cli/config.json", "key": ("mcp", "servers"), "hooks": ".zcode/cli/config.json", "style": "zcode"},
-    "trae": {"mcp": "Library/Application Support/Trae CN/User/mcp.json", "key": (), "hooks": ".trae-cn/hooks.json", "style": "trae"},
+    "trae": {"mcp": "Library/Application Support/Trae CN/User/mcp.json", "key": ("mcpServers",), "hooks": ".trae-cn/hooks.json", "style": "trae"},
 }
 EVENTS = {"SessionStart": "session-start", "UserPromptSubmit": "user-prompt"}
 

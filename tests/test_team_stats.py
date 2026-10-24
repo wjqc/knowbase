@@ -362,3 +362,33 @@ def test_old_connection_identity_counts_only_after_enrollment_without_backfill(m
     summaries=[json.loads(r[0]) for r in c.execute('SELECT body FROM outgoing')]
     assert sum(v['metrics']['calls'] or 0 for v in summaries)==1
     db.close();c.close()
+
+
+def test_stable_device_binding_ignores_hostname_and_network(monkeypatch):
+    monkeypatch.setattr(service,'_machine_identifier',lambda:'a'*32)
+    before=service.device_fingerprint()
+    monkeypatch.setattr(service.platform,'node',lambda:'new-dhcp-name')
+    monkeypatch.setattr(service.uuid,'getnode',lambda:123456789)
+    assert service.device_fingerprint()==before
+    monkeypatch.setattr(service,'_machine_identifier',lambda:'b'*32)
+    assert service.device_fingerprint()!=before
+
+
+def test_explicit_rebind_preserves_evidence_and_rejects_wrong_database(memory_repo,tmp_path,remote,monkeypatch):
+    url,_=remote;cfg=config.load_config()
+    cfg['git']['remote'].update(url=url,branch='main');cfg['git']['allowed_remote_prefixes']=[url]
+    root=tmp_path/'team-data';cfg['team']['data_dir']=str(root);service._save_config(cfg)
+    service.enroll('alice','alice')
+    c=state.connect(root);old=state.get(c,'enrollment');epoch=state.get(c,'epoch')
+    queued=c.execute('SELECT * FROM outgoing').fetchall();c.close()
+    monkeypatch.setattr(service,'device_fingerprint',lambda:'stable-new-fingerprint')
+    with pytest.raises(ValueError,match='another computer'):service.run(network=False)
+    assert service.rebind_device()['identity_preserved']
+    c=state.connect(root);new=state.get(c,'enrollment')
+    assert {k:v for k,v in new.items() if k!='device_fingerprint'}=={k:v for k,v in old.items() if k!='device_fingerprint'}
+    assert state.get(c,'epoch')==epoch and c.execute('SELECT * FROM outgoing').fetchall()==queued
+    assert list((root/'backups').glob('device-rebind-*/state.db'))
+    c.close();assert service.rebind_device()=={'device_binding':'unchanged'}
+    db=index.connect(memory_repo);identity=__import__('knowbase.value.identity',fromlist=['_put'])
+    identity._put(db,'installation_id','another-installation');db.commit();db.close()
+    with pytest.raises(ValueError,match='database identity mismatch'):service.rebind_device()

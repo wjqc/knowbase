@@ -98,3 +98,11 @@ Token 仅汇总可用请求日志，优先本机 Claude transcript 请求，避�
 team-stats与自适应检索组合发布；Windows安装器已补，macOS/systemd安装失败恢复原描述文件。安装操作备份配置，未知Task Scheduler同名任务不覆盖；任务本机单实例、15分钟默认频率。Windows规范参考[Task Scheduler Schema](https://learn.microsoft.com/en-us/windows/win32/taskschd/task-scheduler-schema)及[schtasks](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/schtasks-create)。
 
 本机升级、统计远端读回和宿主生效证据见本轮交付记录；多成员真实设备仍逐机验收。退出后第二段任期保持明确拒绝，属于v1协议边界，不静默复活或覆盖历史。真实净Token收益继续待对照，不把调用总量当节省。
+
+### 设备绑定升级与恢复
+
+设备指纹现采用 macOS IOPlatformUUID、Windows MachineGuid 或 Linux machine-id 的本地哈希，不随 DHCP 主机名或网卡变化，也不上传原始标识。旧版指纹不自动接受，以免复制目录后复用同一发送者。
+
+确认这仍是原本机数据库、安装身份匹配后，执行 `knowbase team rebind-device --confirm-local-device`。命令先私有备份统计数据库，再更新设备绑定；不改变成员、installation_id、统计 epoch、待发送文件或 ACK。若数据库身份不同则拒绝。复制到另一台电脑应正常 enroll 新设备，不能用 rebind 冒充原设备。重装系统或克隆 machine-id 仍需单独核查；本协议不提供中心设备认证。
+
+Trae CN 的 MCP 服务位于根对象 `mcpServers`，接入向导在该对象内增量合并，不创建根层同名影子服务。
