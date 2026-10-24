@@ -10,6 +10,9 @@ MCP/Hook 只追加任务或发本地唤醒信号，不各自开执行池。
 
 import time
 import uuid
+import re
+import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -24,6 +27,7 @@ TASK_DEFS = (
     ("lease_recovery", 60, "租约/未结算回执恢复"),
     ("knowledge_sync", 60, "知识同步"),
     ("evidence_exchange", 900, "统计/最小证据交换"),
+    ("team_sync", 900, "原团队统计采集、同步及看板更新"),
     ("archive_sweep", 86400, "自动归档/候选清理"),
     ("conflict_recheck", 86400, "冲突复验"),
     ("vector_maintenance", 30, "可选向量维护"),
@@ -78,13 +82,44 @@ def acquire_lease(conn, owner: str, duration: float = LEASE_SECONDS):
         raise
 
 
-def release_lease(conn, owner: str) -> bool:
+def release_lease(conn, owner: str, fencing_token=None) -> bool:
     """只释放自己持有的租约；已被他人接管时不覆盖。"""
-    cur = conn.execute(
-        "UPDATE automation_lease SET owner='',lease_until='' WHERE singleton=? AND owner=?",
-        (LEASE_SINGLETON, owner))
+    sql = "UPDATE automation_lease SET owner='',lease_until='' WHERE singleton=? AND owner=?"
+    params = [LEASE_SINGLETON, owner]
+    if fencing_token is not None:
+        sql += " AND fencing_token=?"; params.append(fencing_token)
+    cur = conn.execute(sql, params)
     conn.commit()
     return cur.rowcount == 1
+
+
+def _owns_lease(conn, owner, fencing_token):
+    return conn.execute("SELECT 1 FROM automation_lease WHERE singleton=? AND owner=? "
+                        "AND fencing_token=? AND lease_until>?",
+                        (LEASE_SINGLETON, owner, fencing_token, _now())).fetchone() is not None
+
+
+def renew_lease(conn, owner, fencing_token):
+    now = _now()
+    until = (datetime.now(timezone.utc) + timedelta(seconds=max(30, LEASE_SECONDS))).isoformat(timespec="seconds")
+    cur = conn.execute("UPDATE automation_lease SET lease_until=?,updated_at=? WHERE singleton=? "
+                       "AND owner=? AND fencing_token=? AND lease_until>?",
+                       (until, now, LEASE_SINGLETON, owner, fencing_token, now))
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def _heartbeat(repo, owner, fencing_token, stop, lost):
+    while not stop.wait(max(.05, min(30, LEASE_SECONDS / 3))):
+        conn = None
+        try:
+            conn = sqlite3.connect(index.db_path(repo), timeout=1)
+            if not renew_lease(conn, owner, fencing_token):
+                lost.set(); return
+        except sqlite3.Error:
+            lost.set(); return
+        finally:
+            if conn is not None: conn.close()
 
 
 def lease_status(conn) -> dict:
@@ -123,21 +158,47 @@ def due_tasks(conn, now: str = "") -> list[dict]:
              "last_success_at": r[3], "last_error": r[4]} for r in rows]
 
 
-def _reschedule(conn, kind: str, *, success: bool, error: str = "", failures: int = 0) -> None:
-    """成功按默认间隔；失败指数退避（上限 1 小时），错误文本只记类别化摘要。"""
+def _reschedule(conn, kind: str, *, status: str, error: str, lease) -> bool:
+    """Persist outcomes/backoff only while this exact supervisor lease is still valid."""
     interval = TASK_INTERVALS.get(kind, 60)
-    if not success:
-        interval = min(3600, interval * (2 ** min(failures, 5)))
-    nxt = (datetime.now(timezone.utc) + timedelta(seconds=interval)).isoformat(timespec="seconds")
-    if success:
+    if kind == "team_sync":
+        interval = max(900, int(app_config.load_config().get("team", {}).get("interval_seconds", 900)))
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if not _owns_lease(conn, *lease):
+            conn.rollback(); return False
+        previous = conn.execute("SELECT failure_count FROM automation_schedule WHERE task_key=?", (kind,)).fetchone()
+        failures = ((previous[0] if previous else 0) + 1) if status == "error" else 0
+        if failures:
+            interval = min(3600, interval * (2 ** min(failures, 5)))
+        nxt = (datetime.now(timezone.utc) + timedelta(seconds=interval)).isoformat(timespec="seconds")
         conn.execute(
-            "UPDATE automation_schedule SET next_run_at=?,last_success_at=?,last_error='',"
-            "updated_at=? WHERE task_key=?", (nxt, _now(), _now(), kind))
-    else:
-        conn.execute(
-            "UPDATE automation_schedule SET next_run_at=?,last_error=?,updated_at=? "
-            "WHERE task_key=?", (nxt, (error or "")[:200], _now(), kind))
-    conn.commit()
+            "UPDATE automation_schedule SET next_run_at=?,last_success_at=CASE WHEN ?='success' THEN ? "
+            "ELSE last_success_at END,last_error=?,failure_count=?,last_status=?,updated_at=? WHERE task_key=?",
+            (nxt, status, _now(), error[:200] if status in {"error", "blocked"} else "",
+             failures, status, _now(), kind))
+        conn.commit(); return True
+    except Exception:
+        conn.rollback(); raise
+
+
+def _outcome(result):
+    """Handlers may return structured failures instead of raising (including nested sends)."""
+    if not isinstance(result, dict):
+        return "success", ""
+    for key in ("error", "errors", "warning"):
+        if result.get(key):
+            reason = result[key]
+            return "error", reason if isinstance(reason, str) and re.fullmatch(r"[\w.-]{1,100}", reason) else "handler_" + key
+    for value in result.values():
+        if isinstance(value, dict):
+            status, reason = _outcome(value)
+            if status == "error": return status, reason
+    for key in ("blocked", "skipped"):
+        if result.get(key):
+            value = str(result[key])
+            return key, value if re.fullmatch(r"[\w.-]{1,100}", value) else "handler_" + key
+    return "success", ""
 
 
 # ---------- 各任务 handler（永不向 tick 外抛异常） ----------
@@ -195,6 +256,13 @@ def _h_archive_sweep(repo, conn, cfg) -> dict:
     return {"archived": len(archived), "review_discarded": discarded}
 
 
+def _h_team_sync(repo, conn, cfg) -> dict:
+    if not cfg.get("team", {}).get("enabled"):
+        return {"skipped": "team_disabled"}
+    from ..team import service
+    return service.run(network=True)
+
+
 def _h_conflict_recheck(repo, conn, cfg) -> dict:
     """新证据到达后的冲突复验：只重裁 open 冲突，打平保持隔离、不猜赢家。"""
     from .. import quarantine
@@ -222,6 +290,7 @@ _HANDLERS = {
     "lease_recovery": _h_lease_recovery,
     "knowledge_sync": _h_knowledge_sync,
     "evidence_exchange": _h_evidence_exchange,
+    "team_sync": _h_team_sync,
     "archive_sweep": _h_archive_sweep,
     "conflict_recheck": _h_conflict_recheck,
     "vector_maintenance": _h_vector_maintenance,
@@ -239,16 +308,22 @@ def tick(repo, *, owner: str = "") -> dict:
     repo = Path(repo)
     cfg = app_config.load_config()
     conn = _connect(repo)
+    stop, lost = threading.Event(), threading.Event()
+    heartbeat = None
+    leased = None
     try:
         owner = owner or ("worker-" + uuid.uuid4().hex[:12])
         leased = acquire_lease(conn, owner)
         if not leased:
             held = lease_status(conn)
             return {"lease": "held_by_other", "held_by": held["owner"], "ran": []}
+        heartbeat = threading.Thread(target=_heartbeat, args=(repo, *leased, stop, lost), daemon=True)
+        heartbeat.start()
         ensure_schedule(conn)
         ran = []
-        failures: dict[str, int] = {}
         for task in due_tasks(conn):
+            if lost.is_set() or not renew_lease(conn, *leased):
+                lost.set(); break
             kind = task["kind"]
             handler = _HANDLERS.get(kind)
             if handler is None:
@@ -256,15 +331,19 @@ def tick(repo, *, owner: str = "") -> dict:
             try:
                 result = handler(repo, conn, cfg)
                 ran.append({"kind": kind, "result": result})
-                _reschedule(conn, kind, success=True)
+                status, error = _outcome(result)
             except Exception as exc:
-                failures[kind] = failures.get(kind, 0) + 1
+                if conn.in_transaction: conn.rollback()
                 ran.append({"kind": kind, "error": type(exc).__name__})
-                _reschedule(conn, kind, success=False,
-                            error=type(exc).__name__, failures=failures[kind])
-        release_lease(conn, owner)
-        return {"lease": "acquired", "owner": owner, "ran": ran}
+                status, error = "error", type(exc).__name__
+            ran[-1]["status"] = status
+            if lost.is_set() or not _reschedule(conn, kind, status=status, error=error, lease=leased):
+                lost.set(); break
+        return {"lease": "lost" if lost.is_set() else "acquired", "owner": owner, "ran": ran}
     finally:
+        stop.set()
+        if heartbeat is not None: heartbeat.join(timeout=2)
+        if leased is not None: release_lease(conn, *leased)
         conn.close()
 
 
@@ -293,13 +372,14 @@ def status(repo) -> dict:
     try:
         ensure_schedule(conn)
         rows = conn.execute(
-            "SELECT task_key,kind,next_run_at,last_success_at,last_error FROM automation_schedule"
+            "SELECT task_key,kind,next_run_at,last_success_at,last_error,last_status,failure_count FROM automation_schedule"
             " ORDER BY kind").fetchall()
         gaps = conn.execute("SELECT COUNT(*) FROM capture_gaps").fetchone()[0]
         return {
             "lease": lease_status(conn),
             "schedule": [{"task_key": r[0], "kind": r[1], "next_run_at": r[2],
-                          "last_success_at": r[3], "last_error": r[4]} for r in rows],
+                          "last_success_at": r[3], "last_error": r[4], "last_status": r[5],
+                          "failure_count": r[6]} for r in rows],
             "capture_gaps": gaps,
             "distillation": "blocked_no_executor",
         }

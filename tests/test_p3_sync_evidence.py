@@ -65,7 +65,13 @@ def test_tick_runs_due_tasks_and_distillation_stays_blocked(memory_repo):
     assert kinds["distillation"]["result"] == {"blocked": "distillation_blocked_no_executor"}
     assert "lease_recovery" in kinds and "knowledge_sync" in kinds
     status = p3worker.status(memory_repo)
-    assert all(row["last_success_at"] for row in status["schedule"])
+    states = {row['kind']: row for row in status['schedule']}
+    assert states['distillation']['last_status'] == 'blocked'
+    assert states['distillation']['last_success_at'] is None
+    assert states['team_sync']['last_status'] == 'skipped'
+    assert states['team_sync']['last_success_at'] is None
+    assert states['lease_recovery']['last_status'] == 'success'
+    assert states['lease_recovery']['last_success_at']
     # 成功任务已重排到未来：第二轮 tick 无到期任务。
     second = p3worker.tick(memory_repo)
     assert second["ran"] == []

@@ -58,7 +58,8 @@ def record(repo, *, session_id, event_id, context_event_id, memory_id,
             # P0：同事务追加 search→delivery→use 关联。解析不到递送的旧观察
             # 保留未关联——不按时间/标题猜测，也不因此拒绝回执；未关联的
             # 采用不晋升为有效采用证据（派生与验收只认 link）。
-            delivered = delivery.find_delivery(conn, context_event_id, memory_id, content_revision)
+            delivered = delivery.find_delivery(conn, context_event_id, memory_id, content_revision,
+                                                host_profile=host, session_id=session_id)
             if delivered is not None:
                 delivery.record_use_link(conn, use_id=use_id, delivery_id=delivered["delivery_id"],
                                          search_id=delivered["search_id"])

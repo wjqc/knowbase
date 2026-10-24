@@ -870,11 +870,8 @@ def cmd_executor_probe(isolation: bool = False, scope: str = "probe-orders") -> 
                 None)
             if target_cfg and target_cfg.get("kind", "command") == "command":
                 try:
-                    from .automation.executor import CommandExecutorRunner
-                    from .automation.protocol import run_isolation_probe
-                    runner = CommandExecutorRunner(target_cfg)
-                    isolation_report = run_isolation_probe(
-                        runner, repo=config.repo_path(), scope=scope)
+                    from .automation.isolation import isolated_probe
+                    isolation_report = isolated_probe(target_cfg, scope=scope)
                     if isolation_report.get("passed"):
                         target.status = "verified"
                         target.reason_code = None
@@ -1371,7 +1368,9 @@ def _main(argv=None):
             else:
                 result = automation_worker.disable()
             print(json.dumps(result, ensure_ascii=False, indent=2))
-            return 0
+            failed = result.get("lease") == "lost" or any(
+                task.get("status") == "error" for task in result.get("ran", []))
+            return 1 if action == "once" and failed else 0
         except (ValueError, RuntimeError, OSError) as exc:
             print(json.dumps({"error": str(exc)}, ensure_ascii=False))
             return 1

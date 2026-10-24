@@ -301,8 +301,8 @@ def test_command_runner_passes_prompt_mode(memory_repo):
 
 def test_command_runner_false_exits_process_exited(memory_repo):
     runner = CommandExecutorRunner({
-        "executor_id": "fake-false", "command": "/bin/false",
-        "noninteractive_argv": [], "timeout_seconds": 10,
+        "executor_id": "fake-false", "command": sys.executable,
+        "noninteractive_argv": ["-c", "raise SystemExit(1)"], "timeout_seconds": 10,
     })
     report = run_isolation_probe(runner, repo=memory_repo, scope=SCOPE)
     assert report["passed"] is False
@@ -376,6 +376,8 @@ def test_unknown_kind_is_unsupported():
 
 
 def test_discover_finds_configured_cli_without_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_API_KEY", raising=False)
     bindir = tmp_path / "bin"
     bindir.mkdir()
     script = bindir / "codex"

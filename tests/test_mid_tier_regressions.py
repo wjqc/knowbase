@@ -191,6 +191,10 @@ def test_rebase_identity_failure_end_to_end(tmp_path, monkeypatch):
     # gitops 子进程继承 pytest 进程 env：清空身份来源，只留 hermetic 环境
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    # Git may otherwise derive a usable identity from the OS account/hostname.
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "user.useConfigOnly")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "true")
     for var in ("GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
                 "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"):
         monkeypatch.delenv(var, raising=False)
@@ -238,6 +242,7 @@ def test_load_config_valid_json_still_merges(tmp_path, monkeypatch):
 
 
 def test_load_config_missing_file_uses_defaults(tmp_path, monkeypatch):
+    monkeypatch.delenv("KNOWBASE_REPO_PATH", raising=False)
     monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "absent.json")
     cfg = config.load_config()
     assert cfg["repo_path"] == config.DEFAULTS["repo_path"]

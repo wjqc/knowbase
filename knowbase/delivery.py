@@ -40,14 +40,14 @@ def record_delivery(conn, *, search_id: str, host_profile: str, session_id: str,
 
 
 def find_delivery(conn, context_event_id: str, memory_id: str,
-                  content_revision: str) -> dict | None:
+                  content_revision: str, *, host_profile: str, session_id: str) -> dict | None:
     """按递送事件 + 卡 + 版本解析唯一递送；找不到返回 None（不猜测）。"""
     row = conn.execute(
         "SELECT delivery_id,search_id,host_profile,session_id,context_event_id,task_id,"
         "task_revision,scope,memory_id,content_revision,rank,source_delivery_id,created_at "
         "FROM retrieval_deliveries WHERE context_event_id=? AND memory_id=? "
-        "AND content_revision=? ORDER BY rank LIMIT 1",
-        (context_event_id, memory_id, content_revision)).fetchone()
+        "AND content_revision=? AND host_profile=? AND session_id=? ORDER BY rank LIMIT 1",
+        (context_event_id, memory_id, content_revision, host_profile, session_id)).fetchone()
     if not row:
         return None
     keys = ("delivery_id", "search_id", "host_profile", "session_id", "context_event_id",

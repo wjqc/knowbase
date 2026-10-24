@@ -16,6 +16,10 @@ SCHEMA_V2 = "knowbase-value-events-v2"
 MAX_EVENTS = 1000
 MAX_BYTES = 1024 * 1024
 
+# These scalar identities are required by aggregation and acceptance, not raw material.
+CONTEXT_FIELDS = ("member_binding_id", "host", "session_id", "task_id",
+                  "task_run_id", "task_revision", "schema_version", "adapter_version", "host_version")
+
 # v2 事件类型 → 允许字段（payload 内）。v1 类型复用 events.PAYLOAD_FIELDS
 # 的 required/optional（主线真实存在的类型）；model.usage 不入 v2 包，
 # 计数继续走 team daily summaries（§6.3：统计与证据口径分离）。
@@ -61,6 +65,9 @@ def validate_v2_event(event: dict) -> dict:
         return {"error": "unknown_event_type", "event_type": str(etype)}
     if not event.get("occurred_at"):
         return {"error": "missing_occurred_at"}
+    if any(event.get(key) is not None and not isinstance(event[key], str)
+           for key in CONTEXT_FIELDS if key in event):
+        return {"error": "invalid_context_identity"}
     payload = event.get("payload")
     if not isinstance(payload, dict):
         return {"error": "payload_not_a_mapping"}
@@ -81,6 +88,7 @@ def strip_v2_event(event: dict) -> dict:
     spec = V2_FIELDS[event["event_type"]]
     allowed = spec["required"] | spec["optional"]
     return {
+        **{key: event[key] for key in CONTEXT_FIELDS if key in event and event[key] is not None},
         "event_id": event["event_id"],
         "event_type": event["event_type"],
         "occurred_at": event.get("occurred_at", ""),

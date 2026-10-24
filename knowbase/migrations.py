@@ -450,6 +450,10 @@ MIGRATIONS: list[tuple[int, str]] = [
       ON project_bindings(git_toplevel, git_remote);
     """),
 
+    (28, """
+    ALTER TABLE automation_schedule ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE automation_schedule ADD COLUMN last_status TEXT NOT NULL DEFAULT '';
+    """),
 ]
 
 

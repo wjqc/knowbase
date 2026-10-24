@@ -346,7 +346,8 @@ class CommandExecutorRunner:
                 [self.binary, *self.noninteractive_argv],
                 input=json.dumps(payload, ensure_ascii=False),
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, timeout=self.timeout, text=True)
+                stderr=subprocess.PIPE, timeout=self.timeout, text=True,
+                cwd=self.cfg.get("working_directory"))
         except subprocess.TimeoutExpired:
             raise ExecutorFailure(REASON_TIMEOUT, "executor timed out")
         except OSError as exc:

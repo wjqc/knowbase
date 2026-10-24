@@ -230,8 +230,8 @@ def _import_one(conn, team_id, item, event, imported_at) -> dict:
         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'accepted',?)",
         (team_id, event["event_id"], event["event_type"],
          str(event.get("installation_id", "")), str(event.get("member_binding_id", "")),
-         "", str(payload.get("task_id", "")), str(event.get("occurred_at", "")),
-         "", json.dumps(event, ensure_ascii=False),
+         str(event.get("host", "")), str(event.get("task_id") or payload.get("task_id", "")),
+         str(event.get("occurred_at", "")), str(event.get("session_id", "")), json.dumps(event, ensure_ascii=False),
          item["payload_hash"], str(item.get("source_key", "")), imported_at))
     return {"result": "accepted"}
 
