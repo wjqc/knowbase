@@ -190,7 +190,8 @@ for i, (t, dom) in enumerate(mods):
     ids.add(r.split()[1])
 check("并发 id 唯一", len(ids) == 5, str(ids))
 
-# 20. contradicts 双向回指 + 不改状态
+# 20. contradicts 双向回指 + 自动裁决（Phase 1：零证据打平 → 双方同时降 stale 并隔离，
+# 不再是旧的“状态不动”；回指本身保持不变）
 os.environ["XINHUO_AGENT_NAME"] = "claude-code"
 r = save_impl("pitfall", "EasyConnect 9.x 企业证书安装流程", PITFALL_BODY,
               relations=[{"id": new_pid, "type": "contradicts"}])
@@ -198,7 +199,11 @@ c_pid = r.split()[1]
 meta_n, _, _ = store.load(rp, new_pid)
 rev = [x for x in (meta_n.get("relations") or []) if x.get("id") == c_pid and x.get("type") == "contradicts"]
 check("contradicts 反向回指", len(rev) == 1, str(meta_n.get("relations")))
-check("contradicts 不改状态", meta_n["status"] == "active", str(meta_n["status"]))
+meta_c, _, _ = store.load(rp, c_pid)
+check("contradicts 零证据打平双隔离", meta_n["status"] == "stale" and meta_c["status"] == "stale"
+      and meta_n.get("contradiction_quarantine") is True and meta_c.get("contradiction_quarantine") is True,
+      f"new={meta_n['status']} new_quar={meta_n.get('contradiction_quarantine')} "
+      f"c={meta_c['status']} c_quar={meta_c.get('contradiction_quarantine')}")
 
 # 21. 负反馈沉底因子
 from knowbase.index import _feedback_factor

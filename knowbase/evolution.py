@@ -2,6 +2,41 @@
 from . import config
 
 
+def _aggregate(rows):
+    """证据聚合（纯函数）：仅当前内容版本；一项任务重复反馈不增加证据。
+
+    negative_evidence_tasks 为负面证据任务数（含 not_helpful/incorrect/outdated），
+    供矛盾裁决使用；晋升/淘汰口径（negative_tasks 仅计 not_helpful）保持不变。
+    """
+    positive, negative, sessions = set(), set(), set()
+    negative_evidence = set()
+    blocked = False
+    for key, result, host, session, completion in rows:
+        if result != "helpful" or completion in ("failed", "abandoned"):
+            blocked = True
+            if result == "not_helpful":
+                negative.add(key)
+            if result in ("not_helpful", "incorrect", "outdated"):
+                negative_evidence.add(key)
+        elif completion == "completed":
+            positive.add(key)
+            sessions.add(session)
+    return {"helpful_tasks": len(positive), "sessions": len(sessions),
+            "negative_tasks": len(negative), "negative_evidence_tasks": len(negative_evidence),
+            "blocked": blocked}
+
+
+def evidence_for_revision(conn, mid, revision):
+    """仅查库内已落盘证据（不附加假设行）：供矛盾裁决等只读判定使用。"""
+    rows = conn.execute(
+        "SELECT f.task_key,f.outcome,u.host_profile,u.session_id,t.result "
+        "FROM feedback_events f JOIN knowledge_uses u ON u.use_id=f.use_id "
+        "LEFT JOIN task_outcomes t ON t.task_outcome_id=f.task_outcome_id "
+        "WHERE f.memory_id=? AND f.content_revision=? AND f.binding='version_task' "
+        "AND f.state='applied'", (mid, revision)).fetchall()
+    return _aggregate(rows)
+
+
 def evidence(conn, mid, revision, use, task_key, outcome, task_result):
     """仅当前内容版本；一项任务重复反馈不增加证据，失败/冲突阻止晋升。"""
     rows = conn.execute(
@@ -11,18 +46,9 @@ def evidence(conn, mid, revision, use, task_key, outcome, task_result):
         "WHERE f.memory_id=? AND f.content_revision=? AND f.binding='version_task' "
         "AND f.state='applied'", (mid, revision)).fetchall()
     rows.append((task_key, outcome, use[0], use[1], task_result))
-    positive, negative, sessions = set(), set(), set()
-    blocked = False
-    for key, result, host, session, completion in rows:
-        if result != "helpful" or completion in ("failed", "abandoned"):
-            blocked = True
-            if result == "not_helpful":
-                negative.add(key)
-        elif completion == "completed":
-            positive.add(key)
-            sessions.add(session)
-    return {"helpful_tasks": len(positive), "sessions": len(sessions),
-            "negative_tasks": len(negative), "blocked": blocked}
+    agg = _aggregate(rows)
+    agg.pop("negative_evidence_tasks", None)
+    return agg
 
 
 def decide(conn, mid, revision, meta, use, task_key, outcome, task_result, *, staged=False):

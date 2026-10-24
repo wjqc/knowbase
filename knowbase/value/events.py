@@ -14,7 +14,7 @@ EVENT_TYPES = frozenset({
     "capability.snapshot", "task.started", "task.checkpoint", "task.completed",
     "task.abandoned", "knowledge.created", "knowledge.revised", "knowledge.activated",
     "retrieval.completed", "knowledge.delivered", "knowledge.read", "knowledge.used",
-    "feedback.recorded", "model.usage", "collection.gap",
+    "feedback.recorded", "model.usage", "collection.gap", "knowledge.archived",
 })
 
 FEEDBACK_SOURCES = frozenset({"agent", "user", "independent", "unknown"})
@@ -35,6 +35,10 @@ PAYLOAD_FIELDS = {
     "knowledge.revised": {
         "required": {"memory_id", "content_revision", "scope"},
         "optional": {"staging"},
+    },
+    "knowledge.archived": {
+        "required": {"memory_id", "content_revision", "scope"},
+        "optional": {"reason", "stale_since"},
     },
     "knowledge.activated": {
         "required": {"memory_id", "content_revision", "scope"},

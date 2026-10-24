@@ -37,7 +37,10 @@ DEFAULTS = {
     "team": {"enabled": False, "data_dir": "~/.knowbase/team", "interval_seconds": 900,
              "dashboard_output": "~/knowbase-dashboard.html"},
     "evolution": {"enabled": True, "auto_activate_bizrules": True,
-                  "min_helpful_tasks": 3, "min_sessions": 2, "retire_not_helpful_tasks": 2},
+                  "min_helpful_tasks": 3, "min_sessions": 2, "retire_not_helpful_tasks": 2,
+                  # Phase 1 自进化：stale 满期自动归档与 review 候选超期丢弃的期限（天）。
+                  # 归档只看证据账本（stale_since 起点 + 期间无成功复验证据），不看 wall-clock 猜测。
+                  "archive_after_stale_days": 90, "review_candidate_ttl_days": 30},
     "value": {"events_enabled": False, "aggregate_db": "~/.knowbase/value-aggregate.db"},
     "hooks": {"enabled": True, "inject_min_confidence": "verified",
               "query_hygiene": True, "inject_max_chars": 900},

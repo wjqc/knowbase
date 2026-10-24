@@ -66,6 +66,22 @@ def inspect(repo):
             add("content_parity", "fail" if content_mismatch else "pass", f"mismatched_cards={content_mismatch}")
             stale = conn.execute("SELECT count(*) FROM meta WHERE status='stale'").fetchone()[0]
             add("governance", "warn" if stale else "pass", f"stale={stale}")
+            # Phase 1 自进化清单（只读呈现，不写库）：
+            archived = [(m["id"], m.get("archived_at", ""), m.get("archive_reason", ""),
+                         m.get("last_evidence_summary")) for m, _, _ in cards if m.get("status") == "archived"]
+            add("archive_ledger", "pass", json.dumps(
+                [{"id": i, "archived_at": a, "reason": r, "last_evidence": e} for i, a, r, e in archived],
+                ensure_ascii=False))
+            quarantined = [(m["id"], m.get("adjudication_note", "")) for m, _, _ in cards
+                           if m.get("contradiction_quarantine")]
+            add("contradiction_quarantine", "warn" if quarantined else "pass", json.dumps(
+                [{"id": i, "note": n} for i, n in quarantined], ensure_ascii=False))
+            if "candidates" in tables:
+                discarded = conn.execute("SELECT candidate_id,job_id,candidate_key,created_at,updated_at "
+                                         "FROM candidates WHERE decision='discarded'").fetchall()
+                add("review_discard_ledger", "pass", json.dumps(
+                    [{"candidate_id": c, "job_id": j, "candidate_key": k, "created_at": cr, "discarded_at": u}
+                     for c, j, k, cr, u in discarded], ensure_ascii=False))
             from .retrieval_policy import local_policy
             policy, _ = local_policy()
             add("retrieval", "warn" if policy["reason"] else "pass", json.dumps(policy, ensure_ascii=False))
