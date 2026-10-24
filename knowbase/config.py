@@ -40,8 +40,23 @@ DEFAULTS = {
                   "min_helpful_tasks": 3, "min_sessions": 2, "retire_not_helpful_tasks": 2,
                   # Phase 1 自进化：stale 满期自动归档与 review 候选超期丢弃的期限（天）。
                   # 归档只看证据账本（stale_since 起点 + 期间无成功复验证据），不看 wall-clock 猜测。
-                  "archive_after_stale_days": 90, "review_candidate_ttl_days": 30},
-    "value": {"events_enabled": False, "aggregate_db": "~/.knowbase/value-aggregate.db"},
+                  "archive_after_stale_days": 90, "review_candidate_ttl_days": 30,
+                  # P4 显式激活策略：团队允许自动激活的类型/范围与策略版本。
+                  # 默认 None/None = 沿用已有授权范围（不改变现有行为）：
+                  # decide() 的 promotable 门仍在（staging 卡须为 GOVERNED
+                  # 类型且有出处；已激活卡由证据驱动）。团队收紧时显式
+                  # 填 allowed_types/allowed_scopes，策略只 gate 晋升/激活，
+                  # 不影响证据收集与候选存储。
+                  "activation_policy": {"allowed_types": None,
+                                        "allowed_scopes": None, "policy_revision": "1"}},
+    "value": {"events_enabled": False, "aggregate_db": "~/.knowbase/value-aggregate.db",
+              # P3 §6.3：证据交换角色，默认 off（不自动发送/聚合）；sender 聚合
+              # 前须经一次性团队配置显式指定；evidence_role 关闭时采集与同步继续。
+              "evidence_role": "off", "evidence_remote": "",
+              "evidence_branch": "knowbase-value-events-v2",
+              "evidence_root": "~/.knowbase/evidence", "evidence_team_id": "default"},
+    # P3 §6.1：worker 常驻循环 tick 间隔（秒）；OS 负责启动/保活。
+    "worker": {"tick_seconds": 5.0},
     "hooks": {"enabled": True, "inject_min_confidence": "verified",
               "query_hygiene": True, "inject_max_chars": 900},
     # Phase 1 检索分层配置（02 号设计§6）：gate 默认关闭，阈值待评测校准（06 号§4）。
@@ -58,6 +73,9 @@ DEFAULTS = {
         "host_profile": "", "member_label": "unknown",
         "device_label": "unknown",
     },
+    # P1 执行器探针：显式配置的执行器列表（空表示仅做本机发现）。
+    # 每项为 command 或 intranet_text 配置；探针不输出其中任何密钥引用值。
+    "automation": {"executors": []},
 }
 
 

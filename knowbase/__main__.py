@@ -157,6 +157,20 @@ def cmd_init(import_from=None, scope=None, dtype="workflow") -> int:
     if import_from:
         return cmd_import(import_from, dtype, scope, True, "human:init-import")
     print("完成。Agent 接入：在各 MCP 配置注册 knowbase serve 即可。")
+    # P4：init 收尾输出接入就绪四项（只读、失败不阻断 init 成功）。
+    try:
+        from .onboarding import readiness
+        ready = readiness(rp)
+        print("接入就绪："
+              f"配置={'✓' if ready['config_complete'] else '✗'} "
+              f"协议={'✓' if ready['protocol_pass'] else '✗'} "
+              f"宿主已加载={','.join(ready['hosts_loaded']) or '无'} "
+              f"真实任务验证={'✓' if ready['real_task_verified'] else '未验证'}")
+        if ready["reconnect_required"]:
+            print(f"需重连的旧 build 会话：{','.join(ready['reconnect_required'])}"
+                  "（重启该宿主的 knowbase serve 后恢复）")
+    except Exception as exc:
+        print(f"○ 就绪状态读取失败：{type(exc).__name__}（不影响 init 结果）")
     return 0
 
 
@@ -761,6 +775,125 @@ def cmd_review_sweep() -> int:
     return 0
 
 
+def cmd_scope_resolve(path: str | None) -> int:
+    """P4：解析一条路径的 scope 绑定（只读；未解析时保持 scope_unresolved）。"""
+    import os
+    from .scope_binding import resolve_binding
+    rp = config.repo_path()
+    conn = index.connect(rp)
+    try:
+        result = resolve_binding(conn, path or os.getcwd())
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_scope_bind(path: str, scope: str) -> int:
+    """P4：显式绑定一条路径到 scope（人工确认的映射，优先级最高）。"""
+    from .scope_binding import bind_explicit
+    rp = config.repo_path()
+    conn = index.connect(rp)
+    try:
+        result = bind_explicit(conn, path, scope)
+        conn.commit()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_maintenance_run() -> int:
+    """P4：执行一次定期维护（真实入口：崩溃恢复→归档→review 清理→冲突复验）。"""
+    from .maintenance import run_maintenance
+    rp = config.repo_path()
+    conn = index.connect(rp)
+    try:
+        report = run_maintenance(rp, conn)
+        print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_maintenance_status() -> int:
+    """P4：维护状态快照（只读）。"""
+    from .maintenance import maintenance_status
+    rp = config.repo_path()
+    conn = index.connect(rp)
+    try:
+        print(json.dumps(maintenance_status(rp, conn), ensure_ascii=False, indent=2))
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_onboarding() -> int:
+    """P4：接入就绪状态（四项分别输出）+ 本次新提示（提示过的键不再重复）。"""
+    from .onboarding import report
+    from .sessions import mark_notified
+    rp = config.repo_path()
+    rep = report(rp)
+    print(json.dumps(rep, ensure_ascii=False, indent=2))
+    mark_notified([n["key"] for n in rep["new_notices"]])
+    return 0
+
+
+def cmd_executor_probe(isolation: bool = False, scope: str = "probe-orders") -> int:
+    """P1 执行器探针：静态探针全部候选，可选对首个 unknown 候选跑隔离探针。
+
+    只输出能力报告 JSON，不输出任何密钥引用值。返回 0 表示至少一个
+    执行器 verified；返回 2 表示无候选通过，自动提炼批次保持阻断。
+    """
+    from .automation import executor as probe
+
+    cfg = config.load_config()
+    configured = cfg.get("automation", {}).get("executors", []) or []
+    discovered = probe.discover_executors()
+    seen = {str(c.get("executor_id")) for c in configured}
+    candidates = list(configured) + [c for c in discovered
+                                     if str(c.get("executor_id")) not in seen]
+    reports = probe.probe_all(candidates)
+    isolation_report = None
+    chosen = None
+    for report in reports:
+        if report.status == "verified":
+            chosen = report
+            break
+    if isolation and chosen is None:
+        unknowns = [r for r in reports if r.status == "unknown"]
+        if unknowns:
+            target = unknowns[0]
+            target_cfg = next(
+                (c for c in candidates
+                 if str(c.get("executor_id") or c.get("command")) == target.executor_id),
+                None)
+            if target_cfg and target_cfg.get("kind", "command") == "command":
+                try:
+                    from .automation.executor import CommandExecutorRunner
+                    from .automation.protocol import run_isolation_probe
+                    runner = CommandExecutorRunner(target_cfg)
+                    isolation_report = run_isolation_probe(
+                        runner, repo=config.repo_path(), scope=scope)
+                    if isolation_report.get("passed"):
+                        target.status = "verified"
+                        target.reason_code = None
+                        chosen = target
+                    else:
+                        target.status = "blocked"
+                        target.reason_code = "isolation_failed"
+                except Exception as exc:  # 探针失败不掩盖静态结论
+                    isolation_report = {"passed": False, "failure_reasons": ["executor_error"],
+                                        "detail": f"{type(exc).__name__}: {str(exc)[:200]}"}
+    out = {"executors": [r.to_dict() for r in reports],
+           "diagnoses": [probe.diagnose(r) for r in reports],
+           "selected": chosen.executor_id if chosen else None,
+           "blocked": chosen is None,
+           "isolation": isolation_report}
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    return 0 if chosen is not None else 2
+
+
 def _main(argv=None):
     parser = argparse.ArgumentParser(prog="knowbase", description="薪火：跨 Agent 经验记忆库")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -887,6 +1020,18 @@ def _main(argv=None):
     jobs_sub.add_parser("expire", help="回收过期租约")
     sub.add_parser("archive-sweep", help="自动归档 stale 满期且近 X 天内无成功复验证据的卡片（Phase 1）")
     sub.add_parser("review-sweep", help="自动丢弃超期未补充出处的 needs_review 候选（Phase 1）")
+    p_scope = sub.add_parser("scope", help="项目识别绑定（P4）")
+    scope_sub = p_scope.add_subparsers(dest="scope_cmd", required=True)
+    p_resolve = scope_sub.add_parser("resolve", help="解析一条路径的 scope 绑定（只读）")
+    p_resolve.add_argument("path", nargs="?", default=None, help="待解析的本地路径，默认当前目录")
+    p_bind = scope_sub.add_parser("bind", help="显式绑定一条路径到 scope（人工确认）")
+    p_bind.add_argument("--path", required=True, help="本地路径")
+    p_bind.add_argument("--scope", required=True, help="目标 scope")
+    p_maint = sub.add_parser("maintenance", help="治理维护（P4）")
+    maint_sub = p_maint.add_subparsers(dest="maint_cmd", required=True)
+    maint_sub.add_parser("run", help="执行一次定期维护（真实入口）")
+    maint_sub.add_parser("status", help="维护状态快照（只读）")
+    sub.add_parser("onboarding", help="接入就绪状态：配置/协议/宿主加载/真实任务验证分别输出（P4）")
     p_value = sub.add_parser("value", help="团队价值事件文件汇总（显式导出/导入/快照，不自动上传）")
     value_sub = p_value.add_subparsers(dest="value_cmd", required=True)
     p_value_export = value_sub.add_parser("export", help="导出本机最小事件包（不改变事件状态）")
@@ -930,6 +1075,20 @@ def _main(argv=None):
     p_sync.add_argument("--remote", required=True)
     p_sync.add_argument("--branch", required=True)
     p_sync.add_argument("--lease-token", required=True)
+    p_worker = sub.add_parser("worker", help="P3 后台 supervisor：OS 调度入口，SQLite 租约互斥（提炼位保持阻断）")
+    worker_sub = p_worker.add_subparsers(dest="worker_cmd", required=True)
+    for _name, _help in (("run", "常驻运行：OS 负责启动/保活，租约互斥，按 next_run_at 唤醒"),
+                         ("once", "执行一次到期任务（持租约者）"),
+                         ("status", "查看租约与各任务下次运行时间"),
+                         ("install", "安装 worker 调度入口并迁移旧 team 定时任务"),
+                         ("disable", "停用 worker 调度入口（含旧 team 定时任务）")):
+        worker_sub.add_parser(_name, help=_help)
+    p_exec = sub.add_parser("executor", help="提炼执行器探针（P1）")
+    exec_sub = p_exec.add_subparsers(dest="executor_cmd", required=True)
+    p_exec_probe = exec_sub.add_parser("probe", help="静态探针全部候选，可选跑隔离探针")
+    p_exec_probe.add_argument("--isolation", action="store_true",
+                              help="对首个 unknown 候选跑第一轮真实隔离探针")
+    p_exec_probe.add_argument("--scope", default="probe-orders")
     args = parser.parse_args(argv)
 
     if args.cmd == "sync-once":
@@ -1167,7 +1326,9 @@ def _main(argv=None):
             elif action == "member":
                 result = service.member(args.member_id, args.label, args.status)
             elif action in {"install-worker", "remove-worker", "disable"}:
-                result = worker.install(remove=action != "install-worker")
+                # P3 §6.1：旧 team 定时任务迁为 worker 的兼容别名，每库只有一个调度所有者。
+                from .automation import worker as automation_worker
+                result = automation_worker.install(remove=action != "install-worker")
                 if action == "disable":
                     cfg = config.load_config(); cfg["team"]["enabled"] = False
                     service._save_config(cfg)
@@ -1191,6 +1352,26 @@ def _main(argv=None):
                         conn.close()
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 1 if result.get("errors") else 0
+        except (ValueError, RuntimeError, OSError) as exc:
+            print(json.dumps({"error": str(exc)}, ensure_ascii=False))
+            return 1
+    if args.cmd == "worker":
+        from .automation import worker as automation_worker
+        try:
+            action = args.worker_cmd
+            repo = config.repo_path()
+            if action == "run":
+                result = automation_worker.run_forever(repo)
+            elif action == "once":
+                result = automation_worker.run_once(repo)
+            elif action == "status":
+                result = automation_worker.status(repo)
+            elif action == "install":
+                result = automation_worker.install()
+            else:
+                result = automation_worker.disable()
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
         except (ValueError, RuntimeError, OSError) as exc:
             print(json.dumps({"error": str(exc)}, ensure_ascii=False))
             return 1
@@ -1341,10 +1522,28 @@ def _main(argv=None):
         if args.jobs_cmd == "expire":
             return cmd_jobs_expire()
         return 1
+    if args.cmd == "executor":
+        if args.executor_cmd == "probe":
+            return cmd_executor_probe(isolation=args.isolation, scope=args.scope)
+        return 1
     if args.cmd == "archive-sweep":
         return cmd_archive_sweep()
     if args.cmd == "review-sweep":
         return cmd_review_sweep()
+    if args.cmd == "scope":
+        if args.scope_cmd == "resolve":
+            return cmd_scope_resolve(args.path)
+        if args.scope_cmd == "bind":
+            return cmd_scope_bind(args.path, args.scope)
+        return 1
+    if args.cmd == "maintenance":
+        if args.maint_cmd == "run":
+            return cmd_maintenance_run()
+        if args.maint_cmd == "status":
+            return cmd_maintenance_status()
+        return 1
+    if args.cmd == "onboarding":
+        return cmd_onboarding()
     return 1
 
 

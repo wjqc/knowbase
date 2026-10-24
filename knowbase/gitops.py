@@ -344,6 +344,53 @@ def _is_network_error(exc: Exception) -> bool:
     ))
 
 
+# P3 §6.2：内网 Git 失败分层诊断。只返回脱敏类别，绝不把原始错误
+# 文本（含可能的 URL/凭据/路径）写入同步记录或日志。
+_DIAGNOSE_RULES = (
+    ("dns", ("could not resolve host", "name resolution", "dns", "name or service not known")),
+    ("tcp", ("connection refused", "connection timed out", "connection reset",
+             "network is unreachable", "no route to host")),
+    ("proxy", ("proxy", "connect tunnel", "proxy authentication")),
+    ("auth", ("authentication", "permission denied", "could not read username",
+              "invalid username or password", "access denied")),
+    ("protocol", ("protocol error", "unexpected disconnect", "the remote end hung up",
+                  "failed to connect to repository", "not a git repository")),
+    ("git", ("conflict", "rebase", "index.lock", "identity unknown",
+             "please tell me who you are", "unable to auto-detect email")),
+)
+
+
+def diagnose_git_failure(message: str) -> str:
+    """把一次 Git 失败归入分层类别；无匹配时返回 unknown。"""
+    text = (message or "").lower()
+    for category, markers in _DIAGNOSE_RULES:
+        if any(marker in text for marker in markers):
+            return category
+    return "unknown"
+
+
+def confirm_push(repo: Path, remote: str, branch: str, target_sha: str) -> dict:
+    """推送后读回远端目标 SHA：确认远端已包含目标提交才算 pending 可清。
+
+    网络未知状态只返回 network_unknown，不重造提交、不谎称成功。
+    返回 {confirmed, remote_rev, target_sha, reason}。
+    """
+    if not target_sha:
+        return {"confirmed": False, "remote_rev": "", "target_sha": "",
+                "reason": "no_target_sha"}
+    try:
+        _run(repo, "fetch", remote, branch, timeout=10)
+        remote_rev = _run(repo, "rev-parse", f"{remote}/{branch}", timeout=3)
+    except Exception as exc:
+        return {"confirmed": False, "remote_rev": "", "target_sha": target_sha,
+                "reason": "network_unknown",
+                "diagnosis": diagnose_git_failure(str(exc))}
+    confirmed = _is_ancestor(repo, target_sha, remote_rev)
+    return {"confirmed": confirmed, "remote_rev": remote_rev,
+            "target_sha": target_sha,
+            "reason": "" if confirmed else "target_not_contained"}
+
+
 def _integrate_remote(repo: Path, remote: str, branch: str, on_card_conflict=None) -> tuple[bool, bool]:
     """收敛到远端最新提交，返回 (本地 HEAD 是否变化, 是否需要 push)。"""
     remote_ref = f"{remote}/{branch}"
@@ -546,8 +593,22 @@ def push(repo: Path, remote_url: str, allowed_prefixes: list[str]) -> str | None
                     raise
         if last_error is not None:
             raise last_error
-        _record_sync(repo, remote, branch, "ok", push=True)
-        return None
+        # P3 §6.2：推送返回后读回远端目标 SHA，确认已包含目标提交才记 ok；
+        # 网络未知状态只记 unconfirmed、不重造提交，下次同步重查。
+        confirmation = confirm_push(repo, remote, branch, push_sha)
+        if confirmation["confirmed"]:
+            _record_sync(repo, remote, branch, "ok", push=True)
+            return None
+        reason = confirmation["reason"]
+        diag = confirmation.get("diagnosis", reason)
+        _record_sync(repo, remote, branch, "unconfirmed",
+                     error=f"[{diag}] push_sha={push_sha} remote_rev={confirmation['remote_rev']}",
+                     push=True)
+        if reason == "network_unknown":
+            return (f"push 已返回但远端读回未确认（网络未知状态，不重造提交，下次同步重查）"
+                    f"：{diag} (push_sha={push_sha})")
+        return (f"push 已返回但远端未包含目标提交（pending 保留，下次同步重查）"
+                f"：push_sha={push_sha} remote_rev={confirmation['remote_rev']}")
     except GitSyncConflict as exc:
         _record_sync(repo, remote, branch, "conflict", error=str(exc), fetch=True)
         return f"同步冲突(本地提交已保留): {exc}"

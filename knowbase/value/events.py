@@ -48,6 +48,10 @@ PAYLOAD_FIELDS = {
         "required": {"task_id", "task_outcome_id", "result", "verification_source"},
         "optional": {"task_run_id", "use_id", "memory_id"},
     },
+    "knowledge.delivered": {
+        "required": {"delivery_id", "memory_id", "content_revision", "task_id"},
+        "optional": {"search_id", "context_event_id", "scope", "rank"},
+    },
     "task.abandoned": {
         "required": {"task_id", "task_outcome_id", "result", "verification_source"},
         "optional": {"task_run_id", "use_id", "memory_id"},

@@ -27,6 +27,8 @@ SCHEMA = "knowbase.acceptance.v1"
 # without silently requiring threshold 3's three-instance setup.
 FULL_CHAIN_MIN_SESSIONS = 3
 FULL_CHAIN_MIN_INSTANCES = 2
+# P0：跨成员门槛计的是去重后的成员数（安装实例先归并到成员键），
+# 常量名保留以免改动调用方；同一人三设备只算一人。
 CROSS_MEMBER_MIN_INSTANCES = 3
 
 
@@ -112,11 +114,20 @@ def check_derived_eval(personal_conn, report_path, dataset_path) -> dict:
 def check_full_chain(agg_conn, team_id: str) -> dict:
     """Threshold 2: N real task sessions (distinct instances) with the
     complete chain delivery -> adoption -> completed task result, all
-    from attributed instances (host/tool labels never count)."""
+    from attributed instances (host/tool labels never count).
+
+    Delivery must be an independent knowledge.delivered event: an adopted
+    use no longer stands in for its own delivery. Completion must bind
+    to the adopted use by use_id and agree on task and member: a
+    completed event on the same device, or with the same task label but
+    no use_id match, does not count. Sessions are counted by the
+    adoption identity; the completed event's session may differ (tasks
+    can span sessions), but its member and task must match.
+    """
     check = "full_chain_sessions"
     attr = aggregate.attribution(agg_conn, team_id)
     mapping, attributed = attr["mapping"], attr["attributed"]
-    delivered, adopted, completed = {}, {}, {}
+    delivered, adopted, completed_use = {}, {}, {}
     identity_inst: dict[tuple, str] = {}
     for event_type, inst, binding, task_id, _occurred, session_id, payload_json in \
             _load_events(agg_conn, team_id):
@@ -125,27 +136,33 @@ def check_full_chain(agg_conn, team_id: str) -> dict:
         owner = _owner_key(mapping, inst, binding)
         if owner is None:
             continue
+        try:
+            payload = (json.loads(payload_json).get("payload") or {})
+        except ValueError:
+            continue
         identity = (owner, _run_source(session_id, inst), task_id)
         identity_inst.setdefault(identity, inst)
-        if event_type == "knowledge.used":
-            # 当前事件词表中递送由 use 事件本身见证（adopted 蕴含已递送；
-            # retrieval.completed/delivered 尚未启用），故 delivery 取全部
-            # knowledge.used，链的核心约束是 adopted + completed。
-            delivered[identity] = True
-            try:
-                state = (json.loads(payload_json).get("payload") or {}).get("state", "")
-            except ValueError:
-                state = ""
-            if state == "adopted":
-                adopted[identity] = True
-        elif event_type == "task.completed":
-            try:
-                result = (json.loads(payload_json).get("payload") or {}).get("result", "")
-            except ValueError:
-                result = ""
-            if result == "completed":
-                completed[identity] = True
-    sessions = sorted(set(delivered) & set(adopted) & set(completed))
+        if event_type == "knowledge.delivered":
+            card = (payload.get("memory_id", ""), payload.get("content_revision", ""))
+            if card[0]:
+                delivered.setdefault(identity, set()).add(card)
+        elif event_type == "knowledge.used" and payload.get("state") == "adopted":
+            card = (payload.get("memory_id", ""), payload.get("content_revision", ""))
+            use_id = payload.get("use_id", "")
+            if card[0] and use_id:
+                adopted.setdefault(identity, {})[card] = use_id
+        elif event_type == "task.completed" and payload.get("result") == "completed":
+            use_id = payload.get("use_id", "")
+            if use_id:
+                completed_use[use_id] = (owner, task_id)
+    sessions = set()
+    for identity, cards in adopted.items():
+        for card, use_id in cards.items():
+            if card in delivered.get(identity, set()) \
+                    and completed_use.get(use_id) == (identity[0], identity[2]):
+                sessions.add(identity)
+                break
+    sessions = sorted(sessions)
     instances = sorted({identity_inst[s] for s in sessions if identity_inst.get(s)})
     if len(sessions) < FULL_CHAIN_MIN_SESSIONS:
         return _fail(check, f"full-chain sessions {len(sessions)} < {FULL_CHAIN_MIN_SESSIONS}",
@@ -158,43 +175,52 @@ def check_full_chain(agg_conn, team_id: str) -> dict:
 
 
 def check_cross_member(agg_conn, team_id: str) -> dict:
-    """Threshold 3: three distinct attributed instances with real tasks
-    each, plus an A->B->C consumption path in the contributor->consumer
-    instance graph (same card adopted twice is a star, not a chain)."""
+    """Threshold 3: three distinct MEMBERS with real tasks each, plus an
+    A->B->C consumption path in the contributor->consumer member graph
+    (same card adopted twice is a star, not a chain).
+
+    Installations merge to members first (correction mapping, else the
+    event's own binding): one person on three devices is one member,
+    not three. A member has a real task only when an adopted use of
+    theirs is bound to a completed task event by use_id — any completed
+    event on the same device does not count.
+    """
     check = "cross_member_reuse"
     attr = aggregate.attribution(agg_conn, team_id)
     mapping, attributed = attr["mapping"], attr["attributed"]
     contributor_of: dict[tuple, str] = {}
     adopted_uses: list[tuple] = []
-    instance_has_task: dict[str, bool] = {}
-    adopted_by_inst: dict[str, bool] = {}
-    completed_by_inst: dict[str, bool] = {}
+    completed_use_ids: set[str] = set()
     for event_type, inst, binding, task_id, _occurred, _session, payload_json in \
             _load_events(agg_conn, team_id):
         try:
             payload = (json.loads(payload_json).get("payload") or {})
         except ValueError:
             continue
+        member = _owner_key(mapping, inst, binding)
+        if member is None:
+            continue
         if event_type in ("knowledge.created", "knowledge.revised"):
             card = (payload.get("memory_id", ""), payload.get("content_revision", ""))
-            if card[0] and inst:
-                contributor_of.setdefault(card, inst)
+            if card[0]:
+                contributor_of.setdefault(card, member)
         elif event_type == "knowledge.used" and payload.get("state") == "adopted":
             card = (payload.get("memory_id", ""), payload.get("content_revision", ""))
-            if card[0] and inst:
-                adopted_uses.append((card, inst))
-                adopted_by_inst[inst] = True
+            use_id = payload.get("use_id", "")
+            if card[0] and use_id:
+                adopted_uses.append((card, member, use_id))
         elif event_type == "task.completed" and payload.get("result") == "completed":
-            if inst:
-                completed_by_inst[inst] = True
-    for inst in set(adopted_by_inst) & set(completed_by_inst):
-        if inst in attributed:
-            instance_has_task[inst] = True
+            use_id = payload.get("use_id", "")
+            if use_id:
+                completed_use_ids.add(use_id)
+    member_has_task: dict[str, bool] = {}
+    for _card, member, use_id in adopted_uses:
+        if use_id in completed_use_ids:
+            member_has_task[member] = True
     edges: dict[str, set[str]] = {}
-    for (mid, rev), consumer in adopted_uses:
+    for (mid, rev), consumer, _use_id in adopted_uses:
         contributor = contributor_of.get((mid, rev))
-        if contributor and contributor != consumer \
-                and contributor in attributed and consumer in attributed:
+        if contributor and contributor != consumer:
             edges.setdefault(contributor, set()).add(consumer)
     path = None
     for b in sorted(edges):
@@ -202,7 +228,7 @@ def check_cross_member(agg_conn, team_id: str) -> dict:
             if b not in edges.get(a, set()):
                 continue
             for c in sorted(edges.get(b, set())):
-                if len({a, b, c}) == 3 and all(instance_has_task.get(x) for x in (a, b, c)):
+                if len({a, b, c}) == 3 and all(member_has_task.get(x) for x in (a, b, c)):
                     path = [a, b, c]
                     break
             if path:
@@ -210,14 +236,14 @@ def check_cross_member(agg_conn, team_id: str) -> dict:
         if path:
             break
     if path is None:
-        return _fail(check, "no A->B->C consumption path across three attributed instances "
+        return _fail(check, "no A->B->C consumption path across three attributed members "
                             "with real tasks each",
                      edges=sum(len(v) for v in edges.values()),
-                     instances_with_tasks=len(instance_has_task))
+                     members_with_tasks=len(member_has_task))
     if len({x for x in path}) < CROSS_MEMBER_MIN_INSTANCES:
-        return _fail(check, "consumption path spans fewer than three instances", path=path)
+        return _fail(check, "consumption path spans fewer than three members", path=path)
     return _pass(check, path=path, edges=sum(len(v) for v in edges.values()),
-                 instances_with_tasks=len(instance_has_task))
+                 members_with_tasks=len(member_has_task))
 
 
 def check_benefit_control(report_path) -> dict:
@@ -256,6 +282,18 @@ def check_benefit_control(report_path) -> dict:
         return _fail(check, "net_token_savings missing or does not recompute from pairs")
     if totals.get("task_count") != len(pairs):
         return _fail(check, "task_count does not match pairs")
+    # P0 §4.3：背景成本与实际费用是可选字段，但出现时必须可验证：
+    # 背景量须为有限非负数；账单不可得时 actual_cost 只能是 null，
+    # 绝不能是占位字符串或以 0 冒充实测。
+    for key in ("background_tokens", "background_seconds"):
+        value = totals.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                                  or not math.isfinite(value) or value < 0):
+            return _fail(check, f"invalid background figure: {key}")
+    cost = totals.get("actual_cost")
+    if cost is not None and (isinstance(cost, bool) or not isinstance(cost, (int, float))
+                             or not math.isfinite(cost) or cost < 0):
+        return _fail(check, "actual_cost must be null or a finite number >= 0")
     return _pass(check, tasks=len(pairs), net_token_savings=net,
                  net_seconds=without_seconds - with_seconds)
 

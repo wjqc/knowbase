@@ -3,7 +3,7 @@
 import json
 from datetime import datetime, timezone
 
-from . import config, index, materials, store
+from . import config, delivery, index, materials, store
 from .locking import RepoLock
 from .mutations import _compute_revision
 
@@ -55,6 +55,13 @@ def record(repo, *, session_id, event_id, context_event_id, memory_id,
                          (use_id,host,session_id,event_id,phash,context_event_id,task,task_revision,
                           receipt["scope"],memory_id,content_revision,state,int(current),
                           datetime.now(timezone.utc).isoformat(timespec="seconds")))
+            # P0：同事务追加 search→delivery→use 关联。解析不到递送的旧观察
+            # 保留未关联——不按时间/标题猜测，也不因此拒绝回执；未关联的
+            # 采用不晋升为有效采用证据（派生与验收只认 link）。
+            delivered = delivery.find_delivery(conn, context_event_id, memory_id, content_revision)
+            if delivered is not None:
+                delivery.record_use_link(conn, use_id=use_id, delivery_id=delivered["delivery_id"],
+                                         search_id=delivered["search_id"])
             # 价值事件与业务回执同事务：append 失败则整体回滚，不允许"回执在、事件丢"。
             value_event=None
             if config.load_config().get("value",{}).get("events_enabled"):
@@ -74,7 +81,9 @@ def record(repo, *, session_id, event_id, context_event_id, memory_id,
             conn.commit()
             result={"use_id":use_id,"state":state,"task_id":task,"task_revision":task_revision,
                     "id":memory_id,"content_revision":content_revision,"current_version":current,
-                    "feedback_recorded":False,"identity_basis":"host_labels"}
+                    "feedback_recorded":False,"identity_basis":"host_labels",
+                    "delivery_linked": delivered is not None,
+                    "delivery_id": delivered["delivery_id"] if delivered is not None else None}
             if value_event is not None:
                 result["value_event"]=value_event
             return result

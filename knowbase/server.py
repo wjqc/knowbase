@@ -516,14 +516,16 @@ def job_claim_impl(job_id: str = "", scope: str = "", host_session_id: str = "",
 
     conn = index.connect(rp)
     try:
-        # 如果只给了 scope，找一个 awaiting 的任务
+        # 如果只给了 scope，找一个 awaiting 的任务；公开通道只认
+        # capture/extract，内部维护任务不得经 MCP 被旧客户端误领（P3 §6.1）。
         if not job_id:
-            pending = jobs.list_jobs(conn, scope=scope, state=jobs.STATE_AWAITING, limit=1)
+            pending = jobs.list_jobs(conn, scope=scope, state=jobs.STATE_AWAITING, limit=1,
+                                     kinds=jobs.PUBLIC_CLAIM_KINDS)
             if not pending:
                 return "无待领取任务"
             job_id = pending[0]["job_id"]
 
-        result = jobs.claim(conn, job_id, host_session_id)
+        result = jobs.claim(conn, job_id, host_session_id, kinds=jobs.PUBLIC_CLAIM_KINDS)
 
         if "error" in result:
             if result["error"] == jobs.NO_WORK:
@@ -925,8 +927,15 @@ mcp.tool(name="memory_metrics", description="只读导出本机隐私最小化�
 
 
 def main():
+    import sys
     import threading
     from .retrieval_state import maintenance
+    # P4：记录一次 serve 启动（宿主已加载的证据；失败绝不阻断 serve）。
+    try:
+        from .sessions import record_session
+        record_session(config.agent_name(), str(config.repo_path()), build_id(), sys.executable)
+    except Exception:
+        pass
     stop=threading.Event()
     def loop():
         while not stop.is_set():

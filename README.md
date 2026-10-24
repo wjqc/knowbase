@@ -165,8 +165,13 @@ code_refs:
 | `knowbase list [type]` | 列出记忆（含 staging 标注） |
 | `knowbase history [--limit N]` | 最近搜索命中记录（JSON） |
 | `knowbase dashboard [--output <文件>] [--open]` | 生成离线统计卡片：调用、知识状态、命中、更新、Token 和自动演进；只读业务库 |
-| `knowbase doctor [--json]` | 健康检查：索引一致性 / 同步 / Git / 解析器 |
+| `knowbase doctor [--json]` | 健康检查：索引一致性 / 同步 / Git / 解析器；P4 新增绑定、激活策略、维护、同步确认、待确认回执、证据覆盖、租约、会话与执行器能力检查 |
 | `knowbase alerts [--dry-run]` | 输出异常状态，供调度器通知 |
+| `knowbase scope resolve [路径]` | 解析一条路径的 scope 绑定（只读；无法确定时保持 scope_unresolved） |
+| `knowbase scope bind --path <路径> --scope <名>` | 显式绑定一条路径到 scope（人工确认，优先级最高） |
+| `knowbase maintenance run` | 执行一次定期维护：崩溃恢复→自动归档→review 清理→冲突复验 |
+| `knowbase maintenance status` | 维护状态快照（只读） |
+| `knowbase onboarding` | 接入就绪四项分别输出：配置/协议/宿主加载/真实任务验证；新提示只出现一次 |
 
 **服务与接入**
 

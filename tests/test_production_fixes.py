@@ -324,9 +324,10 @@ def test_push_fetches_rebases_and_retries_when_remote_moves_first(isolated_repo,
                    check=True)
     calls = []
     push_attempts = 0
+    pushed = False
 
     def fake_run(_target, *args, **_kwargs):
-        nonlocal push_attempts
+        nonlocal push_attempts, pushed
         calls.append(args)
         if args[:3] == ("remote", "get-url", "origin"):
             return "file:///tmp/remote.git"
@@ -337,8 +338,11 @@ def test_push_fetches_rebases_and_retries_when_remote_moves_first(isolated_repo,
         if args[:2] == ("rev-parse", "HEAD"):
             return "local"
         if args[:2] == ("rev-parse", "origin/trunk"):
-            return "remote"
+            # P3 §6.2 读回确认：第二次推送成功后远端跟踪引用即为 local。
+            return "local" if pushed else "remote"
         if args[:2] == ("merge-base", "--is-ancestor"):
+            if len(args) >= 4 and args[2] == args[3]:
+                return ""
             raise RuntimeError("diverged")
         if args[:2] == ("rebase", "origin/trunk"):
             return ""
@@ -346,6 +350,7 @@ def test_push_fetches_rebases_and_retries_when_remote_moves_first(isolated_repo,
             push_attempts += 1
             if push_attempts == 1:
                 raise RuntimeError("rejected (non-fast-forward)")
+            pushed = True
             return ""
         raise AssertionError(args)
 
@@ -356,7 +361,8 @@ def test_push_fetches_rebases_and_retries_when_remote_moves_first(isolated_repo,
 
     assert warning is None
     assert push_attempts == 2
-    assert calls.count(("fetch", "origin", "trunk")) == 2
+    # 2 次循环内 fetch + 1 次 P3 推送后读回确认 fetch。
+    assert calls.count(("fetch", "origin", "trunk")) == 3
 
 
 def test_real_two_clones_push_non_overlapping_commits_without_manual_merge(

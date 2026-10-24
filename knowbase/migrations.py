@@ -372,6 +372,83 @@ MIGRATIONS: list[tuple[int, str]] = [
     ALTER TABLE write_intents ADD COLUMN expected_entity_id TEXT NOT NULL DEFAULT '';
     ALTER TABLE write_intents ADD COLUMN expected_path TEXT NOT NULL DEFAULT '';
     """),
+    # v25: P0 证据修复（无人值守方案 §4.1）：检索→递送→采用身份链。
+    # 三张表均为本机运行账本，不进知识 Git；只新增，不改旧表旧数据。
+    (25, """
+    CREATE TABLE IF NOT EXISTS retrieval_deliveries(
+      delivery_id TEXT PRIMARY KEY, search_id TEXT NOT NULL,
+      host_profile TEXT NOT NULL DEFAULT '', session_id TEXT NOT NULL DEFAULT '',
+      context_event_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '',
+      task_revision TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL DEFAULT '',
+      memory_id TEXT NOT NULL, content_revision TEXT NOT NULL DEFAULT '',
+      rank INTEGER NOT NULL DEFAULT 0, source_delivery_id TEXT,
+      created_at TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS idx_deliveries_search ON retrieval_deliveries(search_id);
+    CREATE INDEX IF NOT EXISTS idx_deliveries_context ON retrieval_deliveries(context_event_id);
+    CREATE INDEX IF NOT EXISTS idx_deliveries_card ON retrieval_deliveries(memory_id, content_revision);
+    CREATE TABLE IF NOT EXISTS use_retrieval_links(
+      use_id TEXT NOT NULL, delivery_id TEXT NOT NULL,
+      search_id TEXT NOT NULL DEFAULT '', link_basis TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (use_id, delivery_id));
+    CREATE INDEX IF NOT EXISTS idx_use_links_delivery ON use_retrieval_links(delivery_id);
+    CREATE TABLE IF NOT EXISTS task_evidence(
+      evidence_id TEXT PRIMARY KEY, task_outcome_id TEXT NOT NULL DEFAULT '',
+      task_run_id TEXT NOT NULL DEFAULT '', use_id TEXT NOT NULL DEFAULT '',
+      memory_id TEXT NOT NULL DEFAULT '', content_revision TEXT NOT NULL DEFAULT '',
+      kind TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '',
+      result TEXT NOT NULL DEFAULT '', artifact_hash TEXT NOT NULL DEFAULT '',
+      locator TEXT NOT NULL DEFAULT '', observed_at TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS idx_task_evidence_use ON task_evidence(use_id);
+    CREATE INDEX IF NOT EXISTS idx_task_evidence_outcome ON task_evidence(task_outcome_id);
+    """),
+    # v26: P3 后台 supervisor 运行账本（本机账本，不进知识 Git）。
+    # v25 预留给 P0 证据修复分支，避免两批并行开发时版本号冲突；
+    # 迁移框架不要求版本号连续，v25 缺失不影响 v26 执行。
+    # automation_lease：supervisor 单例租约（singleton 行 + fencing）；
+    # automation_schedule：按 kind 的下次运行时间与成功水位；
+    # capture_gaps：采集触顶（BACKLOG_FULL）时留下的可补采游标，禁止静默丢弃。
+    (26, """
+    CREATE TABLE IF NOT EXISTS automation_lease(
+      singleton TEXT PRIMARY KEY,
+      owner TEXT NOT NULL DEFAULT '',
+      lease_until TEXT NOT NULL DEFAULT '',
+      fencing_token INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS automation_schedule(
+      task_key TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      next_run_at TEXT NOT NULL DEFAULT '',
+      last_success_at TEXT,
+      last_error TEXT NOT NULL DEFAULT '',
+      config_fingerprint TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS capture_gaps(
+      gap_id TEXT PRIMARY KEY,
+      scope TEXT NOT NULL DEFAULT '',
+      next_cursor TEXT NOT NULL DEFAULT '',
+      note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_automation_schedule_next ON automation_schedule(next_run_at);
+    """),
+    # v27: 项目识别绑定（P4）。号段说明：v25（P0）、v26（P3）分别为未合入
+    # 分支预留，P4 为避让取 v27；迁移框架按版本号校验、不要求连续，
+    # 本表与 P0/P3 的表无依赖，任何合入顺序均可应用。
+    # project_path 为规范化本地路径（主键）；confirmed=1 才是归属结论，
+    # confirmed=0 仅为后台补充的候选元数据，不产生归属。
+    (27, """
+    CREATE TABLE IF NOT EXISTS project_bindings(
+      project_path TEXT PRIMARY KEY, scope TEXT NOT NULL DEFAULT '',
+      git_toplevel TEXT, git_remote TEXT,
+      source TEXT NOT NULL DEFAULT '', confirmed INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_project_bindings_identity
+      ON project_bindings(git_toplevel, git_remote);
+    """),
 
 ]
 

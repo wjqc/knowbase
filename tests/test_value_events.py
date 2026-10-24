@@ -165,7 +165,11 @@ def test_outbox_failure_rolls_back_business_receipt(memory_repo, monkeypatch):
     monkeypatch.setattr(voutbox, "append", crash_after_insert)
     with pytest.raises(RuntimeError):
         adopt(memory_repo, card, event_id="use-crash")
-    assert outbox_rows(memory_repo) == []
+    # 崩溃回滚的是本次回执事务：先前 context 递送已提交的 knowledge.delivered 事件保留，
+    # 但不得多出 knowledge.used 事件，也不得落下 knowledge_uses 行。
+    rows = outbox_rows(memory_repo)
+    assert [r["event_type"] for r in rows] == ["knowledge.delivered"]
+    assert rows[0]["source_key"].startswith("delivery:DEL-")
     conn = index.connect(memory_repo)
     assert conn.execute("SELECT COUNT(*) FROM knowledge_uses").fetchone()[0] == 0
     conn.close()

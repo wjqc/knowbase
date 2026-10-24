@@ -241,6 +241,16 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
                 "updated_at=excluded.updated_at",
                 (task_outcome_id, outcome_task, "", task_result, verification_source,
                  use[0] if use else "", use[1] if use else "", use_id, mid, stamp, stamp))
+            # P0：任务结果证据与账本同事务落 task_evidence（脱敏结果与
+            # 验证来源，不写正文或密钥）。证据 id 由任务结果键稳定派生，
+            # 重放不重复记；无任务结果的反馈不产生任务证据。
+            conn.execute(
+                "INSERT OR IGNORE INTO task_evidence(evidence_id,task_outcome_id,task_run_id,"
+                "use_id,memory_id,content_revision,kind,source,result,artifact_hash,locator,"
+                "observed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("EV-" + materials.digest([task_outcome_id, use_id, mid, current])[:24],
+                 task_outcome_id, "", use_id, mid, current, "task_outcome",
+                 verification_source, task_result, "", task_outcome_id, stamp))
             from .value.events import record as _record_value
             _record_value(conn,
                 "task.completed" if task_result == "completed" else "task.abandoned",

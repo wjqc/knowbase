@@ -5,7 +5,7 @@ import re
 import time
 from datetime import datetime, timezone
 
-from . import config, index, materials, store
+from . import config, delivery, index, materials, store
 from .locking import RepoLock, LockTimeout
 
 STAGES = {"task_plan", "subtask_start", "new_failure", "decision", "verified_result",
@@ -147,6 +147,7 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                 from .retrieval_state import revision
                 retrieval_policy={**retrieval_policy,"semantic_revision":revision(conn)}
             seen, found = set(), []
+            hit_search = {}
             deferred_sync = False
             performed = 0
             limit = max(1, min(20, int(options["max_queries_per_event"])))
@@ -193,7 +194,9 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                         origin="hook_inflight" if automatic else "mcp_context", diagnostics=diagnostics,
                         deadline=started+options["fast_path_timeout_ms"]/1000)
                     diagnostics.update(context_event_id=event_id,session_id=session_id,task_id=task_id or session_id)
-                    index.record_search(conn, search_query, scope, hits, tool="inflight_search", retrieval=diagnostics)
+                    search_id = index.record_search(conn, search_query, scope, hits, tool="inflight_search", retrieval=diagnostics)
+                    for hit in hits:
+                        hit_search.setdefault(hit["id"], search_id)
                     result["retrieval_queries"].append({"query_hash":materials.digest(search_query),**diagnostics})
                     result["retrieval"]=diagnostics
                     performed += 1
@@ -226,6 +229,33 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                 if unresolved:
                     deferred.append({**topic, "status": "deferred", "remaining_queries": unresolved})
             result["candidates"] = found
+            # P0：只有最终过滤后的候选才是递送；search 命中只是候选。
+            # 缓存命中的查询在本事件不产生新候选，故不产生新递送；原递送
+            # 仍是归因来源。重递送缓存候选时须另写新 delivery 并填
+            # source_delivery_id（见 delivery.record_delivery）。
+            result["delivery_ids"] = []
+            events_enabled = cfg.get("value", {}).get("events_enabled")
+            for rank, candidate in enumerate(found, 1):
+                search_id = hit_search.get(candidate["id"], "")
+                if not search_id:
+                    continue
+                delivery_id = delivery.record_delivery(
+                    conn, search_id=search_id, host_profile=host, session_id=session_id,
+                    context_event_id=event_id, task_id=result["task_id"],
+                    task_revision=task_revision, scope=scope,
+                    memory_id=candidate["id"], content_revision=candidate["content_revision"],
+                    rank=rank)
+                result["delivery_ids"].append(delivery_id)
+                if events_enabled:
+                    from .value import events as _ve
+                    _ve.record(conn, "knowledge.delivered",
+                               {"delivery_id": delivery_id, "memory_id": candidate["id"],
+                                "content_revision": candidate["content_revision"],
+                                "task_id": result["task_id"], "search_id": search_id,
+                                "context_event_id": event_id, "scope": scope, "rank": rank},
+                               source_key=f"delivery:{delivery_id}", host=host,
+                               session_id=session_id, task_id=result["task_id"],
+                               task_revision=task_revision)
             result["next_topics"] = deferred
             result["budget_used"] = {"queries": performed, "tokens_estimated": (budget_chars - remaining + 1) // 2}
             # 覆盖诊断：本任务主题/查询的已完成与未完成量；未完成项同时列在 next_topics。

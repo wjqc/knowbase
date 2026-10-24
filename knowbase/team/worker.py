@@ -36,7 +36,8 @@ def _execute(args, *, required=True):
     return result
 
 
-def windows_xml(python, config_path, interval, *, user=None):
+def windows_xml(python, config_path, interval, *, user=None, argv=None,
+                  description="knowbase local team statistics collector"):
     """Native Task Scheduler XML; no shell, embedded credentials, or extra runtime."""
     ET.register_namespace("", NS)
     def add(parent, name, text=None, **attrs):
@@ -45,7 +46,7 @@ def windows_xml(python, config_path, interval, *, user=None):
         return node
     task=ET.Element("{"+NS+"}Task",{"version":"1.3"})
     registration=add(task,"RegistrationInfo")
-    add(registration,"Description","knowbase local team statistics collector")
+    add(registration,"Description",description)
     triggers=add(task,"Triggers")
     periodic=add(triggers,"TimeTrigger")
     add(periodic,"StartBoundary",(datetime.now().astimezone()+timedelta(seconds=interval)).replace(microsecond=0).isoformat())
@@ -67,7 +68,7 @@ def windows_xml(python, config_path, interval, *, user=None):
     # Task XML has no environment block: set the explicit config before importing knowbase.
     loader="import os,runpy;os.environ['KNOWBASE_CONFIG']="+repr(str(config_path))+";runpy.run_module('knowbase',run_name='__main__',alter_sys=True)"
     add(action,"Command",str(python))
-    add(action,"Arguments",subprocess.list2cmdline(["-I","-c",loader,"team","sync"]))
+    add(action,"Arguments",subprocess.list2cmdline(["-I","-c",loader]+(argv or ["team","sync"])))
     return ET.tostring(task,encoding="utf-16",xml_declaration=True)
 
 
@@ -87,26 +88,29 @@ def _restore(values):
         else:_atomic(path,raw)
 
 
-def _windows_snapshot(python):
+def _windows_snapshot(python, task_name=WINDOWS_TASK,
+                      description="knowbase local team statistics collector"):
     """Do not overwrite an unknown task; capture the registered task, not a stale file."""
     listed=_execute(["schtasks","/Query","/FO","CSV","/NH"])
     raw=getattr(listed,"stdout",b"") or b""
     text=raw.decode("utf-8-sig",errors="replace") if isinstance(raw,bytes) else raw
-    present=any(row and row[0].strip().lstrip("\\").casefold()==WINDOWS_TASK.casefold() for row in csv.reader(io.StringIO(text)))
+    present=any(row and row[0].strip().lstrip("\\").casefold()==task_name.casefold() for row in csv.reader(io.StringIO(text)))
     if not present:return None
-    queried=_execute(["schtasks","/Query","/TN",WINDOWS_TASK,"/XML"])
+    queried=_execute(["schtasks","/Query","/TN",task_name,"/XML"])
     raw=getattr(queried,"stdout",b"") or b""
     try:task=ET.fromstring(raw)
     except (ValueError,ET.ParseError):raise RuntimeError("existing scheduler task cannot be verified") from None
     ns={"t":NS}
-    command=task.find(".//t:Exec/t:Command",ns);description=task.find("t:RegistrationInfo/t:Description",ns)
-    if (command is None or not isinstance(command.text,str) or command.text.casefold()!=str(python).casefold() or description is None or
-            description.text!="knowbase local team statistics collector"):
-        raise RuntimeError("existing task is not an owned knowbase collector; configuration preserved")
+    command=task.find(".//t:Exec/t:Command",ns);description_node=task.find("t:RegistrationInfo/t:Description",ns)
+    if (command is None or not isinstance(command.text,str) or command.text.casefold()!=str(python).casefold() or description_node is None or
+            description_node.text!=description):
+        raise RuntimeError("existing task is not an owned knowbase task; configuration preserved")
     return ET.tostring(task,encoding="utf-16",xml_declaration=True)
 
 
-def install(*, remove=False):
+def install(*, remove=False, label=LABEL, task_name=WINDOWS_TASK, argv=None,
+            description="knowbase local team statistics collector",
+            descriptor_name="worker-task.xml"):
     cfg=config.load_config();python=fixed_python()
     if not python.exists():raise ValueError("fixed knowbase runtime must be installed first")
     from .service import root_path
@@ -114,12 +118,12 @@ def install(*, remove=False):
     interval=max(900,int(cfg["team"].get("interval_seconds",900)))
     if interval>86400:raise ValueError("worker interval must be between 900 and 86400 seconds")
     if sys.platform=="darwin":
-        path=Path.home()/f"Library/LaunchAgents/{LABEL}.plist";target=f"gui/{os.getuid()}"
+        path=Path.home()/f"Library/LaunchAgents/{label}.plist";target=f"gui/{os.getuid()}"
         old=_backup(root,[path])
-        _execute(["launchctl","bootout",f"{target}/{LABEL}"],required=False)
+        _execute(["launchctl","bootout",f"{target}/{label}"],required=False)
         if remove:
             path.unlink(missing_ok=True);return {"worker":"removed","platform":"launchagent"}
-        value={"Label":LABEL,"ProgramArguments":[str(python),"-I","-m","knowbase","team","sync"],
+        value={"Label":label,"ProgramArguments":[str(python),"-I","-m","knowbase"]+(argv or ["team","sync"]),
                "StartInterval":interval,"RunAtLoad":True,
                "EnvironmentVariables":{"KNOWBASE_CONFIG":str(config.CONFIG_PATH.resolve())},
                "StandardOutPath":str(root/"worker.log"),"StandardErrorPath":str(root/"worker-error.log")}
@@ -127,13 +131,13 @@ def install(*, remove=False):
             _atomic(path,plistlib.dumps(value))
             _execute(["launchctl","bootstrap",target,str(path)])
         except (OSError,RuntimeError):
-            _execute(["launchctl","bootout",f"{target}/{LABEL}"],required=False)
+            _execute(["launchctl","bootout",f"{target}/{label}"],required=False)
             _restore(old)
             if old[path] is not None:_execute(["launchctl","bootstrap",target,str(path)],required=False)
             raise RuntimeError("LaunchAgent install failed; previous configuration restored") from None
         return {"worker":"installed","platform":"launchagent","interval_seconds":interval,"path":str(path)}
     if sys.platform.startswith("linux"):
-        directory=Path.home()/".config/systemd/user";name="knowbase-team-stats"
+        directory=Path.home()/".config/systemd/user";name=task_name
         files=[directory/f"{name}.service",directory/f"{name}.timer"]
         old=_backup(root,files)
         if remove:
@@ -142,7 +146,7 @@ def install(*, remove=False):
             _execute(["systemctl","--user","daemon-reload"])
             return {"worker":"removed","platform":"systemd-user"}
         quote=lambda value:json.dumps(str(value).replace("%","%%"))
-        command=" ".join(quote(arg) for arg in [python,"-I","-m","knowbase","team","sync"])
+        command=" ".join(quote(arg) for arg in [python,"-I","-m","knowbase"]+(argv or ["team","sync"]))
         env=quote("KNOWBASE_CONFIG="+str(config.CONFIG_PATH.resolve()))
         try:
             _atomic(files[0],f"[Service]\nType=oneshot\nEnvironment={env}\nExecStart={command}\nTimeoutStartSec=300\n".encode())
@@ -156,23 +160,23 @@ def install(*, remove=False):
             raise RuntimeError("systemd install failed; previous configuration restored") from None
         return {"worker":"installed","platform":"systemd-user","interval_seconds":interval}
     if sys.platform=="win32":
-        path=root/"worker-task.xml";old=_backup(root,[path])
-        registered=_windows_snapshot(python)
+        path=root/descriptor_name;old=_backup(root,[path])
+        registered=_windows_snapshot(python,task_name,description)
         if remove:
-            if registered is not None:_execute(["schtasks","/Delete","/TN",WINDOWS_TASK,"/F"])
+            if registered is not None:_execute(["schtasks","/Delete","/TN",task_name,"/F"])
             path.unlink(missing_ok=True);return {"worker":"removed","platform":"task-scheduler"}
         try:
-            _atomic(path,windows_xml(python,config.CONFIG_PATH.resolve(),interval))
-            _execute(["schtasks","/Create","/TN",WINDOWS_TASK,"/XML",str(path),"/F"])
-            _execute(["schtasks","/Query","/TN",WINDOWS_TASK])
-            _execute(["schtasks","/Run","/TN",WINDOWS_TASK])
+            _atomic(path,windows_xml(python,config.CONFIG_PATH.resolve(),interval,argv=argv,description=description))
+            _execute(["schtasks","/Create","/TN",task_name,"/XML",str(path),"/F"])
+            _execute(["schtasks","/Query","/TN",task_name])
+            _execute(["schtasks","/Run","/TN",task_name])
         except (OSError,RuntimeError):
             _restore(old)
             if registered is not None:
                 restored=root/"worker-backups"/uuid.uuid4().hex/"registered-task.xml"
                 _atomic(restored,registered)
-                _execute(["schtasks","/Create","/TN",WINDOWS_TASK,"/XML",str(restored),"/F"],required=False)
-            else:_execute(["schtasks","/Delete","/TN",WINDOWS_TASK,"/F"],required=False)
+                _execute(["schtasks","/Create","/TN",task_name,"/XML",str(restored),"/F"],required=False)
+            else:_execute(["schtasks","/Delete","/TN",task_name,"/F"],required=False)
             raise RuntimeError("Task Scheduler install failed; previous configuration restored") from None
         return {"worker":"installed","platform":"task-scheduler","interval_seconds":interval,"path":str(path),"user_session_required":True}
     raise ValueError("unsupported scheduler platform")

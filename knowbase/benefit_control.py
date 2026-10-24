@@ -7,6 +7,18 @@ runner), every arm's figures are validated finite and non-negative,
 and net_token_savings is always the recomputed difference of the two
 arms, never None and never a placeholder. A report whose digest does
 not verify, or whose pairs do not recompute, fails acceptance.
+
+Caller protocol obligations (P0, §4.3 — the report records them, it
+cannot prove them): both arms run the same model/version, tools, task
+budget and result-quality bar; each arm uses fresh sessions; run order
+alternates across tasks to cancel order effects; cross-arm memory and
+cache pollution is prevented; tasks with real side effects run against
+isolated copies, never twice against the real business target.
+Background costs (distillation, validation, sync handling) belong in
+the report's background totals with their amortization basis, not
+silently folded into pair figures; when the supplier bill is
+unavailable, actual_cost is null, never 0 or an estimate dressed as
+a measurement. Negative net savings are reported as-is.
 """
 
 import hashlib
@@ -81,14 +93,39 @@ def _validate_arm(arm, task_id: str, arm_name: str) -> dict:
     return out
 
 
-def run_control(tasks: list[dict], executor) -> dict:
+def run_control(tasks: list[dict], executor, *, metadata=None, background=None) -> dict:
     """Run both arms per task and account the paired difference.
 
     executor(task, use_library: bool) -> {"input_tokens", "output_tokens",
     "seconds"}. Totals count input+output tokens as reported by the
     executor; net_token_savings = without_total - with_total (negative
     is honest: the library cost more than it saved on that set).
+
+    metadata (optional dict, stored verbatim, never digested): model /
+    model_version / tool / task_budget / quality_standard / protocol
+    notes the caller used. background (optional dict): background
+    processing costs with keys tokens, seconds and actual_cost
+    (actual_cost None when the supplier bill is unavailable).
     """
+    if metadata is not None and not isinstance(metadata, dict):
+        raise ValueError("metadata must be a dict")
+    if background is not None and not isinstance(background, dict):
+        raise ValueError("background must be a dict")
+    bg_tokens = bg_seconds = None
+    bg_cost = None
+    if background:
+        for key in ("tokens", "seconds"):
+            value = background.get(key)
+            if value is not None and not _is_number(value):
+                raise ValueError(f"background {key} must be a finite number >= 0")
+        if background.get("tokens") is not None:
+            bg_tokens = background["tokens"]
+        if background.get("seconds") is not None:
+            bg_seconds = background["seconds"]
+        cost = background.get("actual_cost")
+        if cost is not None and not _is_number(cost):
+            raise ValueError("background actual_cost must be null or a finite number >= 0")
+        bg_cost = cost
     pairs = []
     with_tokens = without_tokens = 0
     with_seconds = without_seconds = 0.0
@@ -111,7 +148,15 @@ def run_control(tasks: list[dict], executor) -> dict:
               "net_token_savings": without_tokens - with_tokens,
               "with_seconds": with_seconds, "without_seconds": without_seconds,
               "net_seconds": without_seconds - with_seconds}
+    if background:
+        if bg_tokens is not None:
+            totals["background_tokens"] = bg_tokens
+        if bg_seconds is not None:
+            totals["background_seconds"] = bg_seconds
+        totals["actual_cost"] = bg_cost
     report = {"schema": SCHEMA, "totals": totals, "pairs": pairs}
+    if metadata:
+        report["metadata"] = metadata
     report["digest"] = _digest({"pairs": pairs, "totals": totals})
     return report
 

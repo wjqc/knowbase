@@ -51,7 +51,14 @@ def used_payload(mid, rev, task_id, state="adopted"):
 
 def completed_payload(task_id):
     return {"task_id": task_id, "task_outcome_id": f"out-{task_id}",
-            "result": "completed", "verification_source": "agent_report"}
+            "result": "completed", "verification_source": "agent_report",
+            "use_id": f"use-{task_id}"}
+
+
+def delivered_payload(mid, rev, task_id):
+    return {"delivery_id": f"del-{task_id}", "memory_id": mid, "content_revision": rev,
+            "task_id": task_id, "search_id": f"search-{task_id}",
+            "context_event_id": "ctx-1", "scope": "global"}
 
 
 def created_payload(mid, rev):
@@ -160,6 +167,8 @@ def test_confirm_member_is_audited_correction(tmp_path):
 # ---------------------------------------------------------------- 3-B helpers
 
 def full_chain_session(agg_conn, inst, binding, task_id, session, mid):
+    agg_insert(agg_conn, event_type="knowledge.delivered", inst=inst, binding=binding,
+               task_id=task_id, session=session, payload=delivered_payload(mid, "r1", task_id))
     agg_insert(agg_conn, event_type="knowledge.used", inst=inst, binding=binding,
                task_id=task_id, session=session, payload=used_payload(mid, "r1", task_id))
     agg_insert(agg_conn, event_type="task.completed", inst=inst, binding=binding,
@@ -211,7 +220,7 @@ def test_cross_member_chain_pass_and_star_fail(tmp_path):
     agg = aggregate.connect(tmp_path / "agg.db")
     cross_setup(agg, chain=True)
     result = check_cross_member(agg, TEAM)
-    assert result["passed"] is True and result["details"]["path"] == ["INST-a", "INST-b", "INST-c"]
+    assert result["passed"] is True and result["details"]["path"] == ["binding:MBR-a", "binding:MBR-b", "binding:MBR-c"]
     agg.close()
 
     agg2 = aggregate.connect(tmp_path / "agg2.db")

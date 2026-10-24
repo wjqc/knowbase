@@ -51,6 +51,19 @@ def evidence(conn, mid, revision, use, task_key, outcome, task_result):
     return agg
 
 
+def activation_policy() -> dict:
+    """P4 显式激活策略：团队允许自动激活的类型/范围与策略版本。
+
+    allowed_types/allowed_scopes 为 None 表示不限制（沿用已有授权范围，
+    即 decide() 原有的 promotable 门）；显式设置后才收紧。策略只 gate
+    晋升/激活，不影响证据收集与候选存储（反馈仍正常落盘）。
+    """
+    raw = config.load_config().get("evolution", {}).get("activation_policy") or {}
+    return {"allowed_types": raw.get("allowed_types"),
+            "allowed_scopes": raw.get("allowed_scopes"),
+            "policy_revision": str(raw.get("policy_revision", "1"))}
+
+
 def decide(conn, mid, revision, meta, use, task_key, outcome, task_result, *, staged=False):
     # 延迟导入：writer→commit_adapter 链在模块加载期有循环风险；decide 只在运行时调用。
     # auto_activate_bizrules 现为全类型统一自动激活出口的总开关（历史名称保留）。
@@ -74,4 +87,12 @@ def decide(conn, mid, revision, meta, use, task_key, outcome, task_result, *, st
     counts["promote"] = bool(promotable and outcome == "helpful" and not counts["blocked"]
         and counts["helpful_tasks"] >= max(2, int(policy.get("min_helpful_tasks", 3)))
         and counts["sessions"] >= max(2, int(policy.get("min_sessions", 2))))
+    # P4 激活策略门：未授权类型/范围不自动激活，但证据已在反馈路径落盘、
+    # 候选仍可存储——策略只 gate 晋升，不扩大也不切断证据收集。
+    if counts["promote"]:
+        ap = activation_policy()
+        if ap["allowed_types"] is not None and meta.get("type") not in ap["allowed_types"]:
+            counts["promote"] = False
+        elif ap["allowed_scopes"] is not None and meta.get("scope") not in ap["allowed_scopes"]:
+            counts["promote"] = False
     return counts

@@ -27,7 +27,7 @@ def seed_card(repo):
 
 
 def produce_events(repo):
-    """递送→采纳→反馈，产生 used + feedback 两类事件。"""
+    """递送→采纳→反馈，产生 delivered + used + feedback 三类事件。"""
     from knowbase.server import context_impl, use_impl
     seed_card(repo)
     card = json.loads(context_impl(session_id="s1", event_id="retrieval", scope="orders",
@@ -59,7 +59,7 @@ def test_export_import_receipt_closed_loop(memory_repo, tmp_path):
     produce_events(memory_repo)
     pkg = tmp_path / "pkg.json"
     result = exchange.export_events(memory_repo, pkg)
-    assert not result.get("error") and result["events"] == 2
+    assert not result.get("error") and result["events"] == 3
     package = json.loads(pkg.read_text())
     assert package["source"]["installation_id"].startswith("INST-")
     assert package["source"]["member_evidence"] in ("", "none")  # 未确认成员不冒充
@@ -70,18 +70,18 @@ def test_export_import_receipt_closed_loop(memory_repo, tmp_path):
     agg = aggregate.connect(agg_db)
     imported = exchange.import_package(agg, pkg, team_id="team-x",
                                        receipt_out=str(tmp_path / "pkg.receipt.json"))
-    assert imported["counts"] == {"accepted": 2, "duplicate": 0, "conflict": 0, "rejected": 0}
+    assert imported["counts"] == {"accepted": 3, "duplicate": 0, "conflict": 0, "rejected": 0}
     # 重复导入不累计
     again = exchange.import_package(agg, pkg, team_id="team-x")
-    assert again["counts"]["duplicate"] == 2 and again["counts"]["accepted"] == 0
+    assert again["counts"]["duplicate"] == 3 and again["counts"]["accepted"] == 0
     n = agg.execute("SELECT COUNT(*) FROM agg_events WHERE team_id='team-x'").fetchone()[0]
-    assert n == 2
+    assert n == 3
     agg.close()
 
     # 源端核对回执 → acknowledged；伪回执（错误哈希）不确认
     receipt = json.loads((tmp_path / "pkg.receipt.json").read_text())
     acked = exchange.acknowledge_receipt(memory_repo, receipt)
-    assert acked["acknowledged"] == 2 and not acked["mismatched"]
+    assert acked["acknowledged"] == 3 and not acked["mismatched"]
     assert set(outbox_states(memory_repo).values()) == {"acknowledged"}
     tampered = json.loads(json.dumps(receipt))
     tampered["events"][0]["payload_hash"] = "deadbeef"
@@ -102,7 +102,7 @@ def test_import_rejects_bad_schema_conflicts_and_personal_db(memory_repo, tmp_pa
     bad_path.write_text(json.dumps(bad_schema))
     assert exchange.import_package(agg, bad_path)["error"] == "UNSUPPORTED_PACKAGE_SCHEMA"
     # 同 event_id 异内容 → conflict 隔离：先导入原包，再导被改包
-    assert exchange.import_package(agg, pkg, team_id="t")["counts"]["accepted"] == 2
+    assert exchange.import_package(agg, pkg, team_id="t")["counts"]["accepted"] == 3
     conflict = json.loads(json.dumps(package))
     conflict["events"][0]["event"]["occurred_at"] = "1999-01-01T00:00:00+00:00"
     conflict["events"][0]["payload_hash"] = exchange.value_events.payload_hash(
@@ -110,10 +110,10 @@ def test_import_rejects_bad_schema_conflicts_and_personal_db(memory_repo, tmp_pa
     conflict_path = tmp_path / "conflict.json"
     conflict_path.write_text(json.dumps(conflict))
     result = exchange.import_package(agg, conflict_path, team_id="t")
-    assert result["counts"]["conflict"] == 1 and result["counts"]["duplicate"] == 1
+    assert result["counts"]["conflict"] == 1 and result["counts"]["duplicate"] == 2
     assert result["counts"]["accepted"] == 0
     stored = agg.execute("SELECT COUNT(*) FROM agg_events WHERE team_id='t' AND state='accepted'").fetchone()[0]
-    assert stored == 2  # 冲突不覆盖已存事件
+    assert stored == 3  # 冲突不覆盖已存事件
     # 哈希不匹配（篡改 payload 不重算哈希）→ rejected
     tampered = json.loads(json.dumps(package))
     tampered["events"][0]["event"]["occurred_at"] = "2000-01-01T00:00:00+00:00"
@@ -139,7 +139,7 @@ def test_same_person_multi_installation_counts_once(memory_repo, tmp_path):
     exchange.export_events(memory_repo, pkg)
     package = json.loads(pkg.read_text())
     agg = aggregate.connect(tmp_path / "agg.db")
-    assert exchange.import_package(agg, pkg, team_id="t")["counts"]["accepted"] == 2
+    assert exchange.import_package(agg, pkg, team_id="t")["counts"]["accepted"] == 3
     # 第二台安装（同成员绑定、不同 installation/event id）导出的包
     second = json.loads(json.dumps(package))
     second["package_id"] = "PKG-second"
@@ -151,7 +151,7 @@ def test_same_person_multi_installation_counts_once(memory_repo, tmp_path):
         item["payload_hash"] = exchange.value_events.payload_hash(item["event"])
     second_path = tmp_path / "pkg2.json"
     second_path.write_text(json.dumps(second))
-    assert exchange.import_package(agg, second_path, team_id="t")["counts"]["accepted"] == 2
+    assert exchange.import_package(agg, second_path, team_id="t")["counts"]["accepted"] == 3
     # 同一人两台安装：observed=1（按 member_binding 归并），有效消费不重复
     snap = aggregate.snapshot(agg, team_id="t")
     assert snap["members"]["observed"] == 1
@@ -216,7 +216,7 @@ def test_cli_value_roundtrip(memory_repo, tmp_path, monkeypatch, capsys):
                  "--agg-db", str(agg_db), "--team-id", "team-1"]) == 0
     snap = json.loads(snap_path.read_text())
     assert snap["schema"] == "knowbase.value.snapshot.v1"
-    assert snap["counts"]["events_total"] == 2
+    assert snap["counts"]["events_total"] == 3
     assert set(outbox_states(memory_repo).values()) == {"acknowledged"}
 
 
@@ -236,7 +236,7 @@ def test_import_rejects_extra_payload_fields_with_recomputed_hash(memory_repo, t
     poisoned_path.write_text(json.dumps(poisoned))
     agg = aggregate.connect(tmp_path / "agg.db")
     result = exchange.import_package(agg, poisoned_path, team_id="t")
-    assert result["counts"]["rejected"] == 1 and result["counts"]["accepted"] == 1
+    assert result["counts"]["rejected"] == 1 and result["counts"]["accepted"] == 2
     leaked = agg.execute("SELECT COUNT(*) FROM agg_events WHERE team_id='t' "
                          "AND payload_json LIKE '%PRIVATE_QUERY_MEMBER_9C2A%'").fetchone()[0]
     assert leaked == 0

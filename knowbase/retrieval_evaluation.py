@@ -29,13 +29,16 @@ def validate_labels(rows):
     for r in rows:
         label=r.get('labels',{})
         positive=bool(label.get('relevant_ids'))
-        # Irrelevant execution-derived samples legitimately carry no relevant
-        # ids and are not unanswerable; every other row must keep the two
-        # fields inconsistent (a relevant answer exists iff the query is
-        # answerable). Human rows keep the old rule (no sample_class).
+        # Execution-derived samples with no relevant ids are not
+        # unanswerable by default: explicit 'irrelevant' judgments,
+        # per-card 'negative' failures and 'unknown' (no adoption) all
+        # legitimately carry relevant_ids=[] with unanswerable=False.
+        # Every other row must keep the two fields inconsistent (a
+        # relevant answer exists iff the query is answerable). Human
+        # rows keep the old rule (no sample_class).
         if (label.get('status') not in {'reviewed','adjudicated','execution_derived'} or not label.get('labeler') or
                 type(label.get('unanswerable')) is not bool or
-                (positive==label['unanswerable'] and label.get('sample_class')!='irrelevant') or
+                (positive==label['unanswerable'] and label.get('sample_class') not in {'irrelevant','negative','unknown'}) or
                 not label.get('corpus_revision')):
             problems.append(r['id'])
     return problems
@@ -160,6 +163,7 @@ def freeze_report(comparison, *, dataset_sha256, vectors_sha256, provider_fp, sp
             'derived_positive': derived_stats.get('positive', 0),
             'derived_negative': derived_stats.get('negative', 0),
             'derived_irrelevant': derived_stats.get('irrelevant', 0),
+            'derived_unknown': derived_stats.get('unknown', 0),
             'excluded_for_privacy': derived_stats.get('excluded_for_privacy', 0),
             'confidence_interval': {'metric': 'Recall@5', 'delta': paired.get('delta'),
                                     'CI95': ci, 'positive_n': paired.get('positive_n'),

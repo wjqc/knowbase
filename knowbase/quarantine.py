@@ -153,9 +153,14 @@ def _read_file(path: str) -> str | None:
 
 
 def _strength(conn, card_id: str, revision: str, last_verified: str) -> tuple:
-    """证据强度：(helpful 任务数, last_verified)。修订号为空时强度为零。"""
+    """证据强度：((helpful 任务数, last_verified), 负面证据任务数)。修订号为空时强度为零。
+
+    注意：空修订分支必须返回与正常分支相同的 ((int, str), int) 结构；
+    旧代码返回 (0, "") 会使调用方解包为 strength=0、neg=""，随后
+    `neg > 0` 抛 TypeError——无修订号的冲突版本复验必崩。
+    """
     if not revision:
-        return (0, "")
+        return (0, ""), 0
     from .evolution import evidence_for_revision
     try:
         ev = evidence_for_revision(conn, card_id, revision)

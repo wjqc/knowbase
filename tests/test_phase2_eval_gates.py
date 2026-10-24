@@ -16,7 +16,7 @@ import pytest
 
 from knowbase import config, execution_eval, hooks, index, retrieval_metrics
 from knowbase import semantic_index as si
-from knowbase.embedding_provider import digest
+from knowbase.embedding_provider import ProviderError, digest
 from knowbase.retrieval_evaluation import export_cache, freeze_report, run, validate_labels
 from test_local_retrieval_upgrade import seed
 
@@ -63,15 +63,21 @@ def configure(gateway):
 
 def seed_use_evidence(repo, mid, query, *, event_id=None, outcome="completed",
                       feedback="helpful", task_key="task-1", state="adopted"):
-    """One execution chain: search event -> adopted use -> task outcome -> feedback."""
+    """One execution chain: search event -> delivery -> linked use -> task outcome -> feedback."""
+    from knowbase import delivery
     conn = index.connect(repo)
     rev = conn.execute("SELECT content_revision FROM entity_heads WHERE entity_id = ?", (mid,)).fetchone()[0]
     hit = {"id": mid, "title": "seeded", "score": 1.0, "confidence": "verified", "status": "active"}
     search_id = event_id or index.record_search(conn, query, "global", [hit])
     use_id = "use-" + search_id
     conn.execute("INSERT INTO knowledge_uses VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 (use_id, "pytest", "sess", search_id, "hash", "", "task-1", "rev-1",
+                 (use_id, "pytest", "sess", search_id, "hash", "ctx-" + search_id, "task-1", "rev-1",
                   "global", mid, rev, state, 1, "2026-01-01T00:00:00"))
+    did = delivery.record_delivery(
+        conn, search_id=search_id, host_profile="pytest", session_id="sess",
+        context_event_id="ctx-" + search_id, task_id="task-1", task_revision="rev-1",
+        scope="global", memory_id=mid, content_revision=rev, rank=1)
+    delivery.record_use_link(conn, use_id=use_id, delivery_id=did, search_id=search_id)
     outcome_id = "out-" + search_id
     conn.execute("INSERT INTO task_outcomes VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                  (outcome_id, "task-1", "run-1", outcome, "agent_report",
@@ -119,7 +125,7 @@ def seed_search_event(repo, mid, query):
     return sid
 
 
-def test_derivation_positive_negative_irrelevant(memory_repo):
+def test_derivation_positive_negative_unknown(memory_repo):
     mid = seed(memory_repo)
     sid_pos = seed_search_event(memory_repo, mid, "HAR")
     seed_use_evidence(memory_repo, mid, "HAR", event_id=sid_pos, outcome="completed", feedback="helpful", task_key="t-pos")
@@ -136,9 +142,9 @@ def test_derivation_positive_negative_irrelevant(memory_repo):
     assert pos["evidence"]["positive"][0]["task_keys"] == ["t-pos"]
     assert pos["evidence"]["search_id"] == sid_pos and pos["labels"]["corpus_revision"]
     neg = by_id["exec-" + sid_neg]
-    assert neg["labels"]["relevant_ids"] == [] and neg["labels"]["unanswerable"] is True
+    assert neg["labels"]["relevant_ids"] == [] and neg["labels"]["unanswerable"] is False
     assert neg["labels"]["sample_class"] == "negative"
-    assert stats["derived"] == 3 and stats["positive"] == 1 and stats["negative"] == 1 and stats["irrelevant"] == 1
+    assert stats["derived"] == 3 and stats["positive"] == 1 and stats["negative"] == 1 and stats["unknown"] == 1
     assert not validate_labels(rows)
 
 
@@ -168,9 +174,17 @@ def test_validate_labels_irrelevant_needs_sample_class(memory_repo):
     good = [{'id': 'r1', 'labels': {'status': 'execution_derived', 'labeler': 'execution_derived',
                                     'corpus_revision': 'abc', 'relevant_ids': [], 'unanswerable': False,
                                     'sample_class': 'irrelevant'}}]
+    good_neg = [{'id': 'r3', 'labels': {'status': 'execution_derived', 'labeler': 'execution_derived',
+                                        'corpus_revision': 'abc', 'relevant_ids': [], 'unanswerable': False,
+                                        'sample_class': 'negative'}}]
+    good_unk = [{'id': 'r4', 'labels': {'status': 'execution_derived', 'labeler': 'execution_derived',
+                                        'corpus_revision': 'abc', 'relevant_ids': [], 'unanswerable': False,
+                                        'sample_class': 'unknown'}}]
     bad = [{'id': 'r2', 'labels': {'status': 'execution_derived', 'labeler': 'execution_derived',
                                    'corpus_revision': 'abc', 'relevant_ids': [], 'unanswerable': False}}]
     assert validate_labels(good) == []
+    assert validate_labels(good_neg) == []
+    assert validate_labels(good_unk) == []
     assert validate_labels(bad) == ['r2']
 
 
@@ -263,7 +277,7 @@ def test_quality_rejects_below_absolute_recall_floor(memory_repo):
     assert si.quality({**options, 'quality_report': str(p)}, identity) is not None
 
 
-def test_dense_activates_with_zero_human_annotations(memory_repo, gateway, tmp_path, monkeypatch):
+def _dense_setup(memory_repo, gateway, tmp_path, monkeypatch):
     for var in ("CLAUDE_PROJECT_DIR", "ZCODE_PROJECT_DIR"):
         monkeypatch.delenv(var, raising=False)
     mid = seed(memory_repo)
@@ -279,23 +293,69 @@ def test_dense_activates_with_zero_human_annotations(memory_repo, gateway, tmp_p
     conn.close()
     assert stats['derived'] == 65 and stats['positive'] == 60 and stats['negative'] == 5
     assert 'human' not in json.dumps(rows)
-    data = tmp_path / 'derived.jsonl'
-    info = execution_eval.write_dataset(rows, data)
-    cache = tmp_path / 'vectors.json'
-    assert export_cache(memory_repo, data, cache)['state'] == 'cached'
-    comparison = run(memory_repo, data, cache, Path(__file__).resolve().parents[1], dense_min=.5, gate_dense_min=.8)
-    assert comparison['state'] == 'COMPLETED_OFFLINE'
+    return built, rows, stats
+
+
+def _freeze(memory_repo, tmp_path, built, data, cache, comparison, stats):
+    from knowbase.retrieval_evaluation import dataset as read_dataset
     cache_json = json.loads(cache.read_text())
     conn = index.connect(memory_repo)
     g = si.generation(conn, built['generation'])
     conn.close()
-    report = freeze_report(comparison, dataset_sha256=info['sha256'],
-                           vectors_sha256=digest(cache_json['documents']),
-                           provider_fp=g['identity']['provider_fp'], space_id=g['identity']['space_id'],
-                           covered_scopes=['global'], deployment_id='synthetic-test-v1',
-                           dense_min=.5, derived_stats=stats)
-    assert report['verdict'] == 'PASS'
+    return freeze_report(comparison, dataset_sha256=digest(read_dataset(data)),
+                         vectors_sha256=digest(cache_json['documents']),
+                         provider_fp=g['identity']['provider_fp'], space_id=g['identity']['space_id'],
+                         covered_scopes=['global'], deployment_id='synthetic-test-v1',
+                         dense_min=.5, derived_stats=stats)
+
+
+def test_dense_derived_only_report_cannot_activate(memory_repo, gateway, tmp_path, monkeypatch):
+    """P0 语义：单卡失败不再制造 unanswerable；派生-only 数据没有真实拒答证据，
+    rejection 门禁必 FAIL，冻结报告不得用于启用 dense（方案 §4.3 / §9 P0 退出条件：
+    未过禁止用派生标签启用模型）。"""
+    built, rows, stats = _dense_setup(memory_repo, gateway, tmp_path, monkeypatch)
+    data = tmp_path / 'derived.jsonl'
+    execution_eval.write_dataset(rows, data)
+    cache = tmp_path / 'vectors.json'
+    assert export_cache(memory_repo, data, cache)['state'] == 'cached'
+    comparison = run(memory_repo, data, cache, Path(__file__).resolve().parents[1], dense_min=.5, gate_dense_min=.8)
+    assert comparison['state'] == 'COMPLETED_OFFLINE'
+    assert comparison['metrics']['D']['negative_queries'] == 0
+    report = _freeze(memory_repo, tmp_path, built, data, cache, comparison, stats)
+    assert report['verdict'] == 'FAIL' and report['gates']['rejection'] is False
     assert 'human_query_count' not in report and 'reviewer' not in report
+    rp = tmp_path / 'frozen-report.json'; rp.write_text(json.dumps(report))
+    cfg = config.load_config(); cfg['embedding']['quality_report'] = str(rp)
+    config.CONFIG_PATH.write_text(json.dumps(cfg))
+    conn = index.connect(memory_repo)
+    try:
+        with pytest.raises(ProviderError):
+            si.activate(conn, built['generation'])
+        assert si.generation(conn, built['generation'])['state'] == 'ready'
+    finally:
+        conn.close()
+
+
+def test_dense_activates_with_derived_and_gold_rejection_evidence(memory_repo, gateway, tmp_path, monkeypatch):
+    """派生行为样本 + 独立 Gold 拒答证据：rejection 门禁有真实依据时报告 PASS，dense 可激活。
+    Gold 行是独立审核样本（一次性评测标注），不由派生失败补造；含 'unrelated' 的查询在
+    fake provider 下得正交向量、词法亦无匹配，故各臂均正确拒答。"""
+    built, rows, stats = _dense_setup(memory_repo, gateway, tmp_path, monkeypatch)
+    corpus_rev = rows[0]['labels']['corpus_revision']
+    gold = [{'id': f'gold-unanswerable-{i}', 'query': 'unrelated zzzqqq wwwppp', 'scope': 'global',
+             'labels': {'status': 'reviewed', 'labeler': 'gold_audit', 'corpus_revision': corpus_rev,
+                        'relevant_ids': [], 'unanswerable': True},
+             'privacy_review': 'approved'} for i in range(3)]
+    data = tmp_path / 'derived.jsonl'
+    data.write_text(''.join(json.dumps(r) + '\n' for r in rows + gold))
+    cache = tmp_path / 'vectors.json'
+    assert export_cache(memory_repo, data, cache)['state'] == 'cached'
+    comparison = run(memory_repo, data, cache, Path(__file__).resolve().parents[1], dense_min=.5, gate_dense_min=.8)
+    assert comparison['state'] == 'COMPLETED_OFFLINE'
+    assert comparison['metrics']['D']['negative_queries'] == 3
+    assert comparison['metrics']['D']['correct_rejection'] == 1.0
+    report = _freeze(memory_repo, tmp_path, built, data, cache, comparison, stats)
+    assert report['verdict'] == 'PASS' and all(report['gates'].values())
     rp = tmp_path / 'frozen-report.json'; rp.write_text(json.dumps(report))
     cfg = config.load_config(); cfg['embedding']['quality_report'] = str(rp)
     config.CONFIG_PATH.write_text(json.dumps(cfg))

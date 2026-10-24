@@ -22,6 +22,22 @@ KIND_EMBED = "embedding_refresh"
 KIND_CAPTURE = "capture"       # 对话沉淀
 KIND_EXTRACT = "extract"       # 文档导入提炼
 
+# P3 维护任务 kind：与 capture/extract/embedding 明确分派。公开
+# memory_job_claim 只领取 capture/extract，不得让旧客户端误领内部同步任务。
+KIND_MAINT_LEASE = "maint:lease_recovery"
+KIND_MAINT_SYNC = "maint:knowledge_sync"
+KIND_MAINT_EVIDENCE = "maint:evidence_exchange"
+KIND_MAINT_ARCHIVE = "maint:archive_sweep"
+KIND_MAINT_CONFLICT = "maint:conflict_recheck"
+KIND_MAINT_VECTOR = "maint:vector"
+KIND_MAINT_DISTILL = "maint:distillation"
+MAINTENANCE_KINDS = frozenset({
+    KIND_MAINT_LEASE, KIND_MAINT_SYNC, KIND_MAINT_EVIDENCE, KIND_MAINT_ARCHIVE,
+    KIND_MAINT_CONFLICT, KIND_MAINT_VECTOR, KIND_MAINT_DISTILL,
+})
+# 公开 MCP 领取通道只认这两类。
+PUBLIC_CLAIM_KINDS = (KIND_CAPTURE, KIND_EXTRACT)
+
 STATE_QUEUED = "queued"
 STATE_PREPARING = "preparing"
 STATE_AWAITING = "awaiting_agent"
@@ -71,9 +87,45 @@ def _input_hash(payload: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def record_capture_gap(conn, scope: str, cursor: str = "", note: str = "") -> dict:
+    """采集触顶时留下的可补采游标：禁止静默丢弃（P3 §6.1）。
+
+    调用方须在 BACKLOG_FULL 回滚后单独提交本记录；本函数自身提交，
+    失败只返回 error，绝不向调用方抛异常。
+    """
+    try:
+        gap_id = f"GAP-{uuid.uuid4().hex[:12]}"
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        conn.execute(
+            "INSERT INTO capture_gaps(gap_id,scope,next_cursor,note,created_at)"
+            " VALUES(?,?,?,?,?)", (gap_id, scope, cursor, note[:200], now))
+        conn.commit()
+        return {"gap_id": gap_id, "scope": scope}
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return {"error": "gap_record_failed"}
+
+
+def list_capture_gaps(conn, limit: int = 50) -> list[dict]:
+    rows = conn.execute(
+        "SELECT gap_id,scope,next_cursor,note,created_at FROM capture_gaps"
+        " ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+    return [{"gap_id": r[0], "scope": r[1], "next_cursor": r[2],
+             "note": r[3], "created_at": r[4]} for r in rows]
+
+
 def enqueue(conn, kind: str, scope: str, payload: dict, *,
-            idempotency_key: str = "", max_attempts: int = DEFAULT_MAX_ATTEMPTS) -> dict:
-    """同库短事务内检查幂等和背压，再同时持久输入与任务。"""
+            idempotency_key: str = "", max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+            maintenance: bool = False) -> dict:
+    """同库短事务内检查幂等和背压，再同时持久输入与任务。
+
+    maintenance=True 的维护任务绕过待办上限（保留维护容量：capture
+    触顶不得使租约回收/同步饥饿）；普通 capture/extract 触顶时记一条
+    capture_gap（可补采游标），不静默丢弃。
+    """
     from . import config
     from .materials import redact_payload
     payload = redact_payload(payload)
@@ -91,12 +143,14 @@ def enqueue(conn, kind: str, scope: str, payload: dict, *,
                 return {"error": IDEMPOTENCY_CONFLICT, "job_id": existing[0], "created": False}
             return {"job_id": existing[0], "state": existing[1], "created": False,
                     "result": existing[2], "error": existing[3]}
-        limit = max(0, int(config.load_config()["inflight"]["max_pending_jobs"]))
-        pending = conn.execute("SELECT COUNT(*) FROM jobs WHERE state NOT IN "
-                               "('succeeded','no_candidate','needs_review','failed')").fetchone()[0]
-        if pending >= limit:
-            conn.rollback()
-            return {"error": "BACKLOG_FULL", "created": False, "retryable": True}
+        if not maintenance:
+            limit = max(0, int(config.load_config()["inflight"]["max_pending_jobs"]))
+            pending = conn.execute("SELECT COUNT(*) FROM jobs WHERE state NOT IN "
+                                   "('succeeded','no_candidate','needs_review','failed')").fetchone()[0]
+            if pending >= limit:
+                conn.rollback()
+                record_capture_gap(conn, scope, note="backlog_full")
+                return {"error": "BACKLOG_FULL", "created": False, "retryable": True}
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         job_id = f"J-{uuid.uuid4().hex[:12]}"
         raw = json.dumps(payload, ensure_ascii=False)
@@ -157,8 +211,13 @@ def set_awaiting(conn, job_id: str, batch_total: int) -> bool:
 # ---------- 领取 ----------
 
 def claim(conn, job_id: str, host_session_id: str, *,
-          lease_seconds: int = DEFAULT_LEASE_SECONDS) -> dict:
+          lease_seconds: int = DEFAULT_LEASE_SECONDS,
+          kinds: tuple | frozenset | None = None) -> dict:
     """原子领取：CAS 设置 lease，返回批次材料和令牌。
+
+    kinds 不为空时只领取该 kind 集合内的任务；公开 MCP 通道传
+    PUBLIC_CLAIM_KINDS，worker 内部通道传维护 kind 集合。kinds 为空
+    保持旧行为（不限 kind，供既有调用方与测试使用）。
 
     返回 {"batch_id", "kind", "scope", "materials", "lease_token", "expires_at",
     "fencing_token", "cursor"} 或 {"error": NO_WORK / LEASE_EXPIRED}。
@@ -182,6 +241,9 @@ def claim(conn, job_id: str, host_session_id: str, *,
 
     (state, lease_owner, lease_until, fencing, cursor, total, attempt,
      kind, scope, next_run_at) = row
+
+    if kinds is not None and kind not in kinds:
+        return {"error": NO_WORK, "state": state, "kind_not_claimable": kind}
 
     if kind == KIND_EMBED:
         return {"error": NO_WORK}  # Internal index jobs are not agent distillation materials.
@@ -520,8 +582,8 @@ def status(conn, job_id: str) -> dict | None:
 
 
 def list_jobs(conn, scope: str = "", kind: str = "", state: str = "",
-              limit: int = 50) -> list[dict]:
-    """列出任务。"""
+              limit: int = 50, kinds: tuple | frozenset = ()) -> list[dict]:
+    """列出任务。kinds 不为空时只列该 kind 集合（公开领取通道用）。"""
     conds, params = [], []
     if scope:
         conds.append("scope=?")
@@ -529,6 +591,9 @@ def list_jobs(conn, scope: str = "", kind: str = "", state: str = "",
     if kind:
         conds.append("kind=?")
         params.append(kind)
+    if kinds:
+        conds.append(f"kind IN ({','.join('?' * len(kinds))})")
+        params.extend(kinds)
     if state:
         conds.append("state=?")
         params.append(state)

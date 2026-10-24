@@ -124,6 +124,82 @@ def inspect(repo):
             if "sync_state" in tables:
                 row = conn.execute("SELECT status FROM sync_state ORDER BY rowid DESC LIMIT 1").fetchone()
                 add("sync", "pass" if row and row[0] == "ok" else "warn", row[0] if row else "unknown")
+            # P4：项目识别绑定（迁移 v27 的 project_bindings 表）。
+            try:
+                from .scope_binding import list_bindings
+                bindings = list_bindings(conn)
+                confirmed = [b for b in bindings if b["confirmed"]]
+                unconfirmed = [b for b in bindings if not b["confirmed"]]
+                add("scope_bindings", "pass", json.dumps(
+                    {"confirmed": len(confirmed), "unconfirmed_candidates": len(unconfirmed),
+                     "candidates": [{"project_path": b["project_path"], "source": b["source"]}
+                                    for b in unconfirmed[:10]]}, ensure_ascii=False))
+            except Exception as exc:
+                add("scope_bindings", "warn", type(exc).__name__)
+            # P4：治理维护状态（只读快照：应归档/应清理/待恢复/未决冲突）。
+            try:
+                from .maintenance import maintenance_status
+                add("maintenance", "pass", json.dumps(
+                    maintenance_status(repo, conn), ensure_ascii=False))
+            except Exception as exc:
+                add("maintenance", "warn", type(exc).__name__)
+            # P4：证据包待确认（value_outbox 未 ACK 的事件与最长账龄）。
+            try:
+                if "value_outbox" in tables:
+                    rows = conn.execute(
+                        "SELECT state,COUNT(*),MIN(created_at) FROM value_outbox "
+                        "GROUP BY state").fetchall()
+                    by_state = {s: n for s, n, _ in rows}
+                    oldest = min((c for _, _, c in rows if c), default=None)
+                    add("pending_ack", "warn" if by_state.get("pending") or by_state.get("leased") else "pass",
+                        json.dumps({"by_state": by_state, "oldest_created_at": oldest}, ensure_ascii=False))
+                else:
+                    add("pending_ack", "pass", "value_outbox 不存在")
+            except Exception as exc:
+                add("pending_ack", "warn", type(exc).__name__)
+            # P4：证据关联覆盖率（P0 的递送/采用链；P0 未合入时表不存在，降级报告）。
+            try:
+                if {"retrieval_deliveries", "use_retrieval_links", "knowledge_uses"} <= tables:
+                    total = conn.execute("SELECT COUNT(DISTINCT use_id) FROM knowledge_uses").fetchone()[0]
+                    linked = conn.execute("SELECT COUNT(DISTINCT use_id) FROM use_retrieval_links").fetchone()[0]
+                    add("evidence_link_coverage", "pass", json.dumps(
+                        {"uses": total, "linked_uses": linked,
+                         "coverage": (linked / total) if total else None}, ensure_ascii=False))
+                else:
+                    add("evidence_link_coverage", "pass", "P0 递送表不存在（P0 未合入），覆盖率不可用")
+            except Exception as exc:
+                add("evidence_link_coverage", "warn", type(exc).__name__)
+            # P4：同步确认（最新 sync_state 行：远端目标与确认版本）。
+            try:
+                if "sync_state" in tables:
+                    row = conn.execute(
+                        "SELECT remote,local_revision,remote_revision,status,last_push_at "
+                        "FROM sync_state ORDER BY rowid DESC LIMIT 1").fetchone()
+                    if row:
+                        add("sync_confirmed", "pass", json.dumps(
+                            {"remote": row[0], "local_revision": row[1],
+                             "remote_revision": row[2], "status": row[3],
+                             "last_push_at": row[4]}, ensure_ascii=False))
+                    else:
+                        add("sync_confirmed", "pass", "无同步记录")
+                else:
+                    add("sync_confirmed", "pass", "sync_state 不存在")
+            except Exception as exc:
+                add("sync_confirmed", "warn", type(exc).__name__)
+            # P4：worker 租约（P3 的 automation_lease 表；P3 未合入时降级报告；绝不输出 fencing_token）。
+            try:
+                if "automation_lease" in tables:
+                    row = conn.execute(
+                        "SELECT owner,lease_until FROM automation_lease ORDER BY rowid DESC LIMIT 1").fetchone()
+                    if row:
+                        add("worker_lease", "pass", json.dumps(
+                            {"owner": row[0], "lease_until": row[1]}, ensure_ascii=False))
+                    else:
+                        add("worker_lease", "pass", "无租约记录")
+                else:
+                    add("worker_lease", "pass", "automation_lease 不存在（P3 未合入），worker 未安装")
+            except Exception as exc:
+                add("worker_lease", "warn", type(exc).__name__)
     except (sqlite3.Error, OSError, ValueError) as exc:
         add("memory_db", "fail", type(exc).__name__)
     try:
@@ -137,4 +213,38 @@ def inspect(repo):
     from .integration import discover
     for host in discover():
         add("agent:" + host["id"], "pass" if host["configured"] else "warn", json.dumps(host, ensure_ascii=False))
+    # P4：显式激活策略（类型/范围/策略版本与总开关）。
+    try:
+        from .evolution import activation_policy
+        ap = activation_policy()
+        evo = config.load_config().get("evolution", {})
+        add("activation_policy", "pass", json.dumps(
+            {"policy_revision": ap["policy_revision"], "allowed_types": ap["allowed_types"],
+             "allowed_scopes": ap["allowed_scopes"],
+             "master_switch": bool(evo.get("auto_activate_bizrules", True)),
+             "evolution_enabled": bool(evo.get("enabled", True))}, ensure_ascii=False))
+    except Exception as exc:
+        add("activation_policy", "warn", type(exc).__name__)
+    # P4：会话状态（当前 build 已加载的宿主与需重连的旧 build 会话）。
+    try:
+        from .build_identity import build_id
+        from .sessions import sessions_by_agent
+        grouped = sessions_by_agent(build_id())
+        add("session_states", "warn" if grouped["stale"] else "pass", json.dumps(
+            {"loaded_current_build": sorted(grouped["current"]),
+             "reconnect_required": sorted(grouped["stale"])}, ensure_ascii=False))
+    except Exception as exc:
+        add("session_states", "warn", type(exc).__name__)
+    # P4：执行器能力（P1 的探针模块；P1 未合入时降级报告，不触网、不做隔离探针）。
+    try:
+        spec = importlib.util.find_spec("knowbase.automation.executor")
+        if spec is None:
+            add("executor_capability", "pass", "automation.executor 不存在（P1 未合入），执行器能力未知")
+        else:
+            from knowbase.automation import executor as _executor
+            found = _executor.discover_executors() if hasattr(_executor, "discover_executors") else []
+            add("executor_capability", "pass", json.dumps(
+                {"discovered": found}, ensure_ascii=False)[:1000])
+    except Exception as exc:
+        add("executor_capability", "warn", type(exc).__name__)
     return checks
