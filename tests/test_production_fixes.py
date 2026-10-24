@@ -384,7 +384,9 @@ def test_real_two_clones_push_non_overlapping_commits_without_manual_merge(
                    capture_output=True)
     monkeypatch.setattr(gitops, "_record_sync", lambda *_a, **_k: None)
 
-    warning = gitops.push(alice, "", [])
+    # 白名单必须显式给出：空名单已按"无允许目标"拒绝推送（低危-6b），
+    # 本测试关注 rebase 竞速收敛，故传本地远端路径作为允许前缀。
+    warning = gitops.push(alice, "", [str(remote)])
 
     assert warning is None
     subprocess.run(["git", "-C", str(bob), "pull", "--ff-only"], check=True,

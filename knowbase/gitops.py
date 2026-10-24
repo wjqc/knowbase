@@ -289,7 +289,9 @@ def push(repo: Path, remote_url: str, allowed_prefixes: list[str]) -> str | None
         cfg = app_config.load_config()
         gcfg = cfg.get("git", {})
         remote, branch, actual_url = _remote_target(repo, gcfg)
-        if allowed_prefixes and not any(actual_url.startswith(p) for p in allowed_prefixes):
+        if not allowed_prefixes:
+            return f"已拒绝推送: 白名单为空，无允许的推送目标(remote {actual_url})"
+        if not any(actual_url.startswith(p) for p in allowed_prefixes):
             return f"已拒绝推送: 实际 remote {actual_url} 不在白名单 {allowed_prefixes} 内"
         if remote_url and remote_url != actual_url:
             return f"已拒绝推送: 配置 remote.url 与实际 {remote} URL 不一致"

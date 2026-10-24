@@ -1,23 +1,24 @@
-"""统一写入服务：CAS + 幂等 + 版本控制。
+"""revision 计算、写路径共用常量与 revision 查询（生产共用）。
 
-设计要点：
-- 所有写操作（create/update/archive/feedback）经此模块，保证原子性和一致性；
-- content_revision 覆盖内容变更（title/body/tags/scope/relations/code_refs/source_refs）；
-- governance_revision 覆盖治理变更（status/confidence/last_verified）；
-- 幂等键 request_id 防重复提交；同 key 不同 payload 返回 IDEMPOTENCY_CONFLICT；
-- RepoLock 内重新检查 revision，CAS 失败返回 REVISION_CONFLICT；
-- 写操作先落 SQLite，再写文件，Git 提交失败单独记录 pending。
+本模块现只保留纯计算与只读职责：
+- _compute_revision / _compute_governance_revision 是全仓共用的 revision
+  计算：commit_adapter、index、doctor、hooks 等均从本模块导入。
+  content_revision 覆盖内容字段（title/body/tags/scope/relations/code_refs/
+  source_refs/provenance/rule_context），governance_revision 覆盖治理字段
+  （status/confidence/last_verified/verified_content_revision/反馈计数）。
+- REVISION_CONFLICT / IDEMPOTENCY_CONFLICT 等错误码与 OP_* 操作类型
+  常量由 commit_adapter 等模块共用。
+- get_revisions 按 entity_heads 查询卡片的当前 revision。
+
+写路径（create/update）已统一到 commit_adapter（intent 持久化 + 锁内
+CAS + 崩溃恢复）。早期的本模块 create_card / update_card 已删除：它们
+没有生产调用方，与生产实现存在机制性差异（幂等机制、锁内查重、原子
+写、加锁模型均不同），其全部测试调用方已迁移到 adapter_create /
+adapter_update。新代码不要在本模块再加写实现。
 """
 
 import hashlib
 import json
-import uuid
-from datetime import date, datetime, timezone
-from pathlib import Path
-
-import yaml
-
-from . import store, locking
 
 # 错误码
 REVISION_CONFLICT = "REVISION_CONFLICT"
@@ -68,198 +69,6 @@ def _compute_governance_revision(meta: dict) -> str:
     }
     raw = json.dumps(gov_fields, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
-
-
-def _check_idempotency(conn, request_id: str, entity_id: str, payload_hash: str) -> dict | None:
-    """检查幂等性：同 request_id 已存在则返回既有结果。
-
-    返回 None 表示新操作；返回 dict 表示幂等命中或冲突。
-    """
-    if not request_id:
-        return None
-    row = conn.execute(
-        "SELECT entity_id, payload_hash, result FROM applied_operations WHERE request_id=?",
-        (request_id,),
-    ).fetchone()
-    if not row:
-        return None
-    existing_entity, existing_hash, result = row
-    if existing_hash != payload_hash:
-        return {"error": IDEMPOTENCY_CONFLICT, "existing_entity": existing_entity}
-    return {"idempotent": True, "entity_id": existing_entity, "result": result}
-
-
-def _record_operation(conn, op_id: str, entity_id: str, scope: str, kind: str,
-                        request_id: str, payload_hash: str, result: str,
-                        base_revision: str = "", new_revision: str = "") -> None:
-    """登记操作到 applied_operations 表。"""
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    conn.execute(
-        "INSERT OR IGNORE INTO applied_operations(op_id,entity_id,scope,kind,request_id,"
-        "payload_hash,result,base_revision,new_revision,created_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (op_id, entity_id, scope, kind, request_id, payload_hash, result,
-         base_revision, new_revision, now),
-    )
-
-
-def create_card(repo: Path, conn, dtype: str, title: str, body: str, *,
-                scope: str = "", tags: list | None = None, source: str = "",
-                request_id: str = "", **extra_meta) -> dict:
-    """创建新卡片。
-
-    返回 {"entity_id", "content_revision", "governance_revision", "created": True}
-    或 {"error": IDEMPOTENCY_CONFLICT}。
-    """
-    # 幂等检查
-    payload = {"type": dtype, "title": title, "body": body, "scope": scope, **extra_meta}
-    payload_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
-    idem = _check_idempotency(conn, request_id, "", payload_hash)
-    if idem:
-        return idem
-
-    # 分配新 ID
-    mid = store.alloc_id(repo, dtype)
-    meta = store.new_meta(dtype, title, scope, tags or [], source)
-    meta.update(extra_meta)
-    meta["id"] = mid
-
-    # 计算 revision
-    content_rev = _compute_revision(meta, body)
-    gov_rev = _compute_governance_revision(meta)
-
-    # 写文件（在 RepoLock 内由调用方保证）
-    path = store.mem_path(repo, dtype, mid, staging=(meta.get("confidence") == "staging"))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(store.render(meta, body), encoding="utf-8")
-
-    # 登记操作
-    op_id = f"OP-{uuid.uuid4().hex[:12]}"
-    _record_operation(conn, op_id, mid, scope, OP_CREATE, request_id,
-                        payload_hash, "local_saved", "", content_rev)
-
-    # 更新 entity_heads
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    conn.execute(
-        "INSERT OR REPLACE INTO entity_heads(entity_id,content_revision,governance_revision,updated_at) "
-        "VALUES(?,?,?,?)",
-        (mid, content_rev, gov_rev, now),
-    )
-    # 来源账本：创建事件与卡落库同事务；未启用 value 事件时不影响业务。
-    from .value.events import record as _record_value
-    _record_value(conn, "knowledge.created",
-                  {"memory_id": mid, "content_revision": content_rev, "scope": scope,
-                   "dtype": dtype, "staging": meta.get("confidence") == "staging",
-                   "title": title},
-                  source_key=f"knowledge:{mid}:created",
-                  operation_id=request_id or f"card_create:{mid}")
-    conn.commit()
-
-    return {
-        "entity_id": mid,
-        "content_revision": content_rev,
-        "governance_revision": gov_rev,
-        "created": True,
-    }
-
-
-def update_card(repo: Path, conn, mid: str, *, 
-                expected_content_revision: str = "",
-                expected_governance_revision: str = "",
-                request_id: str = "",
-                **updates) -> dict:
-    """更新卡片（CAS）。
-
-    必须携带 expected_content_revision 和/或 expected_governance_revision；
-    不携带则返回错误，防止旧版本覆盖。
-
-    返回 {"entity_id", "content_revision", "governance_revision", "updated": True}
-    或 {"error": REVISION_CONFLICT / IDEMPOTENCY_CONFLICT}。
-    """
-    # 加载当前卡片
-    meta, body, path = store.load(repo, mid)
-    if not meta:
-        return {"error": "not_found"}
-
-    # 幂等检查
-    payload_hash = hashlib.sha256(json.dumps(updates, sort_keys=True).encode()).hexdigest()[:16]
-    idem = _check_idempotency(conn, request_id, mid, payload_hash)
-    if idem:
-        return idem
-
-    # 读取当前 revision
-    row = conn.execute(
-        "SELECT content_revision, governance_revision FROM entity_heads WHERE entity_id=?",
-        (mid,),
-    ).fetchone()
-    current_content_rev = row[0] if row else _compute_revision(meta, body)
-    current_gov_rev = row[1] if row else _compute_governance_revision(meta)
-
-    # CAS 检查
-    if expected_content_revision and expected_content_revision != current_content_rev:
-        return {"error": REVISION_CONFLICT, "current_content_revision": current_content_rev}
-    if expected_governance_revision and expected_governance_revision != current_gov_rev:
-        return {"error": REVISION_CONFLICT, "current_governance_revision": current_gov_rev}
-
-    # 应用更新
-    content_fields = {"title", "body", "tags", "scope", "relations", "code_refs", "source_refs",
-                      "provenance", "rule_context", "evidence"}
-    gov_fields = {"status", "confidence", "last_verified"}
-
-    for key, value in updates.items():
-        if key in content_fields:
-            if key == "body":
-                body = value
-            else:
-                meta[key] = value
-        elif key in gov_fields:
-            meta[key] = value
-
-    meta["updated"] = date.today().isoformat()
-
-    # 重新计算 revision
-    new_content_rev = _compute_revision(meta, body)
-    if new_content_rev != current_content_rev:
-        meta["confidence"] = "once"
-        meta["last_verified"] = ""
-        meta["verified_content_revision"] = ""
-        meta["helpful_count"] = 0
-        meta["unhelpful_count"] = 0
-    new_gov_rev = _compute_governance_revision(meta)
-
-    # 写文件
-    if path:
-        path.write_text(store.render(meta, body), encoding="utf-8")
-
-    # 登记操作
-    op_id = f"OP-{uuid.uuid4().hex[:12]}"
-    _record_operation(conn, op_id, mid, meta.get("scope", ""), OP_UPDATE, request_id,
-                        payload_hash, "local_saved", current_content_rev, new_content_rev)
-
-    # 更新 entity_heads
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    conn.execute(
-        "INSERT OR REPLACE INTO entity_heads(entity_id,content_revision,governance_revision,updated_at) "
-        "VALUES(?,?,?,?)",
-        (mid, new_content_rev, new_gov_rev, now),
-    )
-    # 来源账本：内容版本变化才记修订事件（按 mid+新版本稳定键幂等）。
-    if new_content_rev != current_content_rev:
-        from .value.events import record as _record_value
-        _record_value(conn, "knowledge.revised",
-                      {"memory_id": mid, "content_revision": new_content_rev,
-                       "scope": meta.get("scope", ""),
-                       "staging": bool(path) and path.parent.name == "staging"},
-                      source_key=f"knowledge:{mid}:{new_content_rev}:revised",
-                      operation_id=request_id or f"card_update:{mid}")
-    conn.commit()
-
-    return {
-        "entity_id": mid,
-        "content_revision": new_content_rev,
-        "governance_revision": new_gov_rev,
-        "updated": True,
-    }
 
 
 def get_revisions(conn, mid: str) -> dict | None:

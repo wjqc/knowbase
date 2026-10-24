@@ -1,7 +1,7 @@
 """M0.5 测试：统一写入服务 / UUID ID / scope 隔离 / 同步观测 / 错误分类。
 
 覆盖：
-- mutations.py: CAS (REVISION_CONFLICT)、幂等 (IDEMPOTENCY_CONFLICT)、create/update/get_revisions
+- commit_adapter.py 写路径: CAS (REVISION_CONFLICT)、幂等 (IDEMPOTENCY_CONFLICT)、create/update + mutations.get_revisions
 - store.py / sources.py: UUID 唯一 ID 格式 + 旧格式兼容
 - sources.py: find_by_sha scope 隔离
 - gitops.py: _is_auth_error / _is_network_error / _is_push_race 错误分类
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from knowbase import config, index, migrations, store, sources, mutations
+from knowbase import commit_adapter, config, index, migrations, store, sources, mutations
 from knowbase.__main__ import cmd_init
 from knowbase.gitops import (
     _is_auth_error, _is_network_error, _is_push_race,
@@ -140,13 +140,16 @@ class TestFindByShaScope:
         assert sid_a != sid_b  # 但 manifest ID 不同
 
 
-# ---------- mutations.py: CAS + 幂等 ----------
+# ---------- commit_adapter 写路径: CAS + 幂等 ----------
+# 原 mutations.create_card / update_card 用例：两函数已删除（无生产调用
+# 方、与生产实现机制性漂移），用例迁移到生产实现 adapter_create /
+# adapter_update，断言的 CAS/幂等语义与强度不变。
 
-class TestMutations:
+class TestCommitAdapterWrites:
     def test_create_card(self, isolated_repo):
         conn = index.connect(isolated_repo)
         try:
-            result = mutations.create_card(
+            result = commit_adapter.adapter_create(
                 isolated_repo, conn, "pitfall", "测试标题", "## 结论\n内容\n## 解决的问题\n问题",
                 scope="test-proj", tags=["tag1"], source="agent:test:s1",
             )
@@ -161,13 +164,13 @@ class TestMutations:
         """同 request_id + 同 payload 应幂等返回既有结果。"""
         conn = index.connect(isolated_repo)
         try:
-            r1 = mutations.create_card(
+            r1 = commit_adapter.adapter_create(
                 isolated_repo, conn, "pitfall", "幂等测试", "内容",
                 scope="test-proj", request_id="REQ-001",
             )
             assert r1["created"] is True
 
-            r2 = mutations.create_card(
+            r2 = commit_adapter.adapter_create(
                 isolated_repo, conn, "pitfall", "幂等测试", "内容",
                 scope="test-proj", request_id="REQ-001",
             )
@@ -180,13 +183,13 @@ class TestMutations:
         """同 request_id + 不同 payload 应返回 IDEMPOTENCY_CONFLICT。"""
         conn = index.connect(isolated_repo)
         try:
-            r1 = mutations.create_card(
+            r1 = commit_adapter.adapter_create(
                 isolated_repo, conn, "pitfall", "标题A", "内容A",
                 scope="test-proj", request_id="REQ-002",
             )
             assert r1["created"] is True
 
-            r2 = mutations.create_card(
+            r2 = commit_adapter.adapter_create(
                 isolated_repo, conn, "pitfall", "标题B", "内容B",
                 scope="test-proj", request_id="REQ-002",
             )
@@ -198,14 +201,14 @@ class TestMutations:
         """正确 revision 的 CAS 更新应成功。"""
         conn = index.connect(isolated_repo)
         try:
-            r1 = mutations.create_card(
+            r1 = commit_adapter.adapter_create(
                 isolated_repo, conn, "pitfall", "CAS 测试", "原始内容",
                 scope="test-proj",
             )
             mid = r1["entity_id"]
             content_rev = r1["content_revision"]
 
-            r2 = mutations.update_card(
+            r2 = commit_adapter.adapter_update(
                 isolated_repo, conn, mid,
                 expected_content_revision=content_rev,
                 body="更新后内容",
@@ -220,13 +223,13 @@ class TestMutations:
         """错误 revision 的 CAS 更新应返回 REVISION_CONFLICT。"""
         conn = index.connect(isolated_repo)
         try:
-            r1 = mutations.create_card(
+            r1 = commit_adapter.adapter_create(
                 isolated_repo, conn, "pitfall", "CAS 冲突测试", "原始内容",
                 scope="test-proj",
             )
             mid = r1["entity_id"]
 
-            r2 = mutations.update_card(
+            r2 = commit_adapter.adapter_update(
                 isolated_repo, conn, mid,
                 expected_content_revision="wrong_revision_0",
                 body="更新后内容",
@@ -240,13 +243,13 @@ class TestMutations:
         """错误 governance_revision 的 CAS 更新应返回 REVISION_CONFLICT。"""
         conn = index.connect(isolated_repo)
         try:
-            r1 = mutations.create_card(
+            r1 = commit_adapter.adapter_create(
                 isolated_repo, conn, "pitfall", "治理 CAS 测试", "内容",
                 scope="test-proj",
             )
             mid = r1["entity_id"]
 
-            r2 = mutations.update_card(
+            r2 = commit_adapter.adapter_update(
                 isolated_repo, conn, mid,
                 expected_governance_revision="wrong_gov_rev",
                 status="archived",
@@ -260,14 +263,14 @@ class TestMutations:
         """同 request_id + 同 payload 的 update 应幂等。"""
         conn = index.connect(isolated_repo)
         try:
-            r1 = mutations.create_card(
+            r1 = commit_adapter.adapter_create(
                 isolated_repo, conn, "pitfall", "幂等更新测试", "内容",
                 scope="test-proj",
             )
             mid = r1["entity_id"]
             content_rev = r1["content_revision"]
 
-            u1 = mutations.update_card(
+            u1 = commit_adapter.adapter_update(
                 isolated_repo, conn, mid,
                 expected_content_revision=content_rev,
                 request_id="REQ-UPD-001",
@@ -275,7 +278,7 @@ class TestMutations:
             )
             assert u1["updated"] is True
 
-            u2 = mutations.update_card(
+            u2 = commit_adapter.adapter_update(
                 isolated_repo, conn, mid,
                 expected_content_revision=u1["content_revision"],
                 request_id="REQ-UPD-001",
@@ -288,7 +291,7 @@ class TestMutations:
     def test_get_revisions(self, isolated_repo):
         conn = index.connect(isolated_repo)
         try:
-            r1 = mutations.create_card(
+            r1 = commit_adapter.adapter_create(
                 isolated_repo, conn, "pitfall", "版本查询测试", "内容",
                 scope="test-proj",
             )
