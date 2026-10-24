@@ -811,6 +811,18 @@ def _main(argv=None):
     p_activate=sub.add_parser("embedding-activate", help="校验后激活/回切现有合格代际")
     p_activate.add_argument("generation")
     sub.add_parser("retrieval-report", help="只读汇总检索等级、降级、成本与采纳证据")
+    p_benefit = sub.add_parser("benefit-control", help="同任务集用库/不用库对照，产出净 token 节省与时长对比（Phase 3-B）")
+    p_benefit.add_argument("--tasks", required=True, help="任务集 JSON 或派生评测集 JSONL")
+    p_benefit.add_argument("--executor", required=True, help="执行器 module:function，签名 executor(task, use_library) -> {input_tokens, output_tokens, seconds}")
+    p_benefit.add_argument("--out", required=True, help="对照报告 JSON 输出路径")
+    p_accept = sub.add_parser("acceptance-check", help="四项验收门槛机器判定（Phase 3-B），全部由落盘证据判定")
+    p_accept.add_argument("--agg-db", required=True, help="汇总分析库路径")
+    p_accept.add_argument("--team-id", default="default")
+    p_accept.add_argument("--personal-db", default="", help="本机索引库路径（派生评测核验用）")
+    p_accept.add_argument("--eval-report", default="", help="冻结评测报告 JSON")
+    p_accept.add_argument("--dataset", default="", help="派生评测集 JSONL")
+    p_accept.add_argument("--control-report", default="", help="对照报告 JSON")
+    p_accept.add_argument("--out", default="", help="验收报告 JSON 输出路径（为空则只打印）")
     p_eval=sub.add_parser("retrieval-evaluate",help="离线五组重放，需要审核标签和模型缓存")
     p_eval.add_argument("--dataset",required=True);p_eval.add_argument("--cache",required=True)
     p_eval.add_argument("--baseline-source",required=True);p_eval.add_argument("--output",required=True)
@@ -894,14 +906,16 @@ def _main(argv=None):
     p_value_snapshot.add_argument("--team-id", default="default")
     p_value_snapshot.add_argument("--since", default="")
     p_value_snapshot.add_argument("--until", default="")
-    p_value_member = value_sub.add_parser("register-member", help="登记团队成员（覆盖率分母权威）")
+    p_value_member = value_sub.add_parser("register-member", help="登记团队成员（名单信息；覆盖率分母现为有归属的已登记实例）")
     p_value_member.add_argument("--agg-db", default="")
     p_value_member.add_argument("--member-id", required=True)
     p_value_member.add_argument("--label", default="")
-    p_value_confirm = value_sub.add_parser("confirm-member", help="人工确认安装实例归属成员")
+    p_value_confirm = value_sub.add_parser("confirm-member", help="纠错入口：修正安装实例归属成员（留痕；默认归属走实例 enroll 链）")
     p_value_confirm.add_argument("--agg-db", default="")
     p_value_confirm.add_argument("--installation", required=True)
     p_value_confirm.add_argument("--member-id", required=True)
+    p_value_confirm.add_argument("--actor", default="", help="纠错操作人（留痕）")
+    p_value_confirm.add_argument("--note", default="", help="纠错说明（留痕）")
     p_value_report = value_sub.add_parser("report", help="确定性生成周/月报告（Markdown，无模型润色）")
     p_value_report.add_argument("--output", required=True)
     p_value_report.add_argument("--agg-db", default="")
@@ -1057,6 +1071,57 @@ def _main(argv=None):
     if args.cmd == "retrieval-report":
         from .retrieval_metrics import report
         print(json.dumps(report(config.repo_path()),ensure_ascii=False,indent=2));return 0
+    if args.cmd == "benefit-control":
+        import importlib
+        from .benefit_control import load_tasks, run_control, write_report
+        spec = args.executor
+        if ":" in spec:
+            mod_name, func_name = spec.split(":", 1)
+        else:
+            mod_name, _, func_name = spec.rpartition(".")
+        try:
+            executor = getattr(importlib.import_module(mod_name), func_name)
+        except (ImportError, AttributeError) as exc:
+            print(f"错误：执行器不可用（{exc}）"); return 2
+        try:
+            tasks = load_tasks(args.tasks)
+            result = run_control(tasks, executor)
+            write_report(result, args.out)
+        except (ValueError, OSError) as exc:
+            print(f"错误：{exc}"); return 2
+        print(json.dumps({"tasks": result["totals"]["task_count"],
+                          "net_token_savings": result["totals"]["net_token_savings"],
+                          "net_seconds": result["totals"]["net_seconds"],
+                          "out": args.out}, ensure_ascii=False)); return 0
+    if args.cmd == "acceptance-check":
+        import sqlite3
+        from .acceptance import render_markdown, run_all
+        from .value import aggregate
+        agg_conn = aggregate.connect(args.agg_db)
+        try:
+            personal_conn = None
+            if args.personal_db:
+                personal_conn = sqlite3.connect(
+                    f"file:{Path(args.personal_db).expanduser()}?mode=ro", uri=True)
+            try:
+                result = run_all(agg_conn=agg_conn, team_id=args.team_id,
+                                 personal_conn=personal_conn,
+                                 eval_report=args.eval_report or None,
+                                 dataset=args.dataset or None,
+                                 control_report=args.control_report or None)
+            finally:
+                if personal_conn is not None:
+                    personal_conn.close()
+            print(json.dumps({"verdict": result["verdict"],
+                              "checks": {k: v["passed"] for k, v in result["checks"].items()}},
+                             ensure_ascii=False))
+            if args.out:
+                out = Path(args.out).expanduser()
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(render_markdown(result), encoding="utf-8")
+            return 0 if result["verdict"] == "PASS" else 2
+        finally:
+            agg_conn.close()
     if args.cmd == "verify":
         return cmd_verify(args.id, expect_revision=getattr(args, "expect_revision", ""))
     if args.cmd == "archive":
@@ -1183,7 +1248,8 @@ def _main(argv=None):
             agg_conn = aggregate.connect(args.agg_db or agg_default)
             try:
                 print(json.dumps(aggregate.confirm_member(agg_conn, args.installation,
-                                                          args.member_id), ensure_ascii=False))
+                                                          args.member_id, actor=args.actor,
+                                                          note=args.note), ensure_ascii=False))
             finally:
                 agg_conn.close()
             return 0

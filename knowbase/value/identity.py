@@ -60,7 +60,8 @@ def set_member(conn, label: str, *, evidence: str = "manual_confirmed") -> dict:
     installation_id = install(conn)
     # 绑定按成员标签稳定：同一人在多台安装确认同一标签 → 同一 member_binding_id，
     # 不会把自己的两台机器算成两个人/跨成员。受信任团队文件模式下同名不同人
-    # 会被误并，汇总端 confirm_member 人工归属仍是权威纠正入口。
+    # 会被误并，汇总端 confirm_member 是纠错入口（留痕修正），不再是归属
+    # 必需路径——默认归属走实例 enroll 链。
     binding = "MBR-" + materials.digest(["member", label])[:24]
     _put(conn, _KEY_MEMBER_BINDING, binding)
     _put(conn, _KEY_MEMBER_LABEL, label)
