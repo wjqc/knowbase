@@ -157,8 +157,12 @@ def test_same_person_multi_installation_counts_once(memory_repo, tmp_path):
     assert snap["members"]["observed"] == 1
     assert snap["members"]["effective_consumers"] == 1
     assert snap["tasks"]["adopted"] == 1  # 任务按 task_id 去重，不因两台机器翻倍
-    # 覆盖率：未登记名单 → unknown
-    assert snap["members"]["roster_size"] is None and snap["members"]["coverage"] is None
+    # Phase 3-A：覆盖率不再以人工登记名单为门——两台安装均有绑定归属，
+    # 分母为有归属实例数 2，分子为有效消费实例数 2；名单为空不影响口径
+    assert snap["members"]["roster_size"] is None
+    assert snap["members"]["coverage"] == 1.0
+    assert snap["members"]["instances_attributed"] == 2
+    assert snap["members"]["unknown_instances"] == []
     agg.close()
 
 
