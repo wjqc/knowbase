@@ -67,6 +67,7 @@ class TestOcrParserSupports:
 
 class TestOcrParserGracefulDegradation:
     def test_raises_when_tesseract_binary_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr('knowbase.parsers.native_ocr.available',lambda:False)
         """tesseract 二进制不在 PATH 时抛 ParseError + 平台安装提示。"""
         # pytesseract 是可选依赖：注入假模块，让断言只针对二进制检查这一层
         monkeypatch.setitem(sys.modules, "pytesseract", _fake_pytesseract())

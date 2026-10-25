@@ -343,9 +343,11 @@ def renew(conn, job_id: str, lease_token: str, *,
         return {"error": LEASE_EXPIRED}
 
     conn.execute(
-        "UPDATE jobs SET lease_until=?, updated_at=? WHERE job_id=?",
-        (expires, now_str, job_id),
+        "UPDATE jobs SET lease_until=?, updated_at=? WHERE job_id=? AND state=? AND lease_owner=? AND lease_until>?",
+        (expires, now_str, job_id, STATE_CLAIMED, owner, now_str),
     )
+    if conn.execute('SELECT changes()').fetchone()[0] != 1:
+        conn.rollback();return {'error':LEASE_EXPIRED}
     conn.commit()
     return {"expires_at": expires, "lease_token": lease_token}
 
@@ -506,19 +508,28 @@ def submit_no_candidate(conn, job_id: str, lease_token: str, request_id: str,
 
 # ---------- 失败 ----------
 
-def fail(conn, job_id: str, error: str, *, retryable: bool = True) -> dict:
+def fail(conn, job_id: str, error: str, *, retryable: bool = True,
+         expected_owner=None, expected_fencing=None) -> dict:
     """标记任务失败。可重试的进入 retry_wait，否则 failed。"""
     now = datetime.now(timezone.utc)
     now_str = now.isoformat(timespec="seconds")
+
+    if expected_owner is not None:
+        conn.execute('BEGIN IMMEDIATE')
+        held = conn.execute('SELECT lease_owner,fencing_token,lease_until FROM jobs WHERE job_id=?',(job_id,)).fetchone()
+        if not held or not held[0] or not held[0].endswith(':'+expected_owner) or held[1] != expected_fencing or not held[2] or held[2]<=now_str:
+            conn.rollback(); return {'error': LEASE_EXPIRED}
 
     row = conn.execute(
         "SELECT state, attempt, max_attempts FROM jobs WHERE job_id=?", (job_id,)
     ).fetchone()
     if not row:
+        if expected_owner is not None: conn.rollback()
         return {"error": "not_found"}
 
     state, attempt, max_attempts = row
     if state in TERMINAL_STATES:
+        if expected_owner is not None: conn.rollback()
         return {"error": "already_done", "state": state}
 
     if retryable and attempt < max_attempts:

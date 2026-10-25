@@ -80,11 +80,12 @@ def report(repo):
             for search_id,tier,ids in tier_triples:
                 delivered[tier]=delivered.get(tier,0)+len(ids)
                 if not search_id:continue
-                q='SELECT COUNT(DISTINCT memory_id) FROM knowledge_uses WHERE event_id=? AND current_version=1 AND state=? AND memory_id IN (%s)'%','.join('?'*len(ids))
-                adopted[tier]=adopted.get(tier,0)+conn.execute(q,(search_id,'adopted',*ids)).fetchone()[0]
+                if {'use_retrieval_links','retrieval_deliveries'} <= tables:
+                    q='SELECT COUNT(DISTINCT u.memory_id) FROM knowledge_uses u JOIN use_retrieval_links l ON l.use_id=u.use_id WHERE l.search_id=? AND u.current_version=1 AND u.state=? AND u.memory_id IN (%s)'%','.join('?'*len(ids))
+                    adopted[tier]=adopted.get(tier,0)+conn.execute(q,(search_id,'adopted',*ids)).fetchone()[0]
             result['injection_tiers']=delivered
-            result['tier_adoption']={t:{'delivered':delivered[t],'adopted':adopted.get(t,0),
-                'rate':adopted.get(t,0)/delivered[t] if delivered[t] else None} for t in delivered}
+            result['tier_adoption']={t:{'delivered':delivered[t],'adopted':adopted.get(t),
+                'rate':adopted[t]/delivered[t] if delivered[t] and t in adopted else None} for t in delivered}
         if 'knowledge_uses' in tables:
             result['use_receipts']=dict(conn.execute('SELECT state,COUNT(*) FROM knowledge_uses GROUP BY state'))
         if 'task_outcomes' in tables:
@@ -99,5 +100,13 @@ def report(repo):
                           effective_adoption_rate=numerator/denominator if denominator else None)
             result['verification_sources']=dict(conn.execute('SELECT verification_source,count(*) FROM task_outcomes GROUP BY verification_source'))
         result['adoption_measurement']='Version-bound adopted+completed+helpful outcomes / observed used task outcomes; missing outcomes excluded and not treated as success.'
+        if 'executor_runs' in tables:
+            result['background_execution']=dict(conn.execute('SELECT state,count(*) FROM executor_runs GROUP BY state'))
+            result['executor_invocations_reserved']=conn.execute('SELECT coalesce(sum(calls),0) FROM automation_budget').fetchone()[0]
+            result['executor_invocations_started']=conn.execute('SELECT count(*) FROM executor_runs WHERE invoked=1').fetchone()[0]
+            result['cached_executor_runs']=conn.execute("SELECT count(*) FROM executor_runs WHERE usage_source='cache'").fetchone()[0]
+            result['background_usage_sources']=dict(conn.execute('SELECT usage_source,count(*) FROM executor_runs GROUP BY usage_source'))
+            result['background_cost_actual']=None
+            result['background_usage_note']='Reserved/started controller invocations include failures, not provider invoices. Cache replays are not new calls; executor_report is not independently billed usage.'
         return result
     finally:conn.close()

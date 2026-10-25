@@ -176,7 +176,7 @@ def inspect(repo):
                         "SELECT remote,local_revision,remote_revision,status,last_push_at "
                         "FROM sync_state ORDER BY rowid DESC LIMIT 1").fetchone()
                     if row:
-                        add("sync_confirmed", "pass", json.dumps(
+                        add("sync_confirmed", "pass" if row[3]=='ok' else 'warn', json.dumps(
                             {"remote": row[0], "local_revision": row[1],
                              "remote_revision": row[2], "status": row[3],
                              "last_push_at": row[4]}, ensure_ascii=False))
@@ -209,7 +209,9 @@ def inspect(repo):
         add("git", "fail", type(exc).__name__)
     missing = [name for name in ("pypdf", "docx", "openpyxl", "pptx", "PIL", "pytesseract") if importlib.util.find_spec(name) is None]
     add("parsers", "warn" if missing else "pass", "missing=" + ",".join(missing))
-    add("ocr_binary", "pass" if shutil.which("tesseract") else "warn", "available" if shutil.which("tesseract") else "tesseract missing")
+    from .parsers.native_ocr import available as native_ocr_available
+    ocr = 'tesseract' if shutil.which('tesseract') else 'macos-vision' if native_ocr_available() else None
+    add("ocr_binary", "pass" if ocr else "warn", ocr or "tesseract missing")
     from .integration import discover
     for host in discover():
         add("agent:" + host["id"], "pass" if host["configured"] else "warn", json.dumps(host, ensure_ascii=False))
@@ -247,4 +249,12 @@ def inspect(repo):
                 {"discovered": found}, ensure_ascii=False)[:1000])
     except Exception as exc:
         add("executor_capability", "warn", type(exc).__name__)
+    try:
+        from .automation.distillation import ready_executor
+        cfg=config.load_config();selected,reason=ready_executor(cfg)
+        add('automation','warn' if cfg['automation'].get('enabled') and not selected else 'pass',
+            json.dumps({'enabled':bool(cfg['automation'].get('enabled')),'ready':selected is not None,
+                        'reason':reason,'configured_executors':len(cfg['automation'].get('executors',[])),
+                        'allowed_scope_count':len(cfg['automation'].get('allowed_scopes',[]))},ensure_ascii=False))
+    except Exception:add('automation','warn','invalid_automation_configuration')
     return checks

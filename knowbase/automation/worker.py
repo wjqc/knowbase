@@ -1,7 +1,6 @@
 """P3 后台 supervisor：每库一个调度所有者，OS 负责启动/保活，SQLite 租约负责互斥。
 
-本模块只做调度与维护任务分派，不启动自动提炼：提炼任务位保持
-blocked（P2 因无真实执行器通过而被阻断），worker 绝不调用执行器。
+提炼仅在显式启用、scope授权和有效执行器探针回执均满足时运行。
 MCP/Hook 只追加任务或发本地唤醒信号，不各自开执行池。
 
 任务按 next_run_at 唤醒；服务空闲时不轮询模型。每个 handler 自行
@@ -184,6 +183,11 @@ def _reschedule(conn, kind: str, *, status: str, error: str, lease) -> bool:
 
 def _outcome(result):
     """Handlers may return structured failures instead of raising (including nested sends)."""
+    if isinstance(result,list):
+        for item in result:
+            status,reason=_outcome(item)
+            if status=='error':return status,reason
+        return 'success',''
     if not isinstance(result, dict):
         return "success", ""
     for key in ("error", "errors", "warning"):
@@ -191,7 +195,7 @@ def _outcome(result):
             reason = result[key]
             return "error", reason if isinstance(reason, str) and re.fullmatch(r"[\w.-]{1,100}", reason) else "handler_" + key
     for value in result.values():
-        if isinstance(value, dict):
+        if isinstance(value, (dict,list)):
             status, reason = _outcome(value)
             if status == "error": return status, reason
     for key in ("blocked", "skipped"):
@@ -204,7 +208,17 @@ def _outcome(result):
 # ---------- 各任务 handler（永不向 tick 外抛异常） ----------
 
 def _h_lease_recovery(repo, conn, cfg) -> dict:
-    return {"recovered": jobs.expire_leases(conn)}
+    from ..commit_adapter import recover_intents
+    from ..extraction.materialize import recover
+    from .distillation import prepare_due
+    from ..locking import RepoLock
+    expired = jobs.expire_leases(conn)
+    prepared=prepare_due(repo,conn)
+    with RepoLock(repo, cfg.get('lock_timeout',10)):
+        intents = recover_intents(repo,conn)
+    pending = conn.execute("SELECT DISTINCT job_id FROM job_submissions WHERE state!='done' LIMIT 10").fetchall()
+    for (job_id,) in pending: recover(repo,conn,job_id)
+    return {"recovered": expired, 'prepared':prepared,'intents': intents['recovered'], 'receipts_checked':len(pending)}
 
 
 def _h_knowledge_sync(repo, conn, cfg) -> dict:
@@ -282,8 +296,10 @@ def _h_vector_maintenance(repo, conn, cfg) -> dict:
 
 
 def _h_distillation(repo, conn, cfg) -> dict:
-    """P2 被阻断：调度位只占位，绝不调用执行器、不产生提炼任务。"""
-    return {"blocked": "distillation_blocked_no_executor"}
+    from .distillation import run_due
+    if not cfg.get('automation',{}).get('executors'):
+        return {"blocked": "distillation_blocked_no_executor"}
+    return run_due(repo,cfg,guard=cfg.get('_lease_valid',lambda:False))
 
 
 _HANDLERS = {
@@ -329,7 +345,11 @@ def tick(repo, *, owner: str = "") -> dict:
             if handler is None:
                 continue
             try:
-                result = handler(repo, conn, cfg)
+                def lease_valid():
+                    check = sqlite3.connect(index.db_path(repo),timeout=1)
+                    try: return _owns_lease(check,*leased)
+                    finally: check.close()
+                result = handler(repo, conn, {**cfg,'_lease_valid':lease_valid})
                 ran.append({"kind": kind, "result": result})
                 status, error = _outcome(result)
             except Exception as exc:
@@ -381,7 +401,7 @@ def status(repo) -> dict:
                           "last_success_at": r[3], "last_error": r[4], "last_status": r[5],
                           "failure_count": r[6]} for r in rows],
             "capture_gaps": gaps,
-            "distillation": "blocked_no_executor",
+            "distillation": __import__('knowbase.automation.distillation',fromlist=['ready_executor']).ready_executor(app_config.load_config())[1] or 'ready',
         }
     finally:
         conn.close()
@@ -407,6 +427,7 @@ def install(*, remove: bool = False) -> dict:
         return {"worker": "removed", "legacy": legacy, "current": current}
     result = team_worker.install(label=WORKER_LABEL, task_name=WORKER_TASK_NAME,
                                  argv=["worker", "run"],
+                                 persistent=True,
                                  description="knowbase background worker",
                                  descriptor_name="knowbase-worker-task.xml")
     legacy_removed = None

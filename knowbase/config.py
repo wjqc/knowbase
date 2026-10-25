@@ -75,7 +75,11 @@ DEFAULTS = {
     },
     # P1 执行器探针：显式配置的执行器列表（空表示仅做本机发现）。
     # 每项为 command 或 intranet_text 配置；探针不输出其中任何密钥引用值。
-    "automation": {"executors": []},
+    "automation": {"executors": [], "enabled": False, "allowed_scopes": [],
+                   "allow_trusted_commands": False, "max_batches": 2,
+                   "batch_seconds": 120, "job_seconds": 600,
+                   "max_input_chars": 128000, "max_output_chars": 64000,
+                   "daily_calls": 20, "daily_input_chars": 512000},
 }
 
 

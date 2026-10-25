@@ -132,13 +132,19 @@ def manifest_for_job(conn, job_id: str) -> list[dict]:
     return payload.get("segments", []) if payload.get("protocol_version") == 2 else []
 
 
-def create_batch(conn, claim: dict, job_id: str, owner: str) -> dict:
+def create_batch(conn, claim: dict, job_id: str, owner: str, *, max_chars=None) -> dict:
     payload = payload_for_job(conn, job_id)
     segments = manifest_for_job(conn, job_id)
     done = {r[0] for r in conn.execute(
         "SELECT segment_id FROM segment_results WHERE job_id=? AND settlement_state IN "
         "('saved','updated','linked_existing','needs_review','no_candidate')", (job_id,))}
     ids = [s["segment_id"] for s in segments if s["segment_id"] not in done][:32]
+    if max_chars is not None:
+        sizes = {s['segment_id']:len(s['text']) for s in segments}; selected=[]; used=0
+        for sid in ids:
+            if selected and used+sizes[sid] > max_chars: break
+            selected.append(sid); used += sizes[sid]
+        ids = selected
     scope = claim["scope"]
     query = " ".join(s["text"][:200] for s in segments if s["segment_id"] in ids)[:2000]
     similar = similar_snapshot(conn, query, scope)

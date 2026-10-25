@@ -839,7 +839,7 @@ def cmd_onboarding() -> int:
     return 0
 
 
-def cmd_executor_probe(isolation: bool = False, scope: str = "probe-orders") -> int:
+def cmd_executor_probe(isolation: bool = False, scope: str = "probe-orders", executor_id=None) -> int:
     """P1 执行器探针：静态探针全部候选，可选对首个 unknown 候选跑隔离探针。
 
     只输出能力报告 JSON，不输出任何密钥引用值。返回 0 表示至少一个
@@ -853,6 +853,7 @@ def cmd_executor_probe(isolation: bool = False, scope: str = "probe-orders") -> 
     seen = {str(c.get("executor_id")) for c in configured}
     candidates = list(configured) + [c for c in discovered
                                      if str(c.get("executor_id")) not in seen]
+    if executor_id:candidates=[c for c in candidates if c.get('executor_id')==executor_id]
     reports = probe.probe_all(candidates)
     isolation_report = None
     chosen = None
@@ -868,10 +869,12 @@ def cmd_executor_probe(isolation: bool = False, scope: str = "probe-orders") -> 
                 (c for c in candidates
                  if str(c.get("executor_id") or c.get("command")) == target.executor_id),
                 None)
-            if target_cfg and target_cfg.get("kind", "command") == "command":
+            if target_cfg and target_cfg.get("kind", "command") in {"command", "intranet_text"}:
                 try:
                     from .automation.isolation import isolated_probe
                     isolation_report = isolated_probe(target_cfg, scope=scope)
+                    from .automation import receipts
+                    receipts.record(target_cfg, isolation_report, version=target.version)
                     if isolation_report.get("passed"):
                         target.status = "verified"
                         target.reason_code = None
@@ -906,6 +909,12 @@ def _main(argv=None):
     p_init.add_argument("--list-embedding-models", action="store_true")
     p_init.add_argument("--verify-mcp", action="store_true", help="在隔离库检查固定runtime的stdio/build，非真实宿主会话")
     p_init.add_argument("--non-interactive", action="store_true")
+    p_init.add_argument('--executor-config', help='显式文本执行器JSON；凭据仅引用')
+    p_init.add_argument('--verify-executor', action='store_true', help='显式运行隔离模型探针')
+    p_init.add_argument('--enable-automation', action='store_true')
+    p_init.add_argument('--executor-scopes', default='')
+    p_init.add_argument('--trust-executor-command', action='store_true')
+    p_init.add_argument('--install-worker', action='store_true')
     p_init.add_argument("--plan", action="store_true", help="仅显示接入计划，不写库/配置")
     p_dash = sub.add_parser("dashboard", help="生成本地 HTML 知识治理看板")
     p_dash.add_argument("--output", default="knowbase-dashboard.html")
@@ -1042,6 +1051,10 @@ def _main(argv=None):
     p_value_import.add_argument("--receipt-out", default="")
     p_value_receipt = value_sub.add_parser("receipt", help="源端核对回执并确认已接收事件")
     p_value_receipt.add_argument("receipt_file")
+    p_value_rebuild=value_sub.add_parser('rebuild-evidence',help='从原始事件重建独立分析库，不覆盖现有库或猜补身份')
+    p_value_rebuild.add_argument('--output',required=True)
+    p_value_rebuild.add_argument('--package',action='append',default=[])
+    p_value_rebuild.add_argument('--team-id',default='default')
     p_value_snapshot = value_sub.add_parser("snapshot", help="从汇总库生成最小团队快照")
     p_value_snapshot.add_argument("--output", required=True)
     p_value_snapshot.add_argument("--agg-db", default="")
@@ -1086,6 +1099,11 @@ def _main(argv=None):
     p_exec_probe.add_argument("--isolation", action="store_true",
                               help="对首个 unknown 候选跑第一轮真实隔离探针")
     p_exec_probe.add_argument("--scope", default="probe-orders")
+    p_exec_probe.add_argument('--id', default=None)
+    p_exec_configure=exec_sub.add_parser('configure');p_exec_configure.add_argument('--config',required=True)
+    p_exec_enable=exec_sub.add_parser('enable');p_exec_enable.add_argument('--id',required=True)
+    p_exec_enable.add_argument('--scopes',required=True);p_exec_enable.add_argument('--trust-command',action='store_true')
+    exec_sub.add_parser('disable')
     args = parser.parse_args(argv)
 
     if args.cmd == "sync-once":
@@ -1103,6 +1121,13 @@ def _main(argv=None):
 
     if args.cmd == "init":
         from . import integration
+        from .automation import configuration as executor_configuration
+        executor_options=None
+        if args.executor_config:
+            try:executor_options=executor_configuration.read_options(args.executor_config)
+            except Exception:print('接入未完成：执行器配置无效');return 3
+        if args.enable_automation and not args.executor_scopes:
+            print('接入未完成：自动提炼需要明确executor-scopes');return 3
         agents = [v.strip() for v in (args.agents or "").split(",") if v.strip()]
         if not args.agents and not args.non_interactive and sys.stdin.isatty():
             available = integration.discover()
@@ -1141,7 +1166,7 @@ def _main(argv=None):
             if model_options is not None:
                 changes=[c for c in changes if Path(c["path"])!=config.CONFIG_PATH.resolve()]
                 changes.append(integration.model_change(model_options))
-            if not changes and not agents and model_options is None and not (args.probe_embedding or args.list_embedding_models or args.verify_mcp):
+            if not changes and not agents and model_options is None and not (args.probe_embedding or args.list_embedding_models or args.verify_mcp or args.executor_config or args.verify_executor or args.enable_automation or args.install_worker):
                 return 0
             result = integration.apply(changes,allowed_paths=(config.CONFIG_PATH.resolve(),))
             print(json.dumps(result, ensure_ascii=False))
@@ -1150,6 +1175,17 @@ def _main(argv=None):
             if args.verify_mcp:
                 import asyncio
                 print(json.dumps(asyncio.run(integration.probe_protocol()),ensure_ascii=False))
+            if executor_options:
+                print(json.dumps(executor_configuration.configure(args.executor_config),ensure_ascii=False))
+            selected=executor_options['executor_id'] if executor_options else config.load_config()['automation'].get('selected_executor')
+            if args.verify_executor and cmd_executor_probe(isolation=True,scope=args.scope or 'probe-orders',executor_id=selected):return 2
+            if args.enable_automation:
+                try:
+                    print(json.dumps(executor_configuration.enable(selected,[s.strip() for s in args.executor_scopes.split(',') if s.strip()],trust_command=args.trust_executor_command),ensure_ascii=False))
+                except ValueError as exc:print(str(exc));return 3
+            if args.install_worker:
+                from .automation.worker import install
+                print(json.dumps(install(),ensure_ascii=False))
             print("本地检索可用。请在宿主重连MCP并检查Hook开关/信任；配置、协议探针和真实会话生效分别验收。")
             return 0
         except (integration.IntegrationError, OSError) as exc:
@@ -1376,6 +1412,12 @@ def _main(argv=None):
             return 1
     if args.cmd == "value":
         from .value import aggregate, exchange
+        if args.value_cmd=='rebuild-evidence':
+            from .value.recovery import rebuild
+            try:
+                result=rebuild(config.repo_path(),args.output,args.package,team_id=args.team_id)
+                print(json.dumps(result,ensure_ascii=False));return 0
+            except (ValueError,OSError):print('重建未完成：需要新输出路径和原始v1事件包');return 2
         agg_default = config.load_config().get("value", {}).get("aggregate_db",
                                                                 "~/.knowbase/value-aggregate.db")
         if args.value_cmd == "export":
@@ -1523,8 +1565,14 @@ def _main(argv=None):
         return 1
     if args.cmd == "executor":
         if args.executor_cmd == "probe":
-            return cmd_executor_probe(isolation=args.isolation, scope=args.scope)
-        return 1
+            return cmd_executor_probe(isolation=args.isolation, scope=args.scope,executor_id=args.id)
+        from .automation import configuration as ec
+        try:
+            if args.executor_cmd=='configure':result=ec.configure(args.config)
+            elif args.executor_cmd=='enable':result=ec.enable(args.id,[s.strip() for s in args.scopes.split(',') if s.strip()],trust_command=args.trust_command)
+            else:result=ec.disable()
+            print(json.dumps(result,ensure_ascii=False));return 0
+        except (ValueError,OSError,TypeError):print('执行器操作未完成：核对配置、探针回执及范围授权');return 3
     if args.cmd == "archive-sweep":
         return cmd_archive_sweep()
     if args.cmd == "review-sweep":

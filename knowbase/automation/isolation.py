@@ -10,6 +10,8 @@ from pathlib import Path
 def isolated_probe(executor_config, *, scope):
     from ..gitops import _kill_tree
     from ..credentials import transform
+    from .receipts import fingerprint
+    before=fingerprint(executor_config)
 
     with tempfile.TemporaryDirectory(prefix="knowbase-executor-probe-") as directory:
         root = Path(directory)
@@ -55,8 +57,11 @@ def isolated_probe(executor_config, *, scope):
             result = json.loads(out)
         except ValueError:
             return {"passed": False, "failure_reasons": ["probe_report_invalid"]}
-        return transform(result) if isinstance(result, dict) else {
-            "passed": False, "failure_reasons": ["probe_report_invalid"]}
+        if not isinstance(result,dict):return {'passed':False,'failure_reasons':['probe_report_invalid']}
+        if fingerprint(executor_config)!=before:
+            return {'passed':False,'failure_reasons':['executor_configuration_changed']}
+        result['config_hash']=before
+        return transform(result)
 
 
 def child_main():
@@ -64,7 +69,7 @@ def child_main():
     from contextlib import redirect_stdout
     from .. import config
     from ..__main__ import cmd_init
-    from .executor import CommandExecutorRunner
+    from .execution import make_runner
     from .protocol import run_isolation_probe
     from ..credentials import transform
 
@@ -73,7 +78,7 @@ def child_main():
         with redirect_stdout(io.StringIO()):
             if cmd_init():
                 raise RuntimeError("probe_init_failed")
-            runner = CommandExecutorRunner({**request["executor"],
+            runner = make_runner({**request["executor"],
                                              "working_directory": request["workspace"]})
             result = run_isolation_probe(runner, repo=config.repo_path(), scope=request["scope"])
     except Exception:

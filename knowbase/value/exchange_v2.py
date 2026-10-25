@@ -93,7 +93,7 @@ def build_package(raw_events: list[dict], *, source: dict, target_team: str,
 
 
 def export_events(repo, *, since: str = "", until: str = "",
-                  states: tuple[str, ...] = ()) -> dict:
+                  states: tuple[str, ...] = (), target_team: str | None = None) -> dict:
     """从本地 value_outbox 显式导出 v2 包；只读，不改任何事件状态。
 
     只选 v2 白名单类型；非 v2 事件不在本包内（走 v1 或留待），不是丢弃。
@@ -119,18 +119,26 @@ def export_events(repo, *, since: str = "", until: str = "",
             params.append(until)
         sql += " ORDER BY created_at,event_id"
         raw = []
-        for payload_json, _phash, source_key in conn.execute(sql, params).fetchall():
+        for payload_json, _phash, source_key in conn.execute(sql, params):
             try:
                 event = json.loads(payload_json)
             except ValueError:
                 continue
             if isinstance(event, dict) and event.get("event_type") in events_v2.V2_FIELDS:
                 raw.append({"event": event, "source_key": source_key})
+                if len(raw) >= events_v2.MAX_EVENTS: break
         identity = _read_identity(conn)
     finally:
         conn.close()
-    return build_package(raw, source=identity, target_team=identity.get("team_id", "default"),
-                         cursor={"since": since, "until": until})
+    if target_team is None:
+        from .. import config
+        target_team = config.load_config().get('value',{}).get('evidence_team_id','default')
+    package = build_package(raw,source=identity,target_team=target_team,cursor={'since':since,'until':until})
+    # A large pending outbox must make bounded forward progress, rather than fail forever.
+    while package.get('error') == 'PACKAGE_TOO_LARGE' and len(raw)>1:
+        raw=raw[:max(1,len(raw)//2)]
+        package=build_package(raw,source=identity,target_team=target_team,cursor={'since':since,'until':until})
+    return package
 
 
 def _read_identity(conn) -> dict:
@@ -164,7 +172,7 @@ def import_package(agg_conn, package: dict, *, team_id: str = "default") -> dict
                 "got": package["target_team"]}
     ids = [e["event"]["event_id"] for e in items
            if isinstance(e, dict) and isinstance(e.get("event"), dict)]
-    if sorted(ids) != sorted(package.get("event_ids") or []):
+    if len(set(ids)) != len(ids) or sorted(ids) != sorted(package.get("event_ids") or []):
         return {"error": "PACKAGE_MALFORMED", "detail": "event_ids do not match events"}
     expect_hash = hashlib.sha256(_canonical(
         [(e["event"]["event_id"], e["payload_hash"]) for e in items]
@@ -328,6 +336,29 @@ def acknowledge_receipts(git, repo, *, branch: str) -> dict:
                 continue
             if receipt.get("schema") != RECEIPT_SCHEMA_V2:
                 continue
+            package_id=receipt.get('package_id','')
+            if not isinstance(package_id,str) or not __import__('re').fullmatch(r'PKG2-[a-f0-9]{20}',package_id):
+                mismatched.append('invalid_package');continue
+            try:
+                package=json.loads(git.read(revision,PACKAGE_PREFIX+package_id+'.json') or '{}')
+                from .. import config
+                expected_team=config.load_config().get('value',{}).get('evidence_team_id','default')
+                identity=_read_identity(conn)
+                entries=package.get('events',[])
+                expected={e['event']['event_id']:e['payload_hash'] for e in entries}
+                received=receipt.get('events',[])
+                received_ids=[e['event_id'] for e in received]
+                valid=(package.get('schema')==events_v2.SCHEMA_V2
+                       and package.get('package_id')==package_id
+                       and _package_id(package.get('source',{}),package.get('target_team'),entries)==package_id
+                       and package.get('target_team')==receipt.get('team_id')==expected_team
+                       and package.get('source',{}).get('installation_id','')==identity['installation_id']
+                       and len(received_ids)==len(set(received_ids))==len(expected)
+                       and set(received_ids)==set(expected)==set(package.get('event_ids',[]))
+                       and all(e.get('payload_hash')==expected[e['event_id']] for e in received))
+                if not valid: mismatched.append(package_id);continue
+            except (TypeError,KeyError,ValueError):
+                mismatched.append(package_id);continue
             for entry in receipt.get("events", []):
                 event_id = entry.get("event_id", "")
                 row = conn.execute("SELECT payload_json FROM value_outbox WHERE event_id=?",

@@ -37,7 +37,7 @@ def _execute(args, *, required=True):
 
 
 def windows_xml(python, config_path, interval, *, user=None, argv=None,
-                  description="knowbase local team statistics collector"):
+                  description="knowbase local team statistics collector", persistent=False):
     """Native Task Scheduler XML; no shell, embedded credentials, or extra runtime."""
     ET.register_namespace("", NS)
     def add(parent, name, text=None, **attrs):
@@ -62,8 +62,10 @@ def windows_xml(python, config_path, interval, *, user=None, argv=None,
     settings=add(task,"Settings")
     for name,value in {"MultipleInstancesPolicy":"IgnoreNew","DisallowStartIfOnBatteries":"false",
                        "StopIfGoingOnBatteries":"false","StartWhenAvailable":"true","Enabled":"true",
-                       "ExecutionTimeLimit":"PT5M","AllowStartOnDemand":"true"}.items():
+                       "ExecutionTimeLimit":"PT0S" if persistent else "PT5M","AllowStartOnDemand":"true"}.items():
         add(settings,name,value)
+    if persistent:
+        restart=add(settings,'RestartOnFailure');add(restart,'Interval','PT1M');add(restart,'Count','3')
     actions=add(task,"Actions",Context="Collector");action=add(actions,"Exec")
     # Task XML has no environment block: set the explicit config before importing knowbase.
     loader="import os,runpy;os.environ['KNOWBASE_CONFIG']="+repr(str(config_path))+";runpy.run_module('knowbase',run_name='__main__',alter_sys=True)"
@@ -110,7 +112,7 @@ def _windows_snapshot(python, task_name=WINDOWS_TASK,
 
 def install(*, remove=False, label=LABEL, task_name=WINDOWS_TASK, argv=None,
             description="knowbase local team statistics collector",
-            descriptor_name="worker-task.xml"):
+            descriptor_name="worker-task.xml", persistent=False):
     cfg=config.load_config();python=fixed_python()
     if not python.exists():raise ValueError("fixed knowbase runtime must be installed first")
     from .service import root_path
@@ -127,6 +129,8 @@ def install(*, remove=False, label=LABEL, task_name=WINDOWS_TASK, argv=None,
                "StartInterval":interval,"RunAtLoad":True,
                "EnvironmentVariables":{"KNOWBASE_CONFIG":str(config.CONFIG_PATH.resolve())},
                "StandardOutPath":str(root/"worker.log"),"StandardErrorPath":str(root/"worker-error.log")}
+        if persistent:
+            value.pop('StartInterval',None);value.update(KeepAlive=True,ThrottleInterval=5)
         try:
             _atomic(path,plistlib.dumps(value))
             _execute(["launchctl","bootstrap",target,str(path)])
@@ -141,7 +145,8 @@ def install(*, remove=False, label=LABEL, task_name=WINDOWS_TASK, argv=None,
         files=[directory/f"{name}.service",directory/f"{name}.timer"]
         old=_backup(root,files)
         if remove:
-            _execute(["systemctl","--user","disable","--now",name+".timer"])
+            _execute(["systemctl","--user","disable","--now",name+".timer"],required=False)
+            _execute(["systemctl","--user","disable","--now",name+".service"],required=False)
             for path in files:path.unlink(missing_ok=True)
             _execute(["systemctl","--user","daemon-reload"])
             return {"worker":"removed","platform":"systemd-user"}
@@ -149,14 +154,21 @@ def install(*, remove=False, label=LABEL, task_name=WINDOWS_TASK, argv=None,
         command=" ".join(quote(arg) for arg in [python,"-I","-m","knowbase"]+(argv or ["team","sync"]))
         env=quote("KNOWBASE_CONFIG="+str(config.CONFIG_PATH.resolve()))
         try:
-            _atomic(files[0],f"[Service]\nType=oneshot\nEnvironment={env}\nExecStart={command}\nTimeoutStartSec=300\n".encode())
-            _atomic(files[1],f"[Timer]\nOnBootSec=60\nOnUnitActiveSec={interval}\nPersistent=true\n[Install]\nWantedBy=timers.target\n".encode())
+            if persistent:
+                _execute(['systemctl','--user','disable','--now',name+'.timer'],required=False)
+                files[1].unlink(missing_ok=True)
+                _atomic(files[0],f"[Service]\nType=simple\nEnvironment={env}\nExecStart={command}\nRestart=on-failure\nRestartSec=5\n[Install]\nWantedBy=default.target\n".encode())
+            else:
+                _atomic(files[0],f"[Service]\nType=oneshot\nEnvironment={env}\nExecStart={command}\nTimeoutStartSec=300\n".encode())
+                _atomic(files[1],f"[Timer]\nOnBootSec=60\nOnUnitActiveSec={interval}\nPersistent=true\n[Install]\nWantedBy=timers.target\n".encode())
             _execute(["systemctl","--user","daemon-reload"])
-            _execute(["systemctl","--user","enable","--now",name+".timer"])
+            _execute(["systemctl","--user","enable","--now",name+('.service' if persistent else '.timer')])
         except (OSError,RuntimeError):
             _execute(["systemctl","--user","disable","--now",name+".timer"],required=False)
+            if persistent:_execute(['systemctl','--user','disable','--now',name+'.service'],required=False)
             _restore(old);_execute(["systemctl","--user","daemon-reload"],required=False)
             if old[files[1]] is not None:_execute(["systemctl","--user","enable","--now",name+".timer"],required=False)
+            elif old[files[0]] is not None:_execute(['systemctl','--user','enable','--now',name+'.service'],required=False)
             raise RuntimeError("systemd install failed; previous configuration restored") from None
         return {"worker":"installed","platform":"systemd-user","interval_seconds":interval}
     if sys.platform=="win32":
@@ -166,7 +178,7 @@ def install(*, remove=False, label=LABEL, task_name=WINDOWS_TASK, argv=None,
             if registered is not None:_execute(["schtasks","/Delete","/TN",task_name,"/F"])
             path.unlink(missing_ok=True);return {"worker":"removed","platform":"task-scheduler"}
         try:
-            _atomic(path,windows_xml(python,config.CONFIG_PATH.resolve(),interval,argv=argv,description=description))
+            _atomic(path,windows_xml(python,config.CONFIG_PATH.resolve(),interval,argv=argv,description=description,persistent=persistent))
             _execute(["schtasks","/Create","/TN",task_name,"/XML",str(path),"/F"])
             _execute(["schtasks","/Query","/TN",task_name])
             _execute(["schtasks","/Run","/TN",task_name])

@@ -71,6 +71,11 @@ def validate_v2_event(event: dict) -> dict:
     payload = event.get("payload")
     if not isinstance(payload, dict):
         return {"error": "payload_not_a_mapping"}
+    if any(not isinstance(v,(str,int,float,bool,type(None))) for v in payload.values()):
+        return {'error':'payload_value_not_scalar'}
+    if etype in events.PAYLOAD_FIELDS:
+        try: events.validate_payload(etype,payload)
+        except (ValueError,TypeError): return {'error':'invalid_payload'}
     spec = V2_FIELDS[etype]
     allowed = spec["required"] | spec["optional"]
     extra = sorted(set(payload) - allowed)

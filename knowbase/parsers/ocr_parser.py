@@ -41,6 +41,7 @@ class OcrParser(DocumentParser):
 
     def parse(self, path: Path) -> ParsedDocument:
         from .errors import ParseError
+        from . import native_ocr
 
         # Layer 1: PIL（必须）
         try:
@@ -59,7 +60,9 @@ class OcrParser(DocumentParser):
                              path=str(path)) from e
 
         # Layer 3: tesseract 二进制（可选，但必需做 OCR）
-        if _check_tesseract_binary() is None:
+        binary = _check_tesseract_binary()
+        native = binary is None and native_ocr.available()
+        if binary is None and not native:
             raise ParseError(
                 parser=self.name,
                 reason=(
@@ -85,7 +88,7 @@ class OcrParser(DocumentParser):
 
         # OCR
         try:
-            text = pytesseract.image_to_string(img, lang="eng")
+            text = native_ocr.recognize(path) if native else pytesseract.image_to_string(img, lang="eng")
         except Exception as e:
             raise ParseError(parser=self.name,
                              reason=f"OCR failed: {e}",
@@ -96,7 +99,8 @@ class OcrParser(DocumentParser):
             text=text,
             meta={
                 "format": "ocr",
-                "language": "eng",
+                "engine": "macos-vision" if native else "tesseract",
+                "language": "zh-Hans,en-US" if native else "eng",
                 "width": width,
                 "height": height,
                 "mode": mode,

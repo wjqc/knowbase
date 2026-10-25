@@ -1,5 +1,7 @@
 # knowbase（薪火）
 
+2026-10-25：后台自动沉淀已补齐领取、分页、推理、提交、恢复与预算控制；必须显式授权范围且执行器探针通过后启用。无模型时基础检索仍可用。公司网络/模型与真实成员试点未在本轮验收，接入与边界见[本地能力补齐说明](docs/operations/autonomous-local-completion.md)。
+
 凭据脱敏修复与历史清洗：见 [凭据修复记录及 rc7 复核](docs/credential-redaction-2026-10-22.md)。`knowbase privacy-scrub` 默认只读盘点；`--apply --backup-dir <仓库外新目录>` 先私有备份再清洗。
 
 执行中检索与增量沉淀已进入实现验证：新增 `memory_context` 和 `memory_job_material`，支持分阶段查询、完整材料分页、技术经验/业务规则候选成卡与回执恢复。新机制默认关闭；升级与宿主配置见 [接入和回滚说明](docs/inflight-rollout.md)，真实验收边界见 [宿主能力记录](docs/host-capabilities.md)。
@@ -9,8 +11,8 @@
 原始材料（文档/代码/日志）以 source artifact 分层保真留存，不混入知识检索（ADR-0002）。
 
 - 存储：markdown + frontmatter（唯一真相）+ git 审计 + SQLite FTS5 派生索引（可重建）
-- 检索：在同一 `memory.db` 内执行词法 + dense 模糊双路召回、RRF 融合及原有 scope/可信度/新鲜度/反馈排序；不创建第二套数据库
-- 治理：人员标准/偏好 Agent 只能提案（staging 人审）；confidence/status 由服务端状态机管理
+- 检索：默认规则同义扩展+FTS5；可选内网真实Embedding通过质量、版本和覆盖检查后执行混合RRF检索。旧字符哈希向量不参与语义召回，不创建独立向量数据库。
+- 治理：受治理知识先进入候选，按明确激活策略及独立任务证据演进；confidence/status由服务端状态机管理，人工CLI保留为例外纠正入口
 - 完整设计：知识库 `通用/05-智能助手/Agent经验记忆库MCP服务-设计方案-v1.md`
 
 ## 环境要求
@@ -22,12 +24,12 @@
 
 ```powershell
 # 前置：Python ≥3.10 与 Git（winget install Python.Python.3.12 Git.Git），uv 官方脚本安装
-uv venv
-uv pip install -e .    # uv 自动识别 .venv，无需激活
-.venv\Scripts\python -m knowbase init
+uv venv "$env:USERPROFILE\.knowbase\runtime\venv"
+uv pip install --python "$env:USERPROFILE\.knowbase\runtime\venv\Scripts\python.exe" .
+& "$env:USERPROFILE\.knowbase\runtime\venv\Scripts\python.exe" -I -m knowbase init
 ```
 
-MCP 注册时 command 用 `.venv\Scripts\python.exe` 的完整路径（JSON 里写 `\\`），
+MCP 注册时 command 用唯一固定runtime的 `Scripts\python.exe` 完整路径（JSON 里写 `\\`），
 推荐 ZCode 用 `type: "process"`（参数数组，免转义）。钩子同样指向 Scripts 下的 python.exe。
 
 ## 五分钟接入
@@ -38,26 +40,27 @@ git clone <内网 GitLab 地址>/knowbase.git ~/work/knowbase && cd ~/work/knowb
 #    （内网 pip 慢就加镜像：-i https://pypi.tuna.tsinghua.edu.cn/simple）
 
 # 2. 安装
-uv venv && uv pip install -e .
+uv venv ~/.knowbase/runtime/venv
+uv pip install --python ~/.knowbase/runtime/venv/bin/python .
 
 # 3. 初始化（显式、幂等；创建 ~/.knowbase/config.json 与 ~/knowbase 记忆库）
-.venv/bin/python -m knowbase init
+~/.knowbase/runtime/venv/bin/python -I -m knowbase init
 
-# 4. 注册到你的 Agent（任选，command 指向本目录 venv 的 python）
+# 4. init 可选择Agent并安全写入配置；手工注册时也固定使用同一runtime
 ```
 
 **Claude Code**（`~/.claude.json` → mcpServers）：
 
 ```json
-"knowbase": { "command": "<你本机路径>/knowbase/.venv/bin/python",
-  "args": ["-m", "knowbase", "serve"],
+"knowbase": { "command": "<用户目录>/.knowbase/runtime/venv/bin/python",
+  "args": ["-I", "-m", "knowbase", "serve"],
   "env": { "KNOWBASE_AGENT_NAME": "claude-code-你的名字" } }
 ```
 
 **ZCode**（`~/.zcode/cli/config.json` → mcp.servers）：同上，`"type": "stdio"`。
 
 **Trae CN**（`~/Library/Application Support/Trae CN/User/mcp.json` → mcpServers）：同上；
-并把 `docs/trae-rules.md` 内容贴进 Trae 用户规则（Trae 无 hook、不读 AGENTS.md）。
+并核对 `docs/trae-rules.md` 与原生Hook开关。支持事件按宿主实际版本验证，不沿用“Trae无Hook”的旧结论。
 
 **KNOWBASE_AGENT_NAME 约定：`工具-姓名`**（如 `trae-lisi`）——只作工具来源归因，不认证身份或计算真实人数。
 
@@ -84,7 +87,7 @@ uv venv && uv pip install -e .
 
 Claude Code（`~/.claude/settings.json`）与 ZCode（`~/.zcode/cli/config.json`，**必须 `"enabled": true`**）：
 照抄本仓库维护者的接线，三事件 `SessionStart` / `UserPromptSubmit` / `Stop` 都调
-`<venv python> -m knowbase hook <事件> --style claude|zcode`。Trae 无 hook，贴 `docs/trae-rules.md` 即可。
+`<venv python> -m knowbase hook <事件> --style claude|zcode`。Trae使用其原生Hook配置，事件能力按版本单独核验。
 
 ## Agent 使用规则（Team 通用，六句话）
 
@@ -92,7 +95,7 @@ Claude Code（`~/.claude/settings.json`）与 ZCode（`~/.zcode/cli/config.json`
 2. 任务结束产生踩坑/决策/流程/约束 → `memory_save`（提示相似就改 `memory_update`）；新卡正文须含八项小节：**结论 / 解决的问题 / 适用条件 / 不适用条件 / 可执行动作 / 关键证据 / 验证情况 / 未知与待确认**（"视情况而定"不算适用条件、"参见某文档"不算证据、"测试通过"不算验证，lint 会拦）；
 3. 实际参考/采纳先用 `memory_use` 关联递送事件、任务和卡版本；验证结果后 `memory_feedback` 回填 helpful / not_helpful / outdated / incorrect，并传 `expected_content_revision/use_id/task_outcome_id`。同任务结果重试只应用一次；旧调用仅记录未绑定观察，不改变治理状态。正文变更会清除旧版本的验证；可信人工确认仍走 CLI `verify`，工具名不是人工身份；
 4. stale / once 的记忆采信前先验证；检索走 `memory_search`，不要整读 INDEX.md；
-5. 标准/偏好类保存会自动进 staging 待人审，属正常治理，勿绕过；
+5. 标准/偏好类保存先进入staging，按授权策略和证据流转，不绕过治理；
 6. body 里禁止明文密钥；经验卡禁止本机路径和仓外文档引用。文档结论必须正文自足或使用 knowbase 仓内相对路径；代码证据写成 `code:<项目>/<仓库相对路径>`（可带行号，lint 会拦违规写入）。**整篇文档等原始材料不入 memory_save**，走 `knowbase import` 导入为 source（见下节）。
 
 ### 结构化代码定位 `code_refs`
@@ -141,11 +144,11 @@ code_refs:
 `"verified"` 时任务前自动注入只取已验证经验（once 的新经验仍可被主动 search 检索到），
 默认 `"verified"`；已有配置显式 `"any"` 会保留兼容行为。MCP 主动检索不受置信度开关影响，但默认排除 staging/stale/reference。
 
-## 命令速查（全部 15 个 + value 汇总）
+## 常用命令速查
 
 未把虚拟环境加入 PATH 时，将 `knowbase` 替换为 `.venv/bin/python -m knowbase`。
 
-**治理（仅人工，Agent 无对应通道）**
+**人工例外治理入口（不代表日常必须人工操作）**
 
 | 命令 | 用途 |
 |---|---|
@@ -197,8 +200,8 @@ code_refs:
 
 ## 已知边界（诚实版）
 
-- Windows 为实验性支持：跨进程锁在 Windows 走 msvcrt 字节范围锁（标准模式，但未在 Windows 真机回归），首次使用建议先跑 `.venv\Scripts\python tests\test_e2e.py` 验证；同义改写类查询命中弱（语义检索二期，本地向量方案已备）；
-- Trae 无 hook，自动化程度低于 Claude Code / ZCode；
+- Windows 为实验性支持：跨进程锁在 Windows 走 msvcrt 字节范围锁（标准模式，但未在 Windows 真机回归），首次使用建议先跑 `.venv\Scripts\python tests\test_e2e.py` 验证；真实语义提升须配置公司内网模型并通过质量验收，默认本地检索可用；
+- Trae原生Hook具备接入实现；真实宿主/版本上的消费链仍需独立验收；
 - 记忆库含内部系统经验，**只推内网 GitLab，永不推公网**。
 
 
@@ -206,8 +209,8 @@ code_refs:
 
 - `init --import-from` 要求明确 scope（通用资料填 global）；import 只生成 source artifact（sources/objects 快照 + manifests），不产生知识卡、不进默认检索。普通 init 仍为空库初始化，不扫描外部目录。
 - source 快照按内容 sha256 去重（跨路径同内容只存一份）；同路径源文件变化产生新快照，不覆盖旧内容。源文件绝对路径仅留在本机 `memory.db.source_state` 做幂等，不写入共享内容。支持 Markdown/TXT/PDF/DOCX/XLSX/PPTX/HTML/图片 OCR/代码/日志。按项目分别导入，不把混合项目目录全部归为 global。
-- 可复用知识用 `memory_save` 提炼（八项小节结构，lint 强制）；source → card 的自动提取与审核链路属 P1。
-- 默认 MCP 检索仅 active 且非 staging，且排除 reference（原始材料卡）与 source；无项目上下文只查 global。有项目上下文时必须通过 `scope_map`、已存在的同名 scope 或显式参数确定项目，无法解析就拒绝检索，避免跨项目召回。自动 Hook 与 MCP 使用同一混合检索路径。
+- 可复用知识用 `memory_save` 提炼（八项小节结构，lint 强制）；source→card后台提炼已实现，默认关闭，启用依赖执行器授权、有效探针回执及明确scope。
+- 默认 MCP 检索仅 active 且非 staging，且排除 reference（原始材料卡）与 source；无项目上下文只查 global。有项目上下文时必须通过 `scope_map`、已存在的同名 scope 或显式参数确定项目，无法解析就拒绝检索，避免跨项目召回。Hook只使用本地检索；主动MCP可在内网模型与质量/索引条件满足时使用L3。
 - 旧 `reference`（R 卡）只读不写不检索：`memory_save` 拒绝该类型，`memory_search` 不返回（显式 type=reference 也拒绝），`memory_read` 可单条查看并带"原始材料卡"提示；INDEX.md 速览不再列出，仅在头部计数标注。
 - 新卡 `schema: card-v2` 强制八项小节与内容质量（空洞适用条件/纯引用证据/"测试通过"式验证/空小节均拦截）；存量卡不带标记沿用旧规则，`memory_update` 不受影响，待 P3 迁移。
 - Hook 单词兜底要求命中标题/标签，或至少两个关键词命中正文；输出明确为候选，需检查适用项目、版本、证据和验证日期。词法分数不是正确率，verified 也不保证永远正确。

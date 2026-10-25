@@ -454,6 +454,21 @@ MIGRATIONS: list[tuple[int, str]] = [
     ALTER TABLE automation_schedule ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE automation_schedule ADD COLUMN last_status TEXT NOT NULL DEFAULT '';
     """),
+    (29, """
+    CREATE TABLE executor_runs(
+      run_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, batch_id TEXT NOT NULL,
+      executor_id TEXT NOT NULL, config_hash TEXT NOT NULL, input_hash TEXT NOT NULL,
+      request_id TEXT NOT NULL UNIQUE, fencing_token INTEGER NOT NULL,
+      state TEXT NOT NULL, response_json TEXT, result_json TEXT,
+      usage_json TEXT, usage_source TEXT NOT NULL DEFAULT 'unavailable',
+      error_code TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    ALTER TABLE executor_runs ADD COLUMN invoked INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX idx_executor_runs_recover ON executor_runs(job_id,state);
+    CREATE INDEX idx_executor_runs_cache ON executor_runs(input_hash,config_hash);
+    CREATE TABLE automation_budget(
+      day TEXT PRIMARY KEY, calls INTEGER NOT NULL DEFAULT 0,
+      input_chars INTEGER NOT NULL DEFAULT 0);
+    """),
 ]
 
 

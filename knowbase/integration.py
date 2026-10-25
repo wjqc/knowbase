@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import shlex
+import sys
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -62,8 +63,9 @@ def _same_command(actual,expected):
     except ValueError:return False
 
 
-def runtime_command(home):
-    return str(home / ".knowbase/runtime/venv/bin/python")
+def runtime_command(home, platform=None):
+    relative = '.knowbase/runtime/venv/Scripts/python.exe' if (platform or sys.platform)=='win32' else '.knowbase/runtime/venv/bin/python'
+    return str(home / relative)
 
 
 def discover(home=None):
