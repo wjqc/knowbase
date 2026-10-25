@@ -81,3 +81,5 @@ macOS缺Tesseract时，可使用系统Vision+Swift识别中英文图片，仍走
 公司网络/VPN/认证未验证、未修改；未向公司模型发探针。生产Embedding和文本执行器未凭空配置，P2默认不开启。真实执行器接入通过后才有条件运行生产自动沉淀；P5仍须真实成员/任务、独立相关性样本及同质量成本对照。Windows原生、真实文档OCR质量和缺原始证据的历史身份分别保留待验或不可恢复状态。
 
 本轮最终源码回归：935 passed、1 skipped（123.40秒）；包含无真实模型、无公司网络的P2正式控制器及本地文本协议/证据/调度反例。
+
+本机升级：功能提交f806d47已在唯一runtime原地安装，迁移28→29，204张卡与原日志/队列/身份一致。备份`~/.knowbase/backups/local-completion-20261025-114231`。安装态stdio2项及隔离完整P2 CLI流程通过；生产automation.enabled=false、executor_runs=0。macOS worker已使用KeepAlive，不再依赖短任务启动间隔。没有启用真实文本/Embedding模型，没有将公司网络可用性记为已验收。清单以runtime manifest的源码提交和内容构建标识为准。

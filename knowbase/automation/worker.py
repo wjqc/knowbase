@@ -21,7 +21,7 @@ from .. import gitops, index, jobs, migrations
 LEASE_SINGLETON = "worker"
 LEASE_SECONDS = 300
 
-# (kind, 默认间隔秒, 说明)。提炼位只占位，handler 恒返回 blocked，不调用执行器。
+# (kind, 默认间隔秒, 说明)。提炼需要显式授权与有效执行器探针回执。
 TASK_DEFS = (
     ("lease_recovery", 60, "租约/未结算回执恢复"),
     ("knowledge_sync", 60, "知识同步"),
@@ -30,7 +30,7 @@ TASK_DEFS = (
     ("archive_sweep", 86400, "自动归档/候选清理"),
     ("conflict_recheck", 86400, "冲突复验"),
     ("vector_maintenance", 30, "可选向量维护"),
-    ("distillation", 60, "自动提炼（P2 阻断中，仅占位）"),
+    ("distillation", 60, "自动提炼（授权与探针条件满足时运行）"),
 )
 TASK_INTERVALS = {kind: interval for kind, interval, _ in TASK_DEFS}
 WORKER_LABEL = "com.knowbase.worker"

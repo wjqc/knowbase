@@ -1,12 +1,12 @@
 # 本机三宿主 knowbase 接入（唯一运行版本）
 
-2026-10-24 已原地安装 0.2.0rc8，来源提交 `ad06a7f`，构建 `ac0713e061bcaeaa`；101 个包文件与提交源码一致，不是 editable 安装。启动 Python：
+2026-10-25 已原地更新 0.2.0rc8 的自动化能力补齐版本（功能提交`f806d47`）；确切构建及源码提交记录在固定runtime的active/manifest中，不是editable安装。启动 Python：
 
 `/Users/qc/.knowbase/runtime/venv/bin/python`
 
 三个 MCP 均使用 `-I -m knowbase serve`，共享原 `~/knowbase/memory.db`；env.KNOWBASE_AGENT_NAME 分别为 zcode / claude-code / trae。
 
-本次真实库已从迁移22升至28，204张知识卡、身份、日志和队列保留。新统一worker已运行，替换旧team定时入口；提炼仍blocked，Embedding未启用，检索为L2。共享Git同步当前仍报错并退避重试。旧MCP连接已关闭，真实宿主新会话加载仍需重连；以下历史UI配置记录不替代本次重连验收。详见[本机升级记录](../operations/runtime-ad06a7f-local-upgrade.md)。
+真实库已升级到迁移29，204张知识卡、身份、日志和队列保留。统一worker常驻运行；P2完整链已实现，但生产执行器未配置/授权，自动提炼仍关闭。Embedding未启用，基础检索L2。本轮未验证公司内网、不改网络配置，保留原后台同步退避。真实宿主新会话加载仍需重连；以下历史UI记录不替代当前会话验收。详见[能力补齐与接入说明](../operations/autonomous-local-completion.md)。
 
 | 宿主 | MCP 配置 | Hook 配置与事件 |
 |---|---|---|
@@ -27,7 +27,7 @@ Trae 设置界面已确认：专用 Hook 开启，导入 Claude Hook 关闭，�
 rc6 修复及 rc7 独立复核、历史清洗和验证见 [凭据修复记录](../credential-redaction-2026-10-22.md)。`duplicate_evaluation` 必须放在每个 `candidates[i]` 内部，不是 `memory_job_submit` 顶层参数。历史清洗撤销了受影响材料的旧租约，未完成作业需重新领取。
 
 ## 验证及边界
-- 本次源码全套：912 passed、1 skipped。历史rc7为603 passed、1 skipped，不能混作本次结果。
+- 本次源码全套：935 passed、1 skipped。历史ad06a7f为912 passed、1 skipped，rc7为603 passed、1 skipped，不能混作本次结果。
 - 本次固定包安装态stdio端到端2 passed；隔离协议/build探针通过、列出17工具。三宿主MCP配置检查与真实会话加载分开记录。
 - 三宿主18条实际Hook配置命令逐项在隔离库通过，Stop静默；安装态合成执行器探针通过，但真实模型执行器仍未验收。
 - 真实库迁移21兼容旧命令日志，宿主归属通过关联表补充；schema20及更早数据原地升级后可正常连接，完整性检查通过，凭据扫描覆盖字段无待修改项。191 卡/25 feedback/2 knowledge_uses 是 rc5 上线时的历史库存，本次不以其作为当前计数；没有批量激活历史候选。
