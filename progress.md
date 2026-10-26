@@ -1,3 +1,13 @@
+# 2026-10-26 团队程序自动升级
+
+已实现独立程序源/定时更新、稳定MCP连接与Hook维护入口、影子验证、原地安装、日志恢复/安全回滚、老成员一次引导与运维命令；保留并补齐rc9真实Git身份修复（证据通道也复用）。
+
+隔离实测：两台成员环境真实Git/wheel/安装/MCP连接，正常升级、中断恢复、安装后失败回滚、一次bootstrap后继续更新均通过；全量954 passed/1 skipped，末次定向34 passed。临时运行包由TemporaryDirectory清理，无生产数据/公司网络/同事设备变更。
+
+本机有3个旧直连MCP进程，未强杀，首次引导待旧连接退出；当前配置/安装态未冒充已更新。Windows/Linux真实调度、宿主UI新说明生效及其他成员接入待验证。
+
+---
+
 # 2026-10-25 无内网依赖的能力补齐
 
 已接通P2领取/分页/提交/读回、探针回执、预算/续租/响应缓存与显式配置启用；修复v2分包/团队与收据成员校验、常驻OS任务、维护恢复。新增本地测试通过，最终全量935 passed/1 skipped（123.40秒）；离线历史重建、init一站式配置/探针/启用、后台费用分级已覆盖。macOS Vision实际合成图OCR已通过；停止了需升级16个依赖的brew安装，未扩大系统依赖。
@@ -1063,3 +1073,11 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 
 ## 2026-10-24 team-stats收口与本机升级
 用户已授权完成剩余并在本机运行最新。复核：固定runtime为rc7（非editable路径），统计已有LaunchAgent900秒任务，outgoing120但仅pending1；不重新enroll或改设备身份。先完成代码/组合回归后在线备份并原地升级。
+
+## 2026-10-26 团队统计上传被企业 Git 门禁拒绝（AIQGATE 邮箱域规则）修复
+- 事故：远端 knowbase-stats 分支停在 10-23 11:21，此后每次 sync 报"统计上传失败"（13 份待发积压 3 天），receive/readme 正常。插桩 send() 抓到真实拒绝原因：公司 Git（10.21.20.112:18084）AIQGATE pre-receive "Rule: Check_Username" 要求提交邮箱域为 asiainfo.com，而 transport 硬编码 user.email=statistics@knowbase.local；带文件变更的推送全被拒。git push --dry-run 不触发服务端钩子，不能作为可推依据（本次实测教训）。
+- 修复：GitData 支持传入提交身份（默认保持合成身份不变）；service.commit_identity 按 team.commit_name/commit_email → 本机 git 全局身份 → 合成默认值逐字段解析，stats 与 README 两个 GitData 均接入；config DEFAULTS 增加两个空默认键。
+- 回归：tests/test_team_stats.py 新增 3 项（本地 bare 装 asiainfo.com pre-receive 门禁复现：合成身份被拒待发保留/真实身份过门禁且远端提交邮箱可读回；身份解析优先级含逐字段回退；service 端到端过门禁 errors=[]）；team 定向 40 passed，全量 938 passed / 1 skipped（一次性 venv editable，离线）。
+- 生产：备份 ~/.knowbase/backups/team-identity-20261026-170306（config + memory.db SQLite backup + team/state.db）；版本 0.2.0rc9 原地安装唯一运行时，模块与源码逐字节一致；生产 config team 块显式写入 commit_name/commit_email=wenjian3/wenjian3@asiainfo.com（LaunchAgent 环境不依赖 HOME 解析）。
+- 验证：team sync 首次全绿，13 份待发全部 ACK 清零（accepted 120→132），远端 knowbase-stats 恢复推进，README 重发布（469ab5cf）；快照 calls 3824→7187、水位 10-26 09:03、zcode 宿主归因 3606 次显现。wenjian3 因恢复期重叠标记 recovery_required（保守下界口径）。
+- 边界与待办：yizhuo/zhaozk11 仍为 pending 0 设备 0 上报——"成员在用"未在统计链路兑现；两台设备需安装含本修复的版本并 enroll，否则同样会被门禁拒绝。本修复 5 个文件未提交待审。

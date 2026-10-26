@@ -27,5 +27,6 @@ def memory_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("KNOWBASE_CONFIG", str(cfg_path))
     monkeypatch.setenv("KNOWBASE_REPO_PATH", str(repo))
     monkeypatch.setenv("KNOWBASE_AGENT_NAME", "pytest-inflight")
+    monkeypatch.setenv('KNOWBASE_RUNTIME_ROOT',str(tmp_path/'runtime'))
     assert cmd_init() == 0
     return repo

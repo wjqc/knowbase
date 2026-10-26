@@ -203,6 +203,10 @@ def revision(conn):
 
 def maintenance(repo):
     """A server-lifetime maintenance tick; Hook processes never start this timer."""
+    from pathlib import Path
+    import os
+    runtime=Path(os.environ.get('KNOWBASE_RUNTIME_ROOT',str(Path.home()/'.knowbase/runtime')))
+    if (runtime/'update-drain.json').exists():return
     options=si.settings()
     if not options.get("enabled"):return
     wake(repo)

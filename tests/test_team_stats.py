@@ -392,3 +392,79 @@ def test_explicit_rebind_preserves_evidence_and_rejects_wrong_database(memory_re
     db=index.connect(memory_repo);identity=__import__('knowbase.value.identity',fromlist=['_put'])
     identity._put(db,'installation_id','another-installation');db.commit();db.close()
     with pytest.raises(ValueError,match='database identity mismatch'):service.rebind_device()
+
+
+def _email_gate(bare):
+    """Simulate a corporate AIQGATE-style pre-receive e-mail domain rule."""
+    hook = bare / 'hooks' / 'pre-receive'
+    hook.write_text(
+        '#!/bin/sh\n'
+        'zero=0000000000000000000000000000000000000000\n'
+        'while read old new ref; do\n'
+        '  [ "$new" = "$zero" ] && continue\n'
+        '  email=$(git log -1 --format=%ce "$new")\n'
+        '  case "$email" in\n'
+        '    *@asiainfo.com) ;;\n'
+        '    *) echo "Email domain should be asiainfo.com. Your current email is $email" >&2; exit 1;;\n'
+        '  esac\n'
+        'done\n'
+        'exit 0\n')
+    hook.chmod(0o755)
+
+
+def test_gateway_email_domain_gate_requires_real_committer_identity(tmp_path, remote):
+    url, _ = remote
+    _email_gate(tmp_path / 'remote.git')
+    # The synthetic default identity is declined; pending statistics stay retained.
+    g0, c0 = device(tmp_path / 'default', url, 'dave', 5)
+    with pytest.raises(TransportError):
+        send(g0, c0, 'team')
+    # Both the member registration and the daily summary stay pending.
+    assert c0.execute('SELECT COUNT(*) FROM outgoing WHERE hash<>ack').fetchone()[0] == 2
+    # A corporate identity passes the same gate and is confirmed on read-back.
+    g1, c1 = device(tmp_path / 'real', url, 'erin', 7)
+    g1.identity = ('erin', 'erin@asiainfo.com')
+    send(g1, c1, 'team')
+    receive(g1, c1, 'team')
+    assert c1.execute('SELECT COUNT(*) FROM outgoing WHERE hash<>ack').fetchone()[0] == 0
+    assert g1.run('log', '-1', '--format=%ce', 'refs/remotes/team/knowbase-stats') == 'erin@asiainfo.com'
+    assert report.build(c1, now=NOW)['coverage']['received'] == 1
+    for c in (c0, c1):
+        c.close()
+
+
+def test_commit_identity_resolution_order(memory_repo, monkeypatch):
+    cfg = config.load_config()
+    cfg['team'].update(commit_name='ops', commit_email='ops@asiainfo.com')
+    assert service.commit_identity(cfg) == ('ops', 'ops@asiainfo.com')
+    def fake_run_git(args, timeout):
+        return (0, {'user.name': ' ambient-user\n', 'user.email': 'ambient@asiainfo.com\n'}[args[-1]], '')
+    monkeypatch.setattr(service.gitops, '_run_git', fake_run_git)
+    # Per-field fallback: explicit e-mail keeps the machine's own name.
+    cfg['team'].update(commit_name='', commit_email='ops@asiainfo.com')
+    assert service.commit_identity(cfg) == ('ambient-user', 'ops@asiainfo.com')
+    # Empty config falls back to the ambient Git identity entirely.
+    cfg['team'].update(commit_name='', commit_email='')
+    assert service.commit_identity(cfg) == ('ambient-user', 'ambient@asiainfo.com')
+    # No config and no Git identity keeps the synthetic default.
+    monkeypatch.setattr(service.gitops, '_run_git', lambda args, timeout: (1, '', ''))
+    assert service.commit_identity(cfg) == GitData.DEFAULT_IDENTITY
+
+
+def test_service_pushes_statistics_through_email_domain_gate(memory_repo, tmp_path, remote):
+    url, _ = remote
+    _email_gate(tmp_path / 'remote.git')
+    cfg = config.load_config()
+    cfg['git']['remote'].update(url=url, branch='main')
+    cfg['git']['allowed_remote_prefixes'] = [url]
+    cfg['team'].update(data_dir=str(tmp_path / 'team-data'), dashboard_output=str(tmp_path / 'dashboard.html'),
+                       commit_name='alice', commit_email='alice@asiainfo.com')
+    cfg['dashboard']['host_usage_source'] = 'none'
+    service._save_config(cfg)
+    assert service.enroll('alice', 'alice', publisher=True)['enrolled']
+    for _ in range(3):
+        telemetry.record('mcp', 'memory_search', 'ok', 1)
+    result = service.run()
+    assert result['errors'] == [] and result['coverage']['received'] == 1 and result['pending_files'] == 0
+    snap = json.loads((tmp_path / 'team-data' / 'snapshot.json').read_text())
+    assert snap['calls'] == 3

@@ -18,7 +18,11 @@ class TransportError(RuntimeError):
 
 
 class GitData:
-    def __init__(self, root, remote, prefixes):
+    # Corporate gateways (AIQGATE-style pre-receive rules) may require a real
+    # committer domain; callers resolve one and None keeps the synthetic default.
+    DEFAULT_IDENTITY = ("knowbase statistics", "statistics@knowbase.local")
+
+    def __init__(self, root, remote, prefixes, *, identity=None):
         self.root = Path(root).resolve()
         # File remotes require an explicit, narrowly scoped file:// prefix. Defaults
         # only allow the internal team server; no implicit local/public exception.
@@ -38,6 +42,7 @@ class GitData:
         if not self.repo.exists():
             self._raw(["git", "init", "--bare", str(self.repo)])
             marker.write_text(expected)
+        self.identity = tuple(identity) if identity else None
 
     def _raw(self, args, *, missing=False):
         try:
@@ -52,8 +57,9 @@ class GitData:
         return out.strip()
 
     def run(self, *args):
+        name, email = self.identity or self.DEFAULT_IDENTITY
         return self._raw(["git", "--git-dir", str(self.repo), "-c", "core.hooksPath=/dev/null",
-                          "-c", "user.name=knowbase statistics", "-c", "user.email=statistics@knowbase.local", *args])
+                          "-c", f"user.name={name}", "-c", f"user.email={email}", *args])
 
     def fetch(self, branch):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./-]{0,120}", branch) or ".." in branch:

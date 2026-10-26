@@ -208,6 +208,7 @@ def _outcome(result):
 # ---------- 各任务 handler（永不向 tick 外抛异常） ----------
 
 def _h_lease_recovery(repo, conn, cfg) -> dict:
+    from ..updates.recovery import recover_hooks
     from ..commit_adapter import recover_intents
     from ..extraction.materialize import recover
     from .distillation import prepare_due
@@ -218,7 +219,8 @@ def _h_lease_recovery(repo, conn, cfg) -> dict:
         intents = recover_intents(repo,conn)
     pending = conn.execute("SELECT DISTINCT job_id FROM job_submissions WHERE state!='done' LIMIT 10").fetchall()
     for (job_id,) in pending: recover(repo,conn,job_id)
-    return {"recovered": expired, 'prepared':prepared,'intents': intents['recovered'], 'receipts_checked':len(pending)}
+    return {"recovered": expired, 'prepared':prepared,'intents': intents['recovered'], 'receipts_checked':len(pending),
+            'update_hooks':recover_hooks(repo,conn,cfg)}
 
 
 def _h_knowledge_sync(repo, conn, cfg) -> dict:
@@ -244,12 +246,13 @@ def _h_evidence_exchange(repo, conn, cfg) -> dict:
         return {"skipped": "evidence_role_off"}
     from ..value import exchange_v2
     from ..team.transport import GitData
+    from ..team.service import commit_identity
     remote = str(value_cfg.get("evidence_remote") or "")
     branch = str(value_cfg.get("evidence_branch") or "knowbase-value-events-v2")
     root = Path(str(value_cfg.get("evidence_root") or "~/.knowbase/evidence")).expanduser()
     prefixes = list(cfg.get("git", {}).get("allowed_remote_prefixes", []) or [])
     try:
-        git = GitData(root, remote, prefixes)
+        git = GitData(root, remote, prefixes,identity=commit_identity(cfg))
     except Exception as exc:
         return {"error": "evidence_transport_unavailable", "detail": type(exc).__name__}
     if role == "sender":
@@ -322,6 +325,9 @@ def tick(repo, *, owner: str = "") -> dict:
     返回 {lease, ran: [{kind, result|error}], held_by}。单个任务失败不中断其余任务。
     """
     repo = Path(repo)
+    import os
+    update_root=Path(os.environ.get('KNOWBASE_RUNTIME_ROOT',str(Path.home()/'.knowbase/runtime')))
+    if (update_root/'update-drain.json').exists():return {'lease':'updating','ran':[]}
     cfg = app_config.load_config()
     conn = _connect(repo)
     stop, lost = threading.Event(), threading.Event()
@@ -333,6 +339,7 @@ def tick(repo, *, owner: str = "") -> dict:
         if not leased:
             held = lease_status(conn)
             return {"lease": "held_by_other", "held_by": held["owner"], "ran": []}
+        if (update_root/'update-drain.json').exists():return {'lease':'updating','ran':[]}
         heartbeat = threading.Thread(target=_heartbeat, args=(repo, *leased, stop, lost), daemon=True)
         heartbeat.start()
         ensure_schedule(conn)

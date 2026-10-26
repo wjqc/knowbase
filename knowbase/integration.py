@@ -68,6 +68,41 @@ def runtime_command(home, platform=None):
     return str(home / relative)
 
 
+def serve_args(home, managed=False):
+    return ['-I',str(home/'.knowbase/runtime/mcp_bridge.py')] if managed else ['-I','-m','knowbase','serve']
+
+
+def hook_args(home, action, style, managed=False):
+    return (['-I',str(home/'.knowbase/runtime/entry.py')] if managed else ['-I','-m','knowbase'])+['hook',action,'--style',style]
+
+
+def valid_serve_args(args,home):return args in (serve_args(home),serve_args(home,True))
+
+
+def legacy_serve_args(args,home):return valid_serve_args(args,home) or args==['-m','knowbase','serve']
+
+
+def _migrate_hook(actual, expected, home, action, style):
+    """Upgrade only a recognized knowbase command; keep timeouts, matchers and identity env."""
+    if actual.get('type')!=expected.get('type'):return False
+    known=(hook_args(home,action,style),hook_args(home,action,style)[1:],hook_args(home,action,style,True))
+    if actual.get('type')=='process':
+        if actual.get('args') not in known:
+            return False
+        actual.update(command=expected['command'],args=expected['args']);return True
+    if actual.get('type')!='command':return False
+    try:tokens=shlex.split(actual.get('command',''))
+    except ValueError:return False
+    prefix=[]
+    if tokens[:1]==['env']:
+        prefix=[tokens.pop(0)]
+        while tokens and tokens[0].startswith('KNOWBASE_AGENT_NAME='):prefix.append(tokens.pop(0))
+    if len(tokens)<2 or tokens[1:] not in known:
+        return False
+    actual['command']=' '.join(shlex.quote(x) for x in prefix)+(' ' if prefix else '')+expected['command']
+    return True
+
+
 def discover(home=None):
     home = Path(home or Path.home()).resolve()
     result = []
@@ -81,7 +116,7 @@ def discover(home=None):
         try:
             server = _section(_document(_read(p)), host["key"]).get("knowbase", {})
             item["configured"] = (isinstance(server, dict) and server.get("command") == runtime_command(home) and
-                                  server.get("args") == ["-I", "-m", "knowbase", "serve"])
+                                  valid_serve_args(server.get('args'),home))
             hdoc = _document(_read(h))
             hooks = hdoc.get("hooks", {})
             if name == "zcode":
@@ -105,18 +140,24 @@ def discover(home=None):
             try:
                 if name=="codex":
                     own=_toml(_read(path)).get("mcp_servers",{}).get("knowbase",{})
-                    item["configured"]=own.get("command")==runtime_command(home) and own.get("args")==["-I","-m","knowbase","serve"]
+                    item["configured"]=own.get("command")==runtime_command(home) and valid_serve_args(own.get('args'),home)
                 else:
                     own=_jsonc_tokens(_read(path))[2].get("mcp",{}).get("knowbase",{})
-                    item["configured"]=own.get("command")==[runtime_command(home),"-I","-m","knowbase","serve"]
+                    item["configured"]=own.get('command') in ([runtime_command(home),*serve_args(home)],[runtime_command(home),*serve_args(home,True)])
             except (ValueError,OSError,TypeError):item["error"]="invalid_configuration"
             item.update(host_metadata(name,home))
             result.append(item)
     return result
 
 
-def plan(agents, home=None):
+def plan(agents, home=None, *, managed=None):
     home = Path(home or Path.home()).resolve()
+    if managed is None:
+        try:
+            from . import config
+            settings=json.loads((home/'.knowbase/updates.json').read_text())
+            managed=bool(settings.get('enabled') and settings.get('config_path')==str(config.CONFIG_PATH.resolve()))
+        except (OSError,ValueError):managed=False
     documents, originals = {}, {}
     def document(rel):
         path = home / rel
@@ -134,19 +175,20 @@ def plan(agents, home=None):
         if name not in HOSTS:
             raise IntegrationError("UNSUPPORTED_HOST:" + name)
         host = HOSTS[name]
-        server = {"command": runtime_command(home), "args": ["-I", "-m", "knowbase", "serve"],
+        server = {"command": runtime_command(home), "args": serve_args(home,managed),
                   "env": {"KNOWBASE_AGENT_NAME": name}}
         from . import config
         server["env"]["KNOWBASE_CONFIG"] = str(config.CONFIG_PATH.resolve())
         servers = _section(document(host["mcp"]), host["key"])
         existing = servers.get("knowbase")
         if existing and (not isinstance(existing, dict) or
-                         existing.get("command") != server["command"] or existing.get("args") != server["args"]):
+                         (existing.get("command") != server["command"] and not managed) or not (legacy_serve_args(existing.get('args'),home) if managed else valid_serve_args(existing.get('args'),home))):
             raise IntegrationError("EXISTING_KNOWBASE_CONFLICT:" + name)
         current_env = (existing or {}).get("env", {})
-        if not isinstance(current_env, dict) or any(k in current_env and current_env[k] != v for k,v in server["env"].items()):
+        if not isinstance(current_env, dict) or any(k in current_env and current_env[k] != v for k,v in server["env"].items() if not (managed and k=='KNOWBASE_AGENT_NAME')):
             raise IntegrationError("EXISTING_KNOWBASE_ENV_CONFLICT:" + name)
         server["env"] = {**current_env, **server["env"]}
+        if managed and current_env.get('KNOWBASE_AGENT_NAME'):server['env']['KNOWBASE_AGENT_NAME']=current_env['KNOWBASE_AGENT_NAME']
         servers["knowbase"] = {**(existing or {}), **server}
         if not host["hooks"]:continue
         hooks = _section(document(host["hooks"]), ("hooks", "events") if name == "zcode" else ("hooks",))
@@ -155,8 +197,8 @@ def plan(agents, home=None):
         if name in {"claude-code","zcode"}:events["PostToolUseFailure"]="tool-failure"
         if name=="claude-code":events["PreCompact"]="before-compact"
         for event, action in events.items():
-            command = f'{shlex.quote(runtime_command(home))} -I -m knowbase hook {action} --style {host["style"]}'
-            handler = ({"type": "process", "command": runtime_command(home), "args": ["-I", "-m", "knowbase", "hook", action, "--style", host["style"]], "timeoutMs": 1000}
+            command = ' '.join(shlex.quote(x) for x in [runtime_command(home),*hook_args(home,action,host['style'],managed)])
+            handler = ({"type": "process", "command": runtime_command(home), "args": hook_args(home,action,host['style'],managed), "timeoutMs": 1000}
                        if name == "zcode" else {"type": "command", "command": command, "timeout": 1})
             entries = hooks.setdefault(event, [])
             if not isinstance(entries, list):
@@ -167,13 +209,14 @@ def plan(agents, home=None):
             owned = [h for h in handlers if own(h)]
             if owned:
                 for h in owned:
+                    if managed and _migrate_hook(h,handler,home,action,host['style']):continue
                     same_command=_same_command(h,handler)
                     if not same_command or any(h.get(k) != handler.get(k) for k in ("type", "args")):
                         raise IntegrationError("EXISTING_HOOK_CONFLICT:" + name + ":" + event)
                     # Preserve the existing timeout and matchers. No replacement of user handlers.
             if not owned:
                 entries.append({"hooks": [handler]})
-    return extra_plan(extra,home) + [{"path": str(path), "before": originals[path],
+    return extra_plan(extra,home,managed=managed) + [{"path": str(path), "before": originals[path],
              "after": (json.dumps(doc, ensure_ascii=False, indent=2) + "\n").encode()}
             for path, doc in documents.items() if doc != _document(originals[path])]
 
@@ -350,7 +393,7 @@ def _jsonc_merge(raw,key,value):
     return result
 
 
-def extra_plan(agents,home):
+def extra_plan(agents,home, *, managed=False):
     from . import config
     result=[]
     command=runtime_command(home);env={'KNOWBASE_AGENT_NAME':'','KNOWBASE_CONFIG':str(config.CONFIG_PATH.resolve())}
@@ -358,30 +401,54 @@ def extra_plan(agents,home):
         ownenv={**env,'KNOWBASE_AGENT_NAME':name}
         if name=='codex':
             path=home/'.codex/config.toml';before=_read(path);doc=_toml(before)
-            server={'command':command,'args':['-I','-m','knowbase','serve'],'env':ownenv}
+            server={'command':command,'args':serve_args(home,managed),'env':ownenv}
             if not isinstance(doc.get('hooks',{}),dict) or not isinstance(doc.get('mcp_servers',{}),dict):raise IntegrationError('HOST_SCHEMA_CONFLICT')
             if any('knowbase' in str(v) for k,v in doc.get('hooks',{}).items() if k in {'SessionStart','UserPromptSubmit','PreToolUse','PostToolUse','Stop','PreCompact'}):
                 raise IntegrationError('DUPLICATE_INLINE_HOOK_SOURCE:codex')
             current=doc.get('mcp_servers',{}).get('knowbase')
             if current is not None:
-                if current!=server:raise IntegrationError("EXISTING_KNOWBASE_CONFLICT:codex")
+                if current!=server:
+                    if not managed or not valid_serve_args(current.get('args'),home) or current.get('env')!=ownenv:
+                        raise IntegrationError("EXISTING_KNOWBASE_CONFLICT:codex")
+                    import re
+                    text=(before or b'').decode()
+                    pattern=r'(?ms)(^\[mcp_servers\.knowbase\][^\n]*\n)(.*?)(?=^\[|\Z)'
+                    def replace(match):
+                        block=re.sub(r'(?ms)^args\s*=\s*\[.*?\]', 'args = '+json.dumps(server['args']),match.group(2),count=1)
+                        block=re.sub(r'(?m)^command\s*=.*$', 'command = '+json.dumps(command),block,count=1)
+                        return match.group(1)+block
+                    after=re.sub(pattern,replace,text,count=1).encode()
+                    if _toml(after).get('mcp_servers',{}).get('knowbase')!=server:raise IntegrationError('HOST_SCHEMA_CONFLICT')
+                    result.append({'path':str(path),'before':before,'after':after})
             else:
                 text=(before or b'').decode()
-                after=(text+'\n[mcp_servers.knowbase]\ncommand = '+json.dumps(command)+'\nargs = ["-I", "-m", "knowbase", "serve"]\n[mcp_servers.knowbase.env]\n'+''.join(k+' = '+json.dumps(v)+'\n' for k,v in ownenv.items())).encode()
+                after=(text+'\n[mcp_servers.knowbase]\ncommand = '+json.dumps(command)+'\nargs = '+json.dumps(server['args'])+'\n[mcp_servers.knowbase.env]\n'+''.join(k+' = '+json.dumps(v)+'\n' for k,v in ownenv.items())).encode()
                 _toml(after);result.append({'path':str(path),'before':before,'after':after})
             hp=home/'.codex/hooks.json';hr=_read(hp);hd=_document(hr);hooks=_section(hd,('hooks',))
             for event,action in {**EVENTS,'PreToolUse':'tool-before','PostToolUse':'tool-after','Stop':'stop','PreCompact':'before-compact'}.items():
-                handler={'type':'command','command':f'{shlex.quote(command)} -I -m knowbase hook {action} --style codex','timeout':1}
+                handler={'type':'command','command':' '.join(shlex.quote(x) for x in [command,*hook_args(home,action,'codex',managed)]),'timeout':1}
                 entries=hooks.setdefault(event,[])
                 if not isinstance(entries,list):raise IntegrationError('HOOK_SCHEMA_CONFLICT')
                 owned=[h for entry in entries for h in entry.get('hooks',[]) if 'knowbase' in str(h.get('command',''))]
-                if owned and not all(h.get('type')=='command' and _same_command(h,handler) for h in owned):raise IntegrationError('EXISTING_HOOK_CONFLICT:codex')
+                if owned and not all((_migrate_hook(h,handler,home,action,'codex') if managed else h.get('type')=='command' and _same_command(h,handler)) for h in owned):raise IntegrationError('EXISTING_HOOK_CONFLICT:codex')
                 if not owned:entries.append({'hooks':[handler]})
             if hd!=_document(hr):result.append({'path':str(hp),'before':hr,'after':(json.dumps(hd,ensure_ascii=False,indent=2)+'\n').encode()})
         elif name=='opencode':
             path=home/'.config/opencode/opencode.jsonc';before=_read(path)
-            value={'type':'local','command':[command,'-I','-m','knowbase','serve'],'enabled':True,'environment':ownenv}
-            after=_jsonc_merge(before,'knowbase',value)
+            value={'type':'local','command':[command,*serve_args(home,managed)],'enabled':True,'environment':ownenv}
+            old=_jsonc_tokens(before)[2].get('mcp',{}).get('knowbase')
+            if managed and old is not None and old!=value:
+                if not isinstance(old.get('command'),list) or not old['command'] or old.get('command') not in ([old['command'][0],*serve_args(home)],[command,*serve_args(home,True)]) or old.get('environment')!=ownenv:
+                    raise IntegrationError('EXISTING_KNOWBASE_CONFLICT:opencode')
+                text,tokens,_=_jsonc_tokens(before);after=None
+                for i,t in enumerate(tokens):
+                    if t[0]=='"command"' and tokens[i+1][0]==':' and tokens[i+2][0]=='[':
+                        end=i+3
+                        while end<len(tokens) and tokens[end][0]!=']':end+=1
+                        candidate=(text[:tokens[i+2][1]]+json.dumps(value['command'])+text[tokens[end][2]:]).encode()
+                        if _jsonc_tokens(candidate)[2].get('mcp',{}).get('knowbase')==value:after=candidate;break
+                if after is None:raise IntegrationError('HOST_SCHEMA_CONFLICT')
+            else:after=_jsonc_merge(before,'knowbase',value)
             if after!=before:result.append({'path':str(path),'before':before,'after':after})
     return result
 

@@ -1,11 +1,12 @@
 [project]
 name = "knowbase"
-version = "0.2.0rc8"
+version = "0.2.0rc9"
 description = "薪火：跨 Agent 共享的经验记忆库 MCP 服务（本地 markdown + git + SQLite FTS5）"
 requires-python = ">=3.10"
 dependencies = [
   "mcp>=1.2,<2",
   "pyyaml>=6.0",
+  "packaging>=23",  # standalone updater version and dependency compatibility gates
   "tomli>=2; python_version < '3.11'",
   # 原地多格式摄取（PDF/DOCX/XLSX/PPTX/OCR）
   "pypdf>=5.0",
@@ -24,6 +25,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
+
+[tool.knowbase.updates]
+protocol = 1
 
 [tool.setuptools.packages.find]
 include = ["knowbase*"]

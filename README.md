@@ -15,6 +15,8 @@
 - 治理：受治理知识先进入候选，按明确激活策略及独立任务证据演进；confidence/status由服务端状态机管理，人工CLI保留为例外纠正入口
 - 完整设计：知识库 `通用/05-智能助手/Agent经验记忆库MCP服务-设计方案-v1.md`
 
+> 团队程序升级：rc9支持首次接入后的独立定时升级、唯一运行环境原地安装与失败恢复；见[无人值守升级说明](docs/program-auto-update.md)。知识Git同步不会自动更新Python程序。
+
 ## 环境要求
 
 - macOS / Linux / Windows（Windows 为实验性支持，见下方说明）

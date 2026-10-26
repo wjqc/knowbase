@@ -257,4 +257,9 @@ def inspect(repo):
                         'reason':reason,'configured_executors':len(cfg['automation'].get('executors',[])),
                         'allowed_scope_count':len(cfg['automation'].get('allowed_scopes',[]))},ensure_ascii=False))
     except Exception:add('automation','warn','invalid_automation_configuration')
+    try:
+        from .updates.control import status as update_status
+        state=update_status();bad=state.get('last_run',{}).get('state')=='deferred_or_failed'
+        add('program_updates','warn' if bad else 'pass',json.dumps(state,ensure_ascii=False))
+    except Exception:add('program_updates','warn','update_state_unavailable')
     return checks

@@ -35,7 +35,9 @@ DEFAULTS = {
     "stats": {"enabled": True},
     "dashboard": {"host_usage_source": "claude"},
     "team": {"enabled": False, "data_dir": "~/.knowbase/team", "interval_seconds": 900,
-             "dashboard_output": "~/knowbase-dashboard.html"},
+             "dashboard_output": "~/knowbase-dashboard.html",
+             # 留空则回退本机 git 全局身份；企业 Git 门禁（AIQGATE）要求真实邮箱域名。
+             "commit_name": "", "commit_email": ""},
     "evolution": {"enabled": True, "auto_activate_bizrules": True,
                   "min_helpful_tasks": 3, "min_sessions": 2, "retire_not_helpful_tasks": 2,
                   # Phase 1 自进化：stale 满期自动归档与 review 候选超期丢弃的期限（天）。

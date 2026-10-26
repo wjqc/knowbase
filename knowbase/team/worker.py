@@ -37,7 +37,8 @@ def _execute(args, *, required=True):
 
 
 def windows_xml(python, config_path, interval, *, user=None, argv=None,
-                  description="knowbase local team statistics collector", persistent=False):
+                  description="knowbase local team statistics collector", persistent=False, entry_args=None,
+                  execution_seconds=300, restart_on_failure=False):
     """Native Task Scheduler XML; no shell, embedded credentials, or extra runtime."""
     ET.register_namespace("", NS)
     def add(parent, name, text=None, **attrs):
@@ -62,15 +63,15 @@ def windows_xml(python, config_path, interval, *, user=None, argv=None,
     settings=add(task,"Settings")
     for name,value in {"MultipleInstancesPolicy":"IgnoreNew","DisallowStartIfOnBatteries":"false",
                        "StopIfGoingOnBatteries":"false","StartWhenAvailable":"true","Enabled":"true",
-                       "ExecutionTimeLimit":"PT0S" if persistent else "PT5M","AllowStartOnDemand":"true"}.items():
+                       "ExecutionTimeLimit":"PT0S" if persistent else 'PT5M' if execution_seconds==300 else f"PT{execution_seconds}S","AllowStartOnDemand":"true"}.items():
         add(settings,name,value)
-    if persistent:
+    if persistent or restart_on_failure:
         restart=add(settings,'RestartOnFailure');add(restart,'Interval','PT1M');add(restart,'Count','3')
     actions=add(task,"Actions",Context="Collector");action=add(actions,"Exec")
     # Task XML has no environment block: set the explicit config before importing knowbase.
     loader="import os,runpy;os.environ['KNOWBASE_CONFIG']="+repr(str(config_path))+";runpy.run_module('knowbase',run_name='__main__',alter_sys=True)"
     add(action,"Command",str(python))
-    add(action,"Arguments",subprocess.list2cmdline(["-I","-c",loader]+(argv or ["team","sync"])))
+    add(action,"Arguments",subprocess.list2cmdline(entry_args if entry_args is not None else ["-I","-c",loader]+(argv or ["team","sync"])))
     return ET.tostring(task,encoding="utf-16",xml_declaration=True)
 
 
@@ -112,12 +113,13 @@ def _windows_snapshot(python, task_name=WINDOWS_TASK,
 
 def install(*, remove=False, label=LABEL, task_name=WINDOWS_TASK, argv=None,
             description="knowbase local team statistics collector",
-            descriptor_name="worker-task.xml", persistent=False):
+            descriptor_name="worker-task.xml", persistent=False, entry_args=None, interval_seconds=None,
+            execution_seconds=300, restart_on_failure=False):
     cfg=config.load_config();python=fixed_python()
     if not python.exists():raise ValueError("fixed knowbase runtime must be installed first")
     from .service import root_path
     root=root_path(cfg)
-    interval=max(900,int(cfg["team"].get("interval_seconds",900)))
+    interval=max(300,int(interval_seconds)) if interval_seconds is not None else max(900,int(cfg["team"].get("interval_seconds",900)))
     if interval>86400:raise ValueError("worker interval must be between 900 and 86400 seconds")
     if sys.platform=="darwin":
         path=Path.home()/f"Library/LaunchAgents/{label}.plist";target=f"gui/{os.getuid()}"
@@ -125,12 +127,13 @@ def install(*, remove=False, label=LABEL, task_name=WINDOWS_TASK, argv=None,
         _execute(["launchctl","bootout",f"{target}/{label}"],required=False)
         if remove:
             path.unlink(missing_ok=True);return {"worker":"removed","platform":"launchagent"}
-        value={"Label":label,"ProgramArguments":[str(python),"-I","-m","knowbase"]+(argv or ["team","sync"]),
+        value={"Label":label,"ProgramArguments":[str(python)]+(entry_args if entry_args is not None else ["-I","-m","knowbase"]+(argv or ["team","sync"])),
                "StartInterval":interval,"RunAtLoad":True,
                "EnvironmentVariables":{"KNOWBASE_CONFIG":str(config.CONFIG_PATH.resolve())},
                "StandardOutPath":str(root/"worker.log"),"StandardErrorPath":str(root/"worker-error.log")}
         if persistent:
             value.pop('StartInterval',None);value.update(KeepAlive=True,ThrottleInterval=5)
+        elif restart_on_failure:value.update(KeepAlive={'SuccessfulExit':False},ThrottleInterval=30)
         try:
             _atomic(path,plistlib.dumps(value))
             _execute(["launchctl","bootstrap",target,str(path)])
@@ -151,7 +154,7 @@ def install(*, remove=False, label=LABEL, task_name=WINDOWS_TASK, argv=None,
             _execute(["systemctl","--user","daemon-reload"])
             return {"worker":"removed","platform":"systemd-user"}
         quote=lambda value:json.dumps(str(value).replace("%","%%"))
-        command=" ".join(quote(arg) for arg in [python,"-I","-m","knowbase"]+(argv or ["team","sync"]))
+        command=" ".join(quote(arg) for arg in [python]+(entry_args if entry_args is not None else ["-I","-m","knowbase"]+(argv or ["team","sync"])))
         env=quote("KNOWBASE_CONFIG="+str(config.CONFIG_PATH.resolve()))
         try:
             if persistent:
@@ -159,7 +162,8 @@ def install(*, remove=False, label=LABEL, task_name=WINDOWS_TASK, argv=None,
                 files[1].unlink(missing_ok=True)
                 _atomic(files[0],f"[Service]\nType=simple\nEnvironment={env}\nExecStart={command}\nRestart=on-failure\nRestartSec=5\n[Install]\nWantedBy=default.target\n".encode())
             else:
-                _atomic(files[0],f"[Service]\nType=oneshot\nEnvironment={env}\nExecStart={command}\nTimeoutStartSec=300\n".encode())
+                restart='Restart=on-failure\nRestartSec=30\n' if restart_on_failure else ''
+                _atomic(files[0],f"[Service]\nType=oneshot\nEnvironment={env}\nExecStart={command}\nTimeoutStartSec={execution_seconds}\n{restart}".encode())
                 _atomic(files[1],f"[Timer]\nOnBootSec=60\nOnUnitActiveSec={interval}\nPersistent=true\n[Install]\nWantedBy=timers.target\n".encode())
             _execute(["systemctl","--user","daemon-reload"])
             _execute(["systemctl","--user","enable","--now",name+('.service' if persistent else '.timer')])
@@ -178,7 +182,8 @@ def install(*, remove=False, label=LABEL, task_name=WINDOWS_TASK, argv=None,
             if registered is not None:_execute(["schtasks","/Delete","/TN",task_name,"/F"])
             path.unlink(missing_ok=True);return {"worker":"removed","platform":"task-scheduler"}
         try:
-            _atomic(path,windows_xml(python,config.CONFIG_PATH.resolve(),interval,argv=argv,description=description,persistent=persistent))
+            _atomic(path,windows_xml(python,config.CONFIG_PATH.resolve(),interval,argv=argv,description=description,persistent=persistent,
+                                    entry_args=entry_args,execution_seconds=execution_seconds,restart_on_failure=restart_on_failure))
             _execute(["schtasks","/Create","/TN",task_name,"/XML",str(path),"/F"])
             _execute(["schtasks","/Query","/TN",task_name])
             _execute(["schtasks","/Run","/TN",task_name])

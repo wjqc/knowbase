@@ -126,14 +126,21 @@ def cmd_init(import_from=None, scope=None, dtype="workflow") -> int:
                 print(f"○ {note}")
         except Exception as exc:
             print(f"⚠ INDEX 本地视图迁移未完成：{type(exc).__name__}，原内容保留")
-        n = index.rebuild(rp)
+        if __import__('os').environ.get('KNOWBASE_MANAGED_UPDATE') and index.db_path(rp).exists():
+            # An upgrade validates an existing index; re-init must not rewrite CAS heads.
+            existing = index.connect(rp)
+            try:n = existing.execute('SELECT COUNT(*) FROM meta').fetchone()[0]
+            finally:existing.close()
+        else:
+            n = index.rebuild(rp)
     print(f"✓ 索引就绪：{n} 条记忆，INDEX.md 已生成")
 
     # 4.5 崩溃恢复：扫描未入账的 pending intent
     from . import commit_adapter
     conn = index.connect(rp)
     try:
-        recovery = commit_adapter.recover_intents(rp, conn)
+        recovery = ({'recovered':0,'failed':0,'details':[]} if __import__('os').environ.get('KNOWBASE_MANAGED_UPDATE')
+                    else commit_adapter.recover_intents(rp, conn))
         if recovery["recovered"] > 0 or recovery["failed"] > 0:
             print(f"✓ 崩溃恢复：{recovery['recovered']} 个 intent 已恢复，"
                   f"{recovery['failed']} 个需要人工核查")
@@ -915,6 +922,11 @@ def _main(argv=None):
     p_init.add_argument('--executor-scopes', default='')
     p_init.add_argument('--trust-executor-command', action='store_true')
     p_init.add_argument('--install-worker', action='store_true')
+    p_init.add_argument('--auto-update',action='store_true',help='一次接入独立定时程序更新器')
+    p_init.add_argument('--update-source',help='受信任的程序源码仓库；不能用知识仓库代替')
+    p_init.add_argument('--update-branch',default='main')
+    p_init.add_argument('--update-interval',type=int,default=900)
+    p_init.add_argument('--allow-insecure-update-source',action='store_true')
     p_init.add_argument("--plan", action="store_true", help="仅显示接入计划，不写库/配置")
     p_dash = sub.add_parser("dashboard", help="生成本地 HTML 知识治理看板")
     p_dash.add_argument("--output", default="knowbase-dashboard.html")
@@ -1094,6 +1106,12 @@ def _main(argv=None):
                          ("disable", "停用 worker 调度入口（含旧 team 定时任务）")):
         worker_sub.add_parser(_name, help=_help)
     p_exec = sub.add_parser("executor", help="提炼执行器探针（P1）")
+    p_update=sub.add_parser('update',help='独立程序更新：不是知识同步')
+    update_sub=p_update.add_subparsers(dest='update_cmd',required=True)
+    for action in ['status','check','run','disable']:update_sub.add_parser(action)
+    update_enable=update_sub.add_parser('enable');update_enable.add_argument('--source',required=True)
+    update_enable.add_argument('--branch',default='main');update_enable.add_argument('--interval',type=int,default=900)
+    update_enable.add_argument('--agents',default=None);update_enable.add_argument('--allow-insecure-source',action='store_true')
     exec_sub = p_exec.add_subparsers(dest="executor_cmd", required=True)
     p_exec_probe = exec_sub.add_parser("probe", help="静态探针全部候选，可选跑隔离探针")
     p_exec_probe.add_argument("--isolation", action="store_true",
@@ -1121,6 +1139,12 @@ def _main(argv=None):
 
     if args.cmd == "init":
         from . import integration
+        if args.auto_update and not args.update_source:
+            print('接入未完成：自动升级需要明确程序update-source，不使用知识仓库推断');return 3
+        if args.auto_update:
+            from .updates.engine import validate_source,UpdateError
+            try:validate_source(args.update_source,args.update_branch,allow_insecure=args.allow_insecure_update_source)
+            except UpdateError:print('接入未完成：程序更新源配置无效');return 3
         from .automation import configuration as executor_configuration
         executor_options=None
         if args.executor_config:
@@ -1151,7 +1175,10 @@ def _main(argv=None):
         try:
             if not args.plan and (agents or model_options is not None):
                 integration.resume()
-            changes = integration.plan(agents)
+            changes = integration.plan(agents,managed=True if args.auto_update else None)
+            if args.auto_update:
+                # Host migration is committed by update enrollment only after stable entries exist.
+                changes=[]
             if model_options is not None:
                 secret_change=getattr(model_options,"secret_change",None)
                 if secret_change:changes.append(secret_change)
@@ -1166,7 +1193,7 @@ def _main(argv=None):
             if model_options is not None:
                 changes=[c for c in changes if Path(c["path"])!=config.CONFIG_PATH.resolve()]
                 changes.append(integration.model_change(model_options))
-            if not changes and not agents and model_options is None and not (args.probe_embedding or args.list_embedding_models or args.verify_mcp or args.executor_config or args.verify_executor or args.enable_automation or args.install_worker):
+            if not changes and not agents and model_options is None and not (args.probe_embedding or args.list_embedding_models or args.verify_mcp or args.executor_config or args.verify_executor or args.enable_automation or args.install_worker or args.auto_update):
                 return 0
             result = integration.apply(changes,allowed_paths=(config.CONFIG_PATH.resolve(),))
             print(json.dumps(result, ensure_ascii=False))
@@ -1186,6 +1213,12 @@ def _main(argv=None):
             if args.install_worker:
                 from .automation.worker import install
                 print(json.dumps(install(),ensure_ascii=False))
+            if args.auto_update:
+                from .updates.control import enable as enable_updates
+                try:
+                    print(json.dumps(enable_updates(args.update_source,agents=agents or None,branch=args.update_branch,
+                        interval=args.update_interval,allow_insecure=args.allow_insecure_update_source),ensure_ascii=False))
+                except (UpdateError,ValueError,OSError):print('自动升级接入未完成；原Agent配置保留，检查首次引导条件');return 3
             print("本地检索可用。请在宿主重连MCP并检查Hook开关/信任；配置、协议探针和真实会话生效分别验收。")
             return 0
         except (integration.IntegrationError, OSError) as exc:
@@ -1410,6 +1443,19 @@ def _main(argv=None):
         except (ValueError, RuntimeError, OSError) as exc:
             print(json.dumps({"error": str(exc)}, ensure_ascii=False))
             return 1
+    if args.cmd=='update':
+        from .updates import control
+        from .updates.engine import UpdateError
+        try:
+            if args.update_cmd=='enable':
+                result=control.enable(args.source,agents=[a.strip() for a in args.agents.split(',') if a.strip()] if args.agents else None,
+                    branch=args.branch,interval=args.interval,allow_insecure=args.allow_insecure_source)
+            elif args.update_cmd=='disable':result=control.disable()
+            elif args.update_cmd=='status':result=control.status()
+            else:result=control.run(action=args.update_cmd,force=args.update_cmd=='run')
+            print(json.dumps(result,ensure_ascii=False,indent=2))
+            return 2 if result.get('state') in {'failed','deferred_or_failed'} else 0
+        except (ValueError,RuntimeError,OSError,UpdateError):print('程序更新未完成：检查update status或首次引导条件');return 2
     if args.cmd == "value":
         from .value import aggregate, exchange
         if args.value_cmd=='rebuild-evidence':
@@ -1610,7 +1656,7 @@ def main(argv=None):
         return code
     finally:
         # metrics导出及serve自身不落新日志；具体MCP调用单独记录。
-        if command not in {"privacy-scrub", "doctor", "alerts", "retrieval-report", "retrieval-evaluate", "retrieval-cache"} and not (command == "init" and "--plan" in arguments):
+        if not __import__('os').environ.get('KNOWBASE_MANAGED_UPDATE') and command not in {"privacy-scrub", "doctor", "alerts", "retrieval-report", "retrieval-evaluate", "retrieval-cache",'update'} and not (command == "init" and "--plan" in arguments):
             telemetry.record("cli",command,status,(monotonic()-started)*1000)
 
 

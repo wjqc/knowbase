@@ -46,6 +46,29 @@ def device_fingerprint():
     return digest(["machine-v2", platform.system(), _machine_identifier()])
 
 
+def commit_identity(cfg):
+    """Resolve the committer identity for statistics and README commits.
+
+    Corporate Git gateways (AIQGATE pre-receive rules) reject synthetic e-mail
+    domains, so explicit team config wins, then this machine's own Git identity;
+    the synthetic default stays only as a last resort for air-gapped setups.
+    """
+    team_cfg = cfg.get("team") or {}
+    resolved = {"user.name": str(team_cfg.get("commit_name") or "").strip(),
+                "user.email": str(team_cfg.get("commit_email") or "").strip()}
+    for key, value in resolved.items():
+        if value:
+            continue
+        repo=config.repo_path(cfg)
+        args=['git','-C',str(repo),'config','--get',key] if gitops.is_repo(repo) else ['git','config','--get',key]
+        code, out, _ = gitops._run_git(args, 5)
+        resolved[key] = out.strip() if code == 0 else ""
+    from .transport import GitData
+    default_name, default_email = GitData.DEFAULT_IDENTITY
+    return (resolved["user.name"] or default_name,
+            resolved["user.email"] or default_email)
+
+
 def rebind_device():
     """Explicit operator recovery; preserve sender, epoch, queued data and ACKs."""
     cfg = config.load_config(); root = root_path(cfg); repo = config.repo_path(cfg)
@@ -194,7 +217,8 @@ def run(*, network=True):
                 errors.append("本库身份或日志异常，未推进采集；检查来源后运行 team recover")
                 state.put(conn, "collection_error", {"at": stamp(), "error": errors[-1]}); conn.commit()
             if network:
-                git = GitData(root / "stats", e["remote"], cfg["git"]["allowed_remote_prefixes"])
+                git = GitData(root / "stats", e["remote"], cfg["git"]["allowed_remote_prefixes"],
+                              identity=commit_identity(cfg))
                 with RepoLock(root / "stats", timeout=1):
                     try:
                         send(git, conn, e["team_id"])
@@ -209,7 +233,8 @@ def run(*, network=True):
             inv = state.get(conn, "inventory")
             if network:
                 try:
-                    readme_git = GitData(root / "readme", e["remote"], cfg["git"]["allowed_remote_prefixes"])
+                    readme_git = GitData(root / "readme", e["remote"], cfg["git"]["allowed_remote_prefixes"],
+                                         identity=commit_identity(cfg))
                     with RepoLock(root / "readme", timeout=1):
                         rev = readme_git.fetch(e["default_branch"])
                         if not rev:
