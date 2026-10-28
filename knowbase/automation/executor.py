@@ -51,6 +51,8 @@ KNOWN_AUTH_CHECKS = {
 }
 
 
+from ..processes import no_window
+
 def _auth_marker_present(auth_check: dict | None) -> bool:
     """只校验标记存在性：环境变量查名不读值，文件查存在不读内容。"""
     if not isinstance(auth_check, dict):
@@ -83,7 +85,7 @@ def _run_version(binary: str, version_arg: str, timeout: float) -> str | None:
         proc = subprocess.run(
             [binary, version_arg], stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            timeout=timeout, text=True)
+            timeout=timeout, text=True, **no_window())
     except (OSError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
@@ -352,7 +354,7 @@ class CommandExecutorRunner:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True,
                 cwd=self.cfg.get("working_directory"), env=getattr(self,'execution_env',None),
-                **({'start_new_session':True} if os.name!='nt' else {'creationflags':subprocess.CREATE_NEW_PROCESS_GROUP}))
+                **({'start_new_session':True} if os.name!='nt' else {'creationflags':subprocess.CREATE_NEW_PROCESS_GROUP | 0x08000000}))
             out,err = process.communicate(json.dumps(payload,ensure_ascii=False),timeout=self.timeout)
             from types import SimpleNamespace
             proc=SimpleNamespace(returncode=process.returncode,stdout=out,stderr=err)

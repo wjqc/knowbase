@@ -1,3 +1,9 @@
+# 2026-10-28 Windows 后台弹窗修复
+
+已定位并修复直接python.exe任务入口，保留固定运行环境与MCP stdio；增加同venv pythonw启动器、CREATE_NO_WINDOW子进程选项、任务日志/退出码；补Windows时区依赖和Trae APPDATA路径。定向27项通过，全量960 passed/1 skipped（161.62秒）；未修改本机或Windows真实运行时。旧Windows电脑需重新执行新版bootstrap以补依赖并注册无窗口任务，实际桌面效果待验证。
+
+---
+
 # 2026-10-26 团队程序自动升级
 
 已实现独立程序源/定时更新、稳定MCP连接与Hook维护入口、影子验证、原地安装、日志恢复/安全回滚、老成员一次引导与运维命令；保留并补齐rc9真实Git身份修复（证据通道也复用）。

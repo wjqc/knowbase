@@ -37,7 +37,7 @@ def _kill_tree(proc: subprocess.Popen) -> None:
     try:
         if _IS_WINDOWS:
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                           capture_output=True, timeout=5)
+                           capture_output=True, timeout=5, creationflags=0x08000000)
         else:
             # start_new_session=True 使 pgid == proc.pid，整组击杀覆盖全部子孙
             try:
@@ -62,7 +62,7 @@ def _run_git(cmd: list[str], timeout: float) -> tuple[int, str, str]:
     env["GIT_SEQUENCE_EDITOR"] = "true"
     kwargs: dict = {}
     if _IS_WINDOWS:
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | 0x08000000
     else:
         kwargs["start_new_session"] = True
     proc = subprocess.Popen(

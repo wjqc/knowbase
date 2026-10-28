@@ -15,12 +15,15 @@ LABEL='com.knowbase.updater'
 TASK='knowbase-updater'
 
 
+from ..processes import no_window
+
 def settings_path():return Path.home()/'.knowbase/updates.json'
 
 
 def existing_agents(home):
     result=[]
-    for name,spec in integration.HOSTS.items():
+    for name in integration.HOSTS:
+        spec=integration.host_spec(name,home)
         try:
             doc=integration._document(integration._read(home/spec['mcp']))
             server=integration._section(doc,spec['key']).get('knowbase',{})
@@ -110,6 +113,6 @@ def run(*, force=False, action='run'):
           '--settings',str(settings_path().resolve())]
     if force:args.append('--force')
     # The child survives replacement of knowbase. No in-process package mutation.
-    result=subprocess.run(args,capture_output=True,text=True,timeout=900)
+    result=subprocess.run(args,capture_output=True,text=True,timeout=900, **no_window())
     if result.returncode:raise UpdateError('independent_updater_failed')
     return json.loads(result.stdout)

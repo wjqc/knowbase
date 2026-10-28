@@ -230,7 +230,9 @@ def test_windows_update_task_uses_standalone_entry_and_failure_restart():
     from xml.etree import ElementTree as ET
     task=ET.fromstring(windows_xml('C:/fixed/python.exe','C:/cfg.json',900,entry_args=['-I','C:/runtime/updater.py','run'],execution_seconds=900,restart_on_failure=True))
     ns={'t':NS}
-    assert task.find('.//t:Exec/t:Arguments',ns).text=='-I C:/runtime/updater.py run'
+    assert task.find('.//t:Exec/t:Command',ns).text=='C:/fixed/pythonw.exe'
+    assert 'updater.py' in task.find('.//t:Exec/t:Arguments',ns).text
+    assert 'creationflags=0x08000000' in task.find('.//t:Exec/t:Arguments',ns).text
     assert task.find('.//t:ExecutionTimeLimit',ns).text=='PT900S'
     assert task.find('.//t:RestartOnFailure',ns) is not None
     assert task.find('.//t:RunLevel',ns).text=='LeastPrivilege'

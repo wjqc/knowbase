@@ -31,6 +31,8 @@ QUARANTINE_DIRNAME = "knowbase-conflicts"
 _ID_RE = re.compile(r"^[A-Z]{1,2}-\d{4}-\d{4}$|^[A-Z]{1,2}-[0-9a-f]{12}$")
 
 
+from .processes import no_window
+
 def _git(repo: Path, *args: str, timeout: float = 10.0) -> str:
     """隔离区自用的最小 git 读取（不依赖 gitops，避免模块循环导入）。"""
     env = {"GIT_TERMINAL_PROMPT": "0"}
@@ -40,7 +42,7 @@ def _git(repo: Path, *args: str, timeout: float = 10.0) -> str:
     proc = subprocess.run(
         ["git", "-C", str(repo), *args], stdin=subprocess.DEVNULL,
         capture_output=True, text=True, encoding="utf-8", timeout=timeout,
-        env=full_env)
+        env=full_env, **no_window())
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout).strip())
     return proc.stdout.strip()

@@ -84,3 +84,24 @@ python scripts/bootstrap_auto_update.py --source <PROGRAM_GIT_URL> --agents zcod
 | `scripts/bootstrap_auto_update.py` | 老电脑一次接入，必要的首次依赖准备 |
 
 本地两台隔离成员环境使用真实Git、wheel、原地安装、真实MCP SDK连接，验证正常更新、中断恢复和安装后失败回滚。覆盖旧调用排空、同连接进入新版、配置调度失败回滚、跨库阻断、新证据不覆盖和Hook缺口。Windows任务XML与Linux服务配置属于本地代码/描述符验证，实际Windows/Linux调度及各宿主UI连接行为仍待对应实机验证。公司源网络、其他成员首次接入、统计积压补报与跨成员收益不能由这些测试代替。
+
+## Windows 后台黑窗口修复（2026-10-28）
+
+旧任务直接启动 `python.exe`，登录/周期触发时可能出现空白控制台。新版任务改由**同一venv**的 `pythonw.exe` 启动，再以 `CREATE_NO_WINDOW` 调用固定的 `python.exe`；stdin关闭、stdout/stderr进入各自任务日志，子进程退出码返回任务调度器。Git、执行器、MCP代理后端及更新器子进程也使用无控制台标志。MCP宿主仍使用固定 `python.exe` 和原有stdio连接，不要直接把MCP解释器改为pythonw。
+
+窗口抑制依据：[Microsoft CREATE_NO_WINDOW](https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags)。不是给任务打“隐藏”勾选框，也不绕过企业认证或安全提示。
+
+同批修正：Windows安装依赖包含tzdata，Trae配置由APPDATA解析为 `%APPDATA%\Trae CN\User\mcp.json`，不再写macOS的Library目录。已经手工修正的真实Trae配置会按原接入事务保留和检查，不自动删除旧错误目录下的文件。
+
+旧Windows电脑需要用新版源码重新运行一次引导，以安装tzdata并**重新注册已有任务**（仅更新Python文件不能改掉已注册的任务Action）。在程序源码目录执行：
+
+```powershell
+git pull --ff-only
+py -3 scripts/bootstrap_auto_update.py --source https://github.com/wjqc/knowbase.git --branch main --agents trae
+```
+
+若使用公司镜像，替换为实际已授权的程序源。不要填知识仓库。依赖集合变更会按既有策略阻止无人值守安装；此次不能仅等待旧定时更新器。若旧MCP仍是直连入口，引导会要求先退出/重连一次。
+
+接入后检查任务 `knowbase-worker` 和 `knowbase-updater` 的操作应指向 `~\.knowbase\runtime\venv\Scripts\pythonw.exe`；后台日志在配置的 `team.data_dir`（默认 `~\.knowbase\team`）下 `knowbase-worker.log`、`knowbase-updater.log`。必要的旧 `knowbase-team-stats` 任务也需用新安装器重新注册；统一worker安装器会清理旧统计调度。没有pythonw时安装器明确失败，不降回会弹窗的启动方式。
+
+本地验证覆盖XML操作、参数/日志/退出码、旧新任务身份识别、Windows专用进程标志及Trae路径。当前开发环境为macOS；实际Windows桌面“不再弹窗”与任务运行结果仍需该电脑验证。

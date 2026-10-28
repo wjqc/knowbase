@@ -11,7 +11,8 @@ from knowbase.team import worker
 
 
 def prepare(memory_repo,tmp_path,monkeypatch,platform):
-    home=tmp_path/'home space';python=worker.fixed_python(home,platform);python.parent.mkdir(parents=True);python.touch()
+    from knowbase.team import service  # Load timezone/system config before platform simulation.
+    home=tmp_path/'home space';python=worker.fixed_python(home,platform);python.parent.mkdir(parents=True);python.touch();python.with_name('pythonw.exe').touch()
     monkeypatch.setattr(worker.Path,'home',lambda:home)
     monkeypatch.setattr(worker.sys,'platform',platform)
     cfg=config.load_config();cfg['team']['data_dir']=str(tmp_path/'stats');config.CONFIG_PATH.write_text(json.dumps(cfg))
@@ -22,9 +23,9 @@ def test_windows_task_has_fixed_runtime_config_no_shell_and_single_instance(memo
     home,python,root=prepare(memory_repo,tmp_path,monkeypatch,'win32');calls=[]
     monkeypatch.setattr(worker.subprocess,'run',lambda args,**kw:(calls.append(args) or SimpleNamespace(returncode=0)))
     result=worker.install();xml=ET.fromstring(Path(result['path']).read_bytes());ns={'t':worker.NS}
-    assert xml.find('.//t:Exec/t:Command',ns).text==str(python)
+    assert xml.find('.//t:Exec/t:Command',ns).text==str(python.with_name('pythonw.exe'))
     args=xml.find('.//t:Exec/t:Arguments',ns).text
-    assert 'KNOWBASE_CONFIG' in args and 'runpy.run_module' in args and 'team sync' in args
+    assert 'KNOWBASE_CONFIG' in args and 'runpy.run_module' in args and 'team' in args and 'sync' in args and 'creationflags=0x08000000' in args
     assert xml.find('.//t:LogonType',ns).text=='InteractiveToken'
     assert xml.find('.//t:RunLevel',ns).text=='LeastPrivilege'
     assert xml.find('.//t:MultipleInstancesPolicy',ns).text=='IgnoreNew'

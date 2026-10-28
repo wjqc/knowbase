@@ -29,6 +29,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
+def no_window():
+    return {'creationflags':0x08000000} if os.name=='nt' else {}
+
+
 
 class UpdateError(Exception):pass
 
@@ -86,14 +90,14 @@ def command(args, *, cwd=None, env=None, timeout=120):
     try:
         process=subprocess.Popen([str(x) for x in args],cwd=cwd,env=child_env,
             stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
-            **({'start_new_session':True} if os.name!='nt' else {'creationflags':subprocess.CREATE_NEW_PROCESS_GROUP}))
+            **({'start_new_session':True} if os.name!='nt' else {'creationflags':subprocess.CREATE_NEW_PROCESS_GROUP | 0x08000000}))
         out,_=process.communicate(timeout=timeout)
         if process.returncode:raise UpdateError('subprocess_failed')
         return out
     except (OSError,subprocess.SubprocessError):raise UpdateError('subprocess_unavailable_or_timed_out') from None
     finally:
         if process is not None and (os.name!='nt' or process.poll() is None):
-            if os.name=='nt':subprocess.run(['taskkill','/F','/T','/PID',str(process.pid)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5)
+            if os.name=='nt':subprocess.run(['taskkill','/F','/T','/PID',str(process.pid)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5, **no_window())
             else:
                 try:os.killpg(process.pid,signal.SIGKILL)
                 except ProcessLookupError:pass
@@ -171,7 +175,7 @@ def rpc_probe(python, root, config_path, protocol='2025-03-26', schema=False):
     env={**os.environ,'KNOWBASE_CONFIG':str(config_path),'KNOWBASE_AGENT_NAME':'update-probe'}
     env.pop('KNOWBASE_REPO_PATH',None)
     proc=subprocess.Popen([str(python),'-I','-B','-c',bootstrap,str(root)],env=env,
-        stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+        stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True, **no_window())
     messages=queue.Queue()
     def reader():
         for line in proc.stdout:
@@ -404,18 +408,18 @@ class Engine:
         if sys.platform=='darwin':
             domain=f'gui/{os.getuid()}';plist=self.home/'Library/LaunchAgents'/f'{label}.plist'
             if start and plist.exists():command(['launchctl','bootstrap',domain,plist],timeout=15)
-            elif not start:subprocess.run(['launchctl','bootout',domain+'/'+label],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
+            elif not start:subprocess.run(['launchctl','bootout',domain+'/'+label],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15, **no_window())
         elif os.name=='nt':
-            subprocess.run(['schtasks','/Run' if start else '/End','/TN','knowbase-worker'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
+            subprocess.run(['schtasks','/Run' if start else '/End','/TN','knowbase-worker'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15, **no_window())
         else:
-            subprocess.run(['systemctl','--user','start' if start else 'stop','knowbase-worker.service'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
+            subprocess.run(['systemctl','--user','start' if start else 'stop','knowbase-worker.service'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15, **no_window())
 
     def worker_running(self):
         if not self.cfg.get('manage_worker',True):return False
         if sys.platform=='darwin':args=['launchctl','print',f'gui/{os.getuid()}/com.knowbase.worker']
         elif os.name=='nt':args=['schtasks','/Query','/TN','knowbase-worker']
         else:args=['systemctl','--user','is-active','knowbase-worker.service']
-        try:return subprocess.run(args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10).returncode==0
+        try:return subprocess.run(args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10, **no_window()).returncode==0
         except (OSError,subprocess.SubprocessError):raise UpdateError('scheduler_state_unavailable') from None
 
     def backup(self):

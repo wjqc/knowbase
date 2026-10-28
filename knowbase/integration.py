@@ -17,6 +17,15 @@ HOSTS = {
 EVENTS = {"SessionStart": "session-start", "UserPromptSubmit": "user-prompt"}
 
 
+def host_spec(name, home):
+    spec=dict(HOSTS[name])
+    if name=='trae' and sys.platform=='win32':
+        spec['mcp']=str(Path(os.environ.get('APPDATA',str(home/'AppData/Roaming')))/'Trae CN/User/mcp.json')
+    elif name=='trae' and sys.platform.startswith('linux'):
+        spec['mcp']=str(Path(os.environ.get('XDG_CONFIG_HOME',str(home/'.config')))/'Trae CN/User/mcp.json')
+    return spec
+
+
 class IntegrationError(ValueError):
     pass
 
@@ -106,7 +115,8 @@ def _migrate_hook(actual, expected, home, action, style):
 def discover(home=None):
     home = Path(home or Path.home()).resolve()
     result = []
-    for name, host in HOSTS.items():
+    for name in HOSTS:
+        host=host_spec(name,home)
         p = home / host["mcp"]
         h = home / host["hooks"] if host["hooks"] else p
         if not p.exists() and not h.parent.exists() and not host_metadata(name,home)["installed"]:
@@ -174,7 +184,7 @@ def plan(agents, home=None, *, managed=None):
         if name in extra:continue
         if name not in HOSTS:
             raise IntegrationError("UNSUPPORTED_HOST:" + name)
-        host = HOSTS[name]
+        host = host_spec(name,home)
         server = {"command": runtime_command(home), "args": serve_args(home,managed),
                   "env": {"KNOWBASE_AGENT_NAME": name}}
         from . import config

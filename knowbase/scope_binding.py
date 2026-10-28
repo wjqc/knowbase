@@ -21,6 +21,8 @@ from pathlib import Path
 from . import config
 
 
+from .processes import no_window
+
 def normalize_path(path) -> Path:
     """规范化路径：展开 ~、解析符号链接（不存在的路径不报错）。"""
     return Path(path).expanduser().resolve()
@@ -45,7 +47,7 @@ def git_identity(path) -> dict | None:
         base = _existing_ancestor(normalize_path(path))
         top = subprocess.run(
             ["git", "-C", str(base), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=10)
+            capture_output=True, text=True, timeout=10, **no_window())
         if top.returncode != 0:
             return None
         toplevel = top.stdout.strip()
@@ -53,7 +55,7 @@ def git_identity(path) -> dict | None:
             return None
         rem = subprocess.run(
             ["git", "-C", str(base), "remote", "get-url", "origin"],
-            capture_output=True, text=True, timeout=10)
+            capture_output=True, text=True, timeout=10, **no_window())
         remote = rem.stdout.strip() if rem.returncode == 0 else None
         return {"toplevel": toplevel, "remote": remote or None}
     except Exception:

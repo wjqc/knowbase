@@ -26,7 +26,7 @@ def fixed_python(home=None, platform=None):
 
 def _execute(args, *, required=True):
     try:
-        result = subprocess.run(args, capture_output=True, timeout=15)
+        result = subprocess.run(args, capture_output=True, timeout=15, **({'creationflags':0x08000000} if os.name=='nt' else {}))
     except (OSError, subprocess.SubprocessError):
         if required:
             raise RuntimeError("background scheduler command failed") from None
@@ -36,9 +36,18 @@ def _execute(args, *, required=True):
     return result
 
 
+def windows_launcher(python, arguments, log_path):
+    """Windowless sibling launches the fixed console interpreter with explicit pipes."""
+    return ("import os,subprocess;from pathlib import Path;"
+            + "p=Path("+repr(str(log_path))+");p.parent.mkdir(parents=True,exist_ok=True);"
+            + "f=os.fdopen(os.open(p,os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600),'ab',buffering=0);"
+            + "r=subprocess.run("+repr([str(python),*arguments])+",stdin=subprocess.DEVNULL,stdout=f,stderr=f,creationflags=0x08000000);"
+            + "f.close();raise SystemExit(r.returncode)")
+
+
 def windows_xml(python, config_path, interval, *, user=None, argv=None,
                   description="knowbase local team statistics collector", persistent=False, entry_args=None,
-                  execution_seconds=300, restart_on_failure=False):
+                  execution_seconds=300, restart_on_failure=False, log_path=None):
     """Native Task Scheduler XML; no shell, embedded credentials, or extra runtime."""
     ET.register_namespace("", NS)
     def add(parent, name, text=None, **attrs):
@@ -70,8 +79,10 @@ def windows_xml(python, config_path, interval, *, user=None, argv=None,
     actions=add(task,"Actions",Context="Collector");action=add(actions,"Exec")
     # Task XML has no environment block: set the explicit config before importing knowbase.
     loader="import os,runpy;os.environ['KNOWBASE_CONFIG']="+repr(str(config_path))+";runpy.run_module('knowbase',run_name='__main__',alter_sys=True)"
-    add(action,"Command",str(python))
-    add(action,"Arguments",subprocess.list2cmdline(entry_args if entry_args is not None else ["-I","-c",loader]+(argv or ["team","sync"])))
+    arguments=entry_args if entry_args is not None else ["-I","-c",loader]+(argv or ["team","sync"])
+    add(action,"Command",str(Path(python).with_name('pythonw.exe')))
+    code=windows_launcher(python,arguments,log_path or Path(config_path).parent/'logs/background-task.log')
+    add(action,"Arguments",subprocess.list2cmdline(['-I','-c',code]))
     return ET.tostring(task,encoding="utf-16",xml_declaration=True)
 
 
@@ -105,7 +116,7 @@ def _windows_snapshot(python, task_name=WINDOWS_TASK,
     except (ValueError,ET.ParseError):raise RuntimeError("existing scheduler task cannot be verified") from None
     ns={"t":NS}
     command=task.find(".//t:Exec/t:Command",ns);description_node=task.find("t:RegistrationInfo/t:Description",ns)
-    if (command is None or not isinstance(command.text,str) or command.text.casefold()!=str(python).casefold() or description_node is None or
+    if (command is None or not isinstance(command.text,str) or command.text.casefold() not in {str(python).casefold(),str(Path(python).with_name('pythonw.exe')).casefold()} or description_node is None or
             description_node.text!=description):
         raise RuntimeError("existing task is not an owned knowbase task; configuration preserved")
     return ET.tostring(task,encoding="utf-16",xml_declaration=True)
@@ -176,6 +187,7 @@ def install(*, remove=False, label=LABEL, task_name=WINDOWS_TASK, argv=None,
             raise RuntimeError("systemd install failed; previous configuration restored") from None
         return {"worker":"installed","platform":"systemd-user","interval_seconds":interval}
     if sys.platform=="win32":
+        if not remove and not python.with_name("pythonw.exe").is_file():raise ValueError("fixed runtime pythonw.exe is required for silent background tasks")
         path=root/descriptor_name;old=_backup(root,[path])
         registered=_windows_snapshot(python,task_name,description)
         if remove:
@@ -183,7 +195,7 @@ def install(*, remove=False, label=LABEL, task_name=WINDOWS_TASK, argv=None,
             path.unlink(missing_ok=True);return {"worker":"removed","platform":"task-scheduler"}
         try:
             _atomic(path,windows_xml(python,config.CONFIG_PATH.resolve(),interval,argv=argv,description=description,persistent=persistent,
-                                    entry_args=entry_args,execution_seconds=execution_seconds,restart_on_failure=restart_on_failure))
+                                    entry_args=entry_args,execution_seconds=execution_seconds,restart_on_failure=restart_on_failure,log_path=root/(task_name+".log")))
             _execute(["schtasks","/Create","/TN",task_name,"/XML",str(path),"/F"])
             _execute(["schtasks","/Query","/TN",task_name])
             _execute(["schtasks","/Run","/TN",task_name])

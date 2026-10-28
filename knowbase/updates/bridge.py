@@ -10,6 +10,10 @@ import time
 import uuid
 from pathlib import Path
 
+def no_window():
+    return {'creationflags':0x08000000} if os.name=='nt' else {}
+
+
 
 def atomic(path, value):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -57,7 +61,7 @@ def run(backend_command=None):
         nonlocal backend,generation,replaying,last_restart
         generation+=1;last_restart=time.monotonic()
         backend=subprocess.Popen(backend_command or [sys.executable,'-I','-m','knowbase','serve'],
-            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=sys.stderr,text=True,bufsize=1)
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=sys.stderr,text=True,bufsize=1, **no_window())
         threading.Thread(target=read,args=(backend.stdout,'backend',generation),daemon=True).start()
         if initial:
             replaying=True
