@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import store, locking
+from .fsutil import replace_with_retry
 from .locking import RepoLock
 from .mutations import (
     REVISION_CONFLICT, IDEMPOTENCY_CONFLICT,
@@ -115,15 +116,16 @@ def _check_intent_completed(conn, request_id: str, entity_id: str, payload_hash:
 
 
 def _atomic_write(path: Path, content: str) -> None:
-    """原子写文件：临时文件 + rename。"""
+    """原子写文件：临时文件 + rename；共享仓库内容固定 LF（见 store.write_shared_text）。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
             f.flush()
             os.fsync(fd)
-        os.replace(tmp_path, path)
+        # 卡片可能被编辑器/杀毒/索引进程短暂打开；Windows 上退避重试
+        replace_with_retry(tmp_path, path)
     except Exception:
         try:
             os.unlink(tmp_path)

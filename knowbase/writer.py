@@ -196,7 +196,7 @@ def _relation_side_effects(rp, meta, conn=None, source_prior=None, bases_out=Non
             tmeta["status"] = "stale"
             tmeta["stale_since"] = today
             tmeta["updated"] = today
-            tpath.write_text(store.render(tmeta, tbody), encoding="utf-8")
+            store.write_shared_text(tpath, store.render(tmeta, tbody))
             modified.append((tmeta, tbody, tpath))
             notes.append(f"{rid} 已因被取代标记为 stale")
         elif rtype == "contradicts":
@@ -213,7 +213,7 @@ def _relation_side_effects(rp, meta, conn=None, source_prior=None, bases_out=Non
                     bases_out.append((rid, target_prior["content_revision"]))
                 tmeta["relations"] = rels + [{"id": meta["id"], "type": "contradicts"}]
                 tmeta["updated"] = today
-                tpath.write_text(store.render(tmeta, tbody), encoding="utf-8")
+                store.write_shared_text(tpath, store.render(tmeta, tbody))
                 modified.append((tmeta, tbody, tpath))
             if conn is not None and newly:
                 sub_notes, sub_modified = _adjudicate_contradiction(
@@ -272,7 +272,7 @@ def _adjudicate_contradiction(rp, conn, meta, tmeta, tbody, tpath, today,
         m["status"] = "stale"
         m["stale_since"] = today
         m["updated"] = today
-        path.write_text(store.render(m, body), encoding="utf-8")
+        store.write_shared_text(path, store.render(m, body))
         modified.append((m, body, path))
 
     if both_negative or src_strength == tgt_strength:

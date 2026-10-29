@@ -22,6 +22,27 @@ _LAST_FETCH_MONO: dict[str, float] = {}
 
 _IS_WINDOWS = os.name == "nt"
 
+# 宿主（Trae / IDE / CI）可能注入 GIT_AUTHOR_* / GIT_COMMITTER_*，这些
+# 环境变量的优先级高于 user.name/user.email 配置，也高于命令行
+# `git -c user.name=...`，会静默改写提交身份（企业网关按邮箱域校验时
+# 直接拒绝推送）。只在子进程环境里剔除，父进程 os.environ 不动。
+_IDENTITY_ENV_VARS = (
+    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+)
+
+
+def _git_env() -> dict:
+    """构造 git 子进程环境：剔除宿主注入的提交身份变量。"""
+    env = os.environ.copy()
+    for name in _IDENTITY_ENV_VARS:
+        env.pop(name, None)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    # rebase --continue 等流程不得打开编辑器（自动化下会永久挂起）
+    env["GIT_EDITOR"] = "true"
+    env["GIT_SEQUENCE_EDITOR"] = "true"
+    return env
+
 
 class GitSyncConflict(RuntimeError):
     """远端提交无法自动重放时的真实内容冲突。"""
@@ -55,11 +76,7 @@ def _run_git(cmd: list[str], timeout: float) -> tuple[int, str, str]:
     stdin 接 DEVNULL 杜绝子进程等终端输入；POSIX 放进独立会话以便 killpg
     整组击杀，Windows 新建进程组后用 taskkill /T 按进程树击杀。
     """
-    env = os.environ.copy()
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    # rebase --continue 等流程不得打开编辑器（自动化下会永久挂起）
-    env["GIT_EDITOR"] = "true"
-    env["GIT_SEQUENCE_EDITOR"] = "true"
+    env = _git_env()
     kwargs: dict = {}
     if _IS_WINDOWS:
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | 0x08000000
@@ -700,13 +717,16 @@ def sync_target_hash(repo: Path, git_cfg: dict, remote: str, branch: str) -> str
     import json
     git_dir = Path(repo) / ".git"
     if git_dir.is_file():
-        git_dir = (Path(repo) / git_dir.read_text().strip().removeprefix("gitdir: ")).resolve()
+        # .git/config 可能含中文（user.name/remote/路径）；中文 Windows 默认按
+        # cp936 读会乱码甚至抛错，导致 sync 每次都降级为"远程同步检查失败"。
+        git_dir = (Path(repo) / git_dir.read_text(encoding="utf-8", errors="replace").strip().removeprefix("gitdir: ")).resolve()
     common = git_dir
     if (git_dir / "commondir").is_file():
-        common = (git_dir / (git_dir / "commondir").read_text().strip()).resolve()
+        common = (git_dir / (git_dir / "commondir").read_text(encoding="utf-8", errors="replace").strip()).resolve()
     data = {"remote": remote, "branch": branch, "declared":git_cfg.get("remote", {}),
             "allowed":git_cfg.get("allowed_remote_prefixes", []),
-            "head":(git_dir/"HEAD").read_text(), "git_config":(common/"config").read_text()}
+            "head":(git_dir/"HEAD").read_text(encoding="utf-8", errors="replace"),
+            "git_config":(common/"config").read_text(encoding="utf-8", errors="replace")}
     return hashlib.sha256(json.dumps(data,sort_keys=True).encode()).hexdigest()
 
 

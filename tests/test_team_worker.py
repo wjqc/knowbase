@@ -74,3 +74,24 @@ def test_windows_preserves_unknown_existing_task(memory_repo,tmp_path,monkeypatc
     monkeypatch.setattr(worker.subprocess,'run',run)
     with pytest.raises(RuntimeError,match='not an owned'):worker.install()
     assert not any('/Create' in a or '/Delete' in a for a in calls)
+
+
+def test_windows_reinstall_accepts_oem_encoded_own_task(memory_repo,tmp_path,monkeypatch):
+    """schtasks announces UTF-16 but emits OEM bytes; the owned task must stay reinstallable."""
+    home,python,root=prepare(memory_repo,tmp_path,monkeypatch,'win32');calls=[]
+    existing=(
+        '<?xml version="1.0" encoding="UTF-16" standalone="yes"?>'
+        '<Task xmlns="'+worker.NS+'" version="1.3">'
+        '<RegistrationInfo><Description>knowbase local team statistics collector</Description></RegistrationInfo>'
+        '<Actions Context="Collector"><Exec><Command>'+str(python.with_name('pythonw.exe'))+'</Command></Exec></Actions>'
+        '</Task>'
+    ).encode('cp936')
+    def run(args,**kw):
+        calls.append(args)
+        if '/FO' in args:return SimpleNamespace(returncode=0,stdout=b'"\\knowbase-team-stats","N/A","Ready"\n')
+        if '/XML' in args:return SimpleNamespace(returncode=0,stdout=existing)
+        return SimpleNamespace(returncode=0,stdout=b'')
+    monkeypatch.setattr(worker.subprocess,'run',run)
+    result=worker.install()
+    assert [a[1] for a in calls]==['/Query','/Query','/Create','/Query','/Run']
+    assert Path(result['path']).exists()

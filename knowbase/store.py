@@ -180,7 +180,8 @@ class LintError(Exception):
 # ---------- frontmatter I/O ----------
 
 def parse(path: Path) -> tuple[dict, str]:
-    return parse_text(Path(path).read_text(encoding="utf-8"),str(path))
+    # utf-8-sig：兼容 Windows 记事本等保存的 BOM 文件，避免整卡被"缺少 frontmatter"跳过
+    return parse_text(Path(path).read_text(encoding="utf-8-sig"),str(path))
 
 
 def parse_text(text: str, source: str = "memory") -> tuple[dict, str]:
@@ -198,6 +199,16 @@ def parse_text(text: str, source: str = "memory") -> tuple[dict, str]:
 def render(meta: dict, body: str) -> str:
     fm = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False, default_flow_style=False)
     return f"---\n{fm}---\n\n{body.strip()}\n"
+
+
+def write_shared_text(path: Path, text: str) -> None:
+    """写共享 Git 仓库文件：固定 UTF-8 + LF。
+
+    Windows 文本模式默认把 \\n 写成 \\r\\n，同一内容在两平台落盘字节不同：
+    Git 会判成 blob 伪分歧并引发 rebase 冲突；sources 的 `{sha}.md` 文件名
+    按内存 LF 文本计算，磁盘 CRLF 会导致文件名与实际内容对不上。"""
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
 
 
 # ---------- 路径与遍历 ----------

@@ -5,12 +5,14 @@ import platform
 import sqlite3
 import subprocess
 import re
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .. import config, gitops, index, telemetry
+from ..fsutil import replace_with_retry
 from ..locking import RepoLock
 from ..value import identity
 from . import collect, publish, report, state
@@ -114,10 +116,15 @@ def root_path(cfg=None):
 def _save_config(cfg):
     path = config.CONFIG_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(path.name + ".team-tmp")
-    temp.write_bytes(canonical(cfg))
-    temp.chmod(0o600)
-    os.replace(temp, path)
+    # 固定临时名（.team-tmp）会被并发写互相覆盖；Windows 上目标被占用还需退避重试
+    fd, temp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".team-tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(canonical(cfg))
+        os.chmod(temp, 0o600)
+        replace_with_retry(temp, path)
+    finally:
+        Path(temp).unlink(missing_ok=True)
 
 
 def enroll(member_id, label, *, publisher=False, include_history=False, source_timezone="Asia/Shanghai"):
@@ -259,9 +266,13 @@ def run(*, network=True):
             snapshot["pending_files"] = status(conn)["pending_files"]
             snapshot["last_sync"] = last_sync
             conn.commit()
-            temp = root / "snapshot.tmp"
-            temp.write_bytes(canonical(snapshot))
-            os.replace(temp, root / "snapshot.json")
+            fd, temp = tempfile.mkstemp(dir=root, prefix="snapshot.", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(canonical(snapshot))
+                replace_with_retry(temp, root / "snapshot.json")
+            finally:
+                Path(temp).unlink(missing_ok=True)
             from .. import dashboard
             dashboard.generate(repo, Path(cfg["team"]["dashboard_output"]).expanduser(), team_snapshot=snapshot)
             return {**status(conn), "coverage": snapshot["coverage"], "errors": errors}

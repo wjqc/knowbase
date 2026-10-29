@@ -80,12 +80,18 @@ def _resolve_binary(command) -> str | None:
     return shutil.which(prog)
 
 
+def _program_key(binary: str) -> str:
+    """已知表匹配键：兼容 Windows 反斜杠路径与 .CMD/.EXE 后缀（先归一分隔符，跨平台可测）。"""
+    return Path(binary.replace("\\", "/")).stem.lower()
+
+
 def _run_version(binary: str, version_arg: str, timeout: float) -> str | None:
     try:
+        # codex/claude 是 Node 程序，按 UTF-8 输出；不能落到本地代码页（cp936）
         proc = subprocess.run(
-            [binary, version_arg], stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            timeout=timeout, text=True, **no_window())
+                [binary, version_arg], stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                timeout=timeout, text=True, encoding="utf-8", errors="replace", **no_window())
     except (OSError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
@@ -118,7 +124,7 @@ def probe_command_executor(cfg: dict) -> CapabilityReport:
                            float(cfg.get("timeout_seconds") or 10))
     noninteractive_argv = cfg.get("noninteractive_argv")
     if noninteractive_argv is None:
-        prog = binary.rsplit("/", 1)[-1]
+        prog = _program_key(binary)
         noninteractive_argv = KNOWN_NONINTERACTIVE_ARGV.get(prog, [])
     headless = bool(noninteractive_argv)
     if not headless:
@@ -129,7 +135,7 @@ def probe_command_executor(cfg: dict) -> CapabilityReport:
             reason_code=REASON_INVALID_CONFIG)
     auth_check = cfg.get("auth_check")
     if auth_check is None:
-        prog = binary.rsplit("/", 1)[-1]
+        prog = _program_key(binary)
         auth_check = KNOWN_AUTH_CHECKS.get(prog)
     authed = _auth_marker_present(auth_check)
     if not authed:
@@ -332,7 +338,7 @@ class CommandExecutorRunner:
         self.binary = binary
         argv = cfg.get("noninteractive_argv")
         if not argv:
-            prog = binary.rsplit("/", 1)[-1]
+            prog = _program_key(binary)
             argv = KNOWN_NONINTERACTIVE_ARGV.get(prog, [])
         self.noninteractive_argv = list(argv)
         self.timeout = float(cfg.get("timeout_seconds") or 120)
@@ -348,11 +354,13 @@ class CommandExecutorRunner:
         }
         process = None
         try:
+            # codex/claude 按 UTF-8 读写 stdin/stdout；不指定编码时中文材料会被
+            # cp936 编码成乱码传给执行器，emoji 直接抛 UnicodeEncodeError。
             process = subprocess.Popen(
                 [self.binary, *self.noninteractive_argv],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, text=True,
+                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
                 cwd=self.cfg.get("working_directory"), env=getattr(self,'execution_env',None),
                 **({'start_new_session':True} if os.name!='nt' else {'creationflags':subprocess.CREATE_NEW_PROCESS_GROUP | 0x08000000}))
             out,err = process.communicate(json.dumps(payload,ensure_ascii=False),timeout=self.timeout)
@@ -365,7 +373,9 @@ class CommandExecutorRunner:
         except OSError as exc:
             raise ExecutorFailure(REASON_PROCESS_EXITED, f"executor spawn failed: {exc}")
         finally:
-            if process is not None and os.name!='nt':
+            if process is not None:
+                # Windows 上主进程正常退出后孙进程仍存活（并占用 venv 文件），
+                # 也必须收尾；taskkill 对已退出 PID 报错可容忍。
                 from ..gitops import _kill_tree
                 _kill_tree(process)
                 try:process.communicate(timeout=5)

@@ -48,9 +48,9 @@ def isolated_probe(executor_config, *, scope):
                 pass
             return {"passed": False, "failure_reasons": ["timeout"]}
         finally:
-            # A CLI can leave helper processes behind even after its main process exits.
-            if os.name != "nt":
-                _kill_tree(process)
+            # A CLI can leave helper processes behind even after its main process exits
+            # (Windows included: taskkill on an exited PID is tolerated).
+            _kill_tree(process)
         if process.returncode:
             return {"passed": False, "failure_reasons": ["probe_process_failed"]}
         try:

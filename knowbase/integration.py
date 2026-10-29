@@ -3,10 +3,13 @@ import hashlib
 import json
 import os
 import shlex
+import subprocess
 import sys
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+
+from .fsutil import replace_with_retry
 
 HOSTS = {
     "cursor": {"mcp": ".cursor/mcp.json", "key": ("mcpServers",), "hooks": None, "style": None},
@@ -24,6 +27,21 @@ def host_spec(name, home):
     elif name=='trae' and sys.platform.startswith('linux'):
         spec['mcp']=str(Path(os.environ.get('XDG_CONFIG_HOME',str(home/'.config')))/'Trae CN/User/mcp.json')
     return spec
+
+
+def _allowed_roots(home):
+    """宿主声明的配置文件（Windows 上 Trae 等位于 %APPDATA%，可能被企业策略/
+    漫游配置重定向到 home 之外）；这些路径是宿主决定的，写入不算越界。"""
+    roots=set()
+    for name in HOSTS:
+        spec=host_spec(name,home)
+        for rel in (spec.get('mcp'),spec.get('hooks')):
+            if not rel:continue
+            candidate=Path(rel)
+            if candidate.is_absolute():
+                try:roots.add(candidate.resolve())
+                except OSError:roots.add(candidate)
+    return roots
 
 
 class IntegrationError(ValueError):
@@ -64,11 +82,25 @@ def _section(doc, keys):
     return doc
 
 
+def _join_command(parts):
+    """拼接 hook 命令：POSIX 用 shell 引号；Windows cmd.exe 不认单引号，必须走 cmdline 规则。"""
+    if os.name == 'nt':return subprocess.list2cmdline([str(x) for x in parts])
+    return ' '.join(shlex.quote(str(x)) for x in parts)
+
+
+def _split_command(command):
+    """解析既有 hook 命令：POSIX 规则会把 C:\\Users 的反斜杠当转义符吃掉，Windows 下需保留。"""
+    if os.name == 'nt':
+        tokens = shlex.split(command, posix=False)
+        return [t[1:-1] if len(t) > 1 and t[0] == t[-1] == '"' else t for t in tokens]
+    return shlex.split(command)
+
+
 def _same_command(actual,expected):
     if expected["type"]!="command":return actual.get("command")==expected["command"]
     command=actual.get("command")
     if not isinstance(command,str):return False
-    try:return shlex.split(command)==shlex.split(expected["command"])
+    try:return _split_command(command)==_split_command(expected["command"])
     except ValueError:return False
 
 
@@ -100,7 +132,7 @@ def _migrate_hook(actual, expected, home, action, style):
             return False
         actual.update(command=expected['command'],args=expected['args']);return True
     if actual.get('type')!='command':return False
-    try:tokens=shlex.split(actual.get('command',''))
+    try:tokens=_split_command(actual.get('command',''))
     except ValueError:return False
     prefix=[]
     if tokens[:1]==['env']:
@@ -108,7 +140,7 @@ def _migrate_hook(actual, expected, home, action, style):
         while tokens and tokens[0].startswith('KNOWBASE_AGENT_NAME='):prefix.append(tokens.pop(0))
     if len(tokens)<2 or tokens[1:] not in known:
         return False
-    actual['command']=' '.join(shlex.quote(x) for x in prefix)+(' ' if prefix else '')+expected['command']
+    actual['command']=_join_command(prefix)+(' ' if prefix else '')+expected['command']
     return True
 
 
@@ -165,7 +197,7 @@ def plan(agents, home=None, *, managed=None):
     if managed is None:
         try:
             from . import config
-            settings=json.loads((home/'.knowbase/updates.json').read_text())
+            settings=json.loads((home/'.knowbase/updates.json').read_text(encoding="utf-8"))
             managed=bool(settings.get('enabled') and settings.get('config_path')==str(config.CONFIG_PATH.resolve()))
         except (OSError,ValueError):managed=False
     documents, originals = {}, {}
@@ -207,7 +239,7 @@ def plan(agents, home=None, *, managed=None):
         if name in {"claude-code","zcode"}:events["PostToolUseFailure"]="tool-failure"
         if name=="claude-code":events["PreCompact"]="before-compact"
         for event, action in events.items():
-            command = ' '.join(shlex.quote(x) for x in [runtime_command(home),*hook_args(home,action,host['style'],managed)])
+            command = _join_command([runtime_command(home),*hook_args(home,action,host['style'],managed)])
             handler = ({"type": "process", "command": runtime_command(home), "args": hook_args(home,action,host['style'],managed), "timeoutMs": 1000}
                        if name == "zcode" else {"type": "command", "command": command, "timeout": 1})
             entries = hooks.setdefault(event, [])
@@ -238,7 +270,8 @@ def _atomic(path, raw):
         with temp.open("xb") as f:
             os.chmod(temp, 0o600)
             f.write(raw); f.flush(); os.fsync(f.fileno())
-        os.replace(temp, path)
+        # 宿主（Cursor/Claude 等）可能正打开该配置文件；Windows 上需退避重试
+        replace_with_retry(temp, path)
         if os.name != "nt":
             fd = os.open(path.parent, os.O_RDONLY)
             try: os.fsync(fd)
@@ -274,10 +307,12 @@ def recover(journal_path):
     path = Path(journal_path); journal = json.loads(path.read_text())
     # Do not follow arbitrary paths injected into an untrusted journal.
     home = path.parents[3].resolve()
+    allowed_roots=_allowed_roots(home)
     for item in journal["files"]:
         target = Path(item["path"])
         from . import config
-        if (not target.is_relative_to(home) and target != config.CONFIG_PATH.resolve()) or target.is_symlink():
+        if (not target.is_relative_to(home) and target != config.CONFIG_PATH.resolve()
+                and target.resolve() not in allowed_roots) or target.is_symlink():
             raise IntegrationError("INVALID_JOURNAL_TARGET")
         if item["backup"] and Path(item["backup"]).parent != path.parent:
             raise IntegrationError("INVALID_JOURNAL_BACKUP")
@@ -308,12 +343,14 @@ def apply(changes, home=None, *, allowed_paths=()):
     with _lock(home):
         if (home / ".knowbase/backups").is_symlink():
             raise IntegrationError("SYMLINK_BACKUP_DIRECTORY")
+        allowed_roots=_allowed_roots(home)
         backup = home / ".knowbase/backups" / ("init-" + uuid.uuid4().hex)
         backup.mkdir(parents=True, mode=0o700)
         journal = {"state": "prepared", "files": []}
         for i, change in enumerate(changes):
             p = Path(change["path"])
-            if (not p.is_relative_to(home) and p not in allowed_paths) or any(q.is_symlink() for q in [p] + list(p.parents)) :
+            if (not p.is_relative_to(home) and p not in allowed_paths
+                    and p.resolve() not in allowed_roots) or any(q.is_symlink() for q in [p] + list(p.parents)) :
                 raise IntegrationError("CONFIG_OUTSIDE_HOME")
             if _read(p) != change["before"]:
                 raise IntegrationError("CONCURRENT_CONFIG_CHANGE")
@@ -436,7 +473,7 @@ def extra_plan(agents,home, *, managed=False):
                 _toml(after);result.append({'path':str(path),'before':before,'after':after})
             hp=home/'.codex/hooks.json';hr=_read(hp);hd=_document(hr);hooks=_section(hd,('hooks',))
             for event,action in {**EVENTS,'PreToolUse':'tool-before','PostToolUse':'tool-after','Stop':'stop','PreCompact':'before-compact'}.items():
-                handler={'type':'command','command':' '.join(shlex.quote(x) for x in [command,*hook_args(home,action,'codex',managed)]),'timeout':1}
+                handler={'type':'command','command':_join_command([command,*hook_args(home,action,'codex',managed)]),'timeout':1}
                 entries=hooks.setdefault(event,[])
                 if not isinstance(entries,list):raise IntegrationError('HOOK_SCHEMA_CONFLICT')
                 owned=[h for entry in entries for h in entry.get('hooks',[]) if 'knowbase' in str(h.get('command',''))]

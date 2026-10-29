@@ -23,7 +23,8 @@ def rebuild(repo, output, packages=(), *, team_id='default'):
             inputs=[local]+[Path(p).expanduser() for p in packages]
             conn=aggregate.connect(output);counts={'accepted':0,'duplicate':0,'conflict':0,'rejected':0}
             for path in inputs:
-                data=json.loads(path.read_text())
+                # 事件包由 exchange 以 UTF-8 写出且含中文；默认代码页读会损坏身份数据。
+                data=json.loads(path.read_text(encoding='utf-8'))
                 if data.get('schema')!=exchange.PACKAGE_SCHEMA:
                     raise ValueError('raw_v1_packages_required_for_identity_recovery')
                 receipt=exchange.import_package(conn,path,team_id=team_id)

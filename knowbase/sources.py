@@ -16,6 +16,8 @@ from pathlib import Path
 
 import yaml
 
+from .store import write_shared_text
+
 OBJECTS_DIR = Path("sources/objects")
 MANIFESTS_DIR = Path("sources/manifests")
 # 兼容旧格式 SRC-2026-0001 和新格式 SRC-<uuid12>
@@ -93,7 +95,7 @@ def import_source(repo: Path, text: str, *, title: str, scope: str, fmt: str,
         return str(prior["id"]), sha, False
     ensure_dirs(repo)
     sid = alloc_id(repo)
-    (repo / OBJECTS_DIR / f"{sha}.md").write_text(text, encoding="utf-8")
+    write_shared_text(repo / OBJECTS_DIR / f"{sha}.md", text)
     manifest = {
         "id": sid,
         "kind": kind,
@@ -109,8 +111,8 @@ def import_source(repo: Path, text: str, *, title: str, scope: str, fmt: str,
     }
     if source_modified_at:
         manifest["source_modified_at"] = source_modified_at
-    (repo / MANIFESTS_DIR / f"{sid}.yaml").write_text(
-        yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    write_shared_text(repo / MANIFESTS_DIR / f"{sid}.yaml",
+                      yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False))
     return sid, sha, True
 
 
@@ -185,7 +187,7 @@ def import_versioned(repo: Path, text: str, *, title: str, scope: str, fmt: str,
 
     # 创建新版本
     sid = alloc_id(repo)
-    (repo / OBJECTS_DIR / f"{sha}.md").write_text(text, encoding="utf-8")
+    write_shared_text(repo / OBJECTS_DIR / f"{sha}.md", text)
     manifest = {
         "id": sid,
         "kind": kind,
@@ -207,8 +209,8 @@ def import_versioned(repo: Path, text: str, *, title: str, scope: str, fmt: str,
     if superseded_id:
         manifest["supersedes"] = superseded_id
 
-    (repo / MANIFESTS_DIR / f"{sid}.yaml").write_text(
-        yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    write_shared_text(repo / MANIFESTS_DIR / f"{sid}.yaml",
+                      yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False))
 
     # 标记旧版本为 superseded
     if superseded_id:
@@ -230,8 +232,8 @@ def _mark_superseded(repo: Path, old_id: str, new_id: str) -> None:
         data["status"] = "superseded"
         data["superseded_by"] = new_id
         data["superseded_at"] = date.today().isoformat()
-        manifest_path.write_text(
-            yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        write_shared_text(manifest_path,
+                          yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
     except Exception:
         pass
 

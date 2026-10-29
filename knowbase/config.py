@@ -141,15 +141,36 @@ def agent_name() -> str:
 
 
 def mapped_scope(project_dir: str, cfg: dict | None = None) -> str | None:
-    """接受配置中的原路径和规范路径别名（macOS /var 与 /private/var 等）。"""
+    """接受配置中的原路径和规范路径别名。
+
+    macOS：/var 与 /private/var 等符号路径经 resolve() 归一。
+    Windows：只认原路径字符串无法匹配盘符大小写/斜杠方向差异（C:\\A\\b 与 c:/a/b），
+    按"盘符 + 大小写不敏感 + 斜杠归一"比较；resolve() 的 UNC/短路径归一不在此展开。
+    """
     cfg = cfg or load_config()
     path = Path(project_dir).expanduser()
-    canonical = path.resolve()
+    on_windows = os.name == "nt"
+
+    def _norm(text: str) -> str:
+        return text.replace("\\", "/").lower() if on_windows else text
+
+    canonical = path if on_windows else path.resolve()
     mapping = cfg.get("scope_map", {}) or {}
     direct = mapping.get(str(path)) or mapping.get(str(canonical)) or mapping.get(canonical.name)
     if direct:
         return str(direct)
+    target = _norm(str(canonical))
     for key, value in mapping.items():
-        if (str(key).startswith(("/", "~")) and Path(key).expanduser().resolve() == canonical):
+        text = str(key)
+        absolute = text.startswith(("/", "\\", "~")) or (len(text) > 1 and text[1] == ":")
+        if not absolute:
+            continue
+        candidate = Path(text).expanduser()
+        if not on_windows:
+            try:
+                candidate = candidate.resolve()
+            except OSError:
+                continue
+        if _norm(str(candidate)) == target:
             return str(value)
     return None

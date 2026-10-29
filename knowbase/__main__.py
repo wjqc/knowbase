@@ -48,7 +48,8 @@ def _retire_shared_index(repo: Path, cfg: dict) -> str | None:
     """显式 init 升级时退役派生 INDEX；保留物理文件和用户改动。"""
     tracked = bool(gitops._run(repo, "ls-files", "--", "INDEX.md"))
     ignore = repo / ".gitignore"
-    previous = ignore.read_text() if ignore.exists() else ""
+    # .gitignore 含中文注释且以 UTF-8 写入；读写必须显式同编码，中文 Windows 默认 cp936 会把文件改坏。
+    previous = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
     missing = [line for line in ("INDEX.md", ".knowbase/local/") if line not in previous.splitlines()]
     if not tracked and not missing:
         return None
@@ -56,7 +57,8 @@ def _retire_shared_index(repo: Path, cfg: dict) -> str | None:
     if staged or (ignore.exists() and gitops._run(repo, "diff", "--", ".gitignore")):
         return "INDEX 退役未执行：保留已有暂存内容/.gitignore 修改，请处理后再次 init"
     if missing:
-        ignore.write_text(previous.rstrip() + "\n" + "\n".join(missing) + "\n")
+        ignore.write_text(previous.rstrip() + "\n" + "\n".join(missing) + "\n",
+                          encoding="utf-8", newline="\n")
     if tracked:
         gitops._run(repo, "rm", "--cached", "--", "INDEX.md")
         if cfg["git"].get("auto_commit", True):
@@ -91,10 +93,15 @@ def cmd_init(import_from=None, scope=None, dtype="workflow") -> int:
         (rp / d).mkdir(exist_ok=True)
     gi = rp / ".gitignore"
     if not gi.exists():
-        gi.write_text(GITIGNORE, encoding="utf-8")
+        gi.write_text(GITIGNORE, encoding="utf-8", newline="\n")
+    # 共享内容统一 LF：防止 Windows 检出/提交时做 CRLF 转换造成跨平台伪分歧。
+    attrs = rp / ".gitattributes"
+    if not attrs.exists():
+        attrs.write_text("# 共享内容统一 LF，避免 Windows CRLF 伪冲突\n*.md text eol=lf\n*.yaml text eol=lf\n*.yml text eol=lf\n",
+                         encoding="utf-8", newline="\n")
     readme = rp / "README.md"
     if not readme.exists():
-        readme.write_text(REPO_README, encoding="utf-8")
+        readme.write_text(REPO_README, encoding="utf-8", newline="\n")
     print(f"✓ 仓库目录就绪 {rp}")
 
     # 3. git：新仓库 init + 应用远端（白名单校验）
@@ -105,7 +112,7 @@ def cmd_init(import_from=None, scope=None, dtype="workflow") -> int:
         # 创建 .gitignore：INDEX.md 已退役，不再提交到 Git
         gitignore = rp / ".gitignore"
         if not gitignore.exists():
-            gitignore.write_text("# 本地重建的速览索引，不进入共享 Git\nINDEX.md\n", encoding="utf-8")
+            gitignore.write_text("# 本地重建的速览索引，不进入共享 Git\nINDEX.md\n", encoding="utf-8", newline="\n")
         url = cfg["git"].get("remote", {}).get("url", "")
         if url:
             prefixes = cfg["git"].get("allowed_remote_prefixes", [])

@@ -13,7 +13,22 @@ from pathlib import Path
 import pytest
 
 from knowbase import config,integration
+from knowbase.updates import engine
 from knowbase.updates.engine import Engine,UpdateError,Lock,atomic,cards,ledger_snapshot,module_hash
+
+
+class _WindowsOS:
+    """os stand-in that reports Windows and refuses the terminating os.kill."""
+
+    def __init__(self, real):
+        self._real=real
+        self.name='nt'
+
+    def __getattr__(self,item):
+        return getattr(self._real,item)
+
+    def kill(self,*args,**kwargs):
+        raise AssertionError('os.kill would terminate the inspected process')
 
 
 def git(repo,*args):
@@ -163,6 +178,49 @@ def test_different_store_bridge_blocks_global_package_update(update_world,monkey
     home,root,source,settings,installed=update_world;e=Engine(settings)
     monkeypatch.setattr(e,'live_bridges',lambda:[{'config_path':str(home/'other.json')}])
     with pytest.raises(UpdateError,match='additional_config'):e.quiesce()
+
+
+def _register_bridge(root,pid,config_path):
+    path=root/'bridges'/f'{pid}.json';path.parent.mkdir(parents=True,exist_ok=True)
+    atomic(path,{'pid':pid,'backend_pid':None,'config_path':str(config_path),
+                 'active_requests':0,'phase':'paused'});return path
+
+
+def _register_entry(root,pid):
+    path=root/'entries'/f'{pid}.json';path.parent.mkdir(parents=True,exist_ok=True)
+    atomic(path,{'pid':pid,'started_at':time.time()});return path
+
+
+def test_windows_bridge_probe_never_terminates_the_running_bridge(update_world,windows_probe,monkeypatch):
+    """The updater must observe the live MCP bridge without killing it."""
+    home,root,source,settings,installed=update_world;e=Engine(settings)
+    pid=4321;_register_bridge(root,pid,home/'.knowbase/config.json')
+    windows_probe(wait=engine._WINDOWS_WAIT_TIMEOUT,exit_code=engine._WINDOWS_STILL_ACTIVE)
+    monkeypatch.setattr(engine,'os',_WindowsOS(os))
+    bridges=e.live_bridges()
+    assert [d['pid'] for d in bridges]==[pid]
+
+
+def test_windows_quiesce_defers_for_a_live_entry_without_killing_it(update_world,windows_probe,monkeypatch):
+    """A registered entry process is still running; the update must wait, not terminate it."""
+    home,root,source,settings,installed=update_world;e=Engine(settings)
+    pid=4321;_register_entry(root,pid)
+    windows_probe(wait=engine._WINDOWS_WAIT_TIMEOUT,exit_code=engine._WINDOWS_STILL_ACTIVE)
+    monkeypatch.setattr(engine,'os',_WindowsOS(os))
+    monkeypatch.setattr(e,'processes',lambda:[])
+    with pytest.raises(UpdateError,match='busy_or_legacy_client_reconnect_required'):e.quiesce()
+    assert json.loads(e.drain.read_text())['phase']=='drain_requests'
+
+
+def test_windows_quiesce_proceeds_once_the_registered_process_exited(update_world,windows_probe,monkeypatch):
+    """A process that already exited must not block the update forever."""
+    home,root,source,settings,installed=update_world;e=Engine(settings)
+    pid=4321;_register_entry(root,pid)
+    windows_probe(per_pid={pid:{'wait':engine._WINDOWS_WAIT_OBJECT_0,'exit_code':0}})
+    monkeypatch.setattr(engine,'os',_WindowsOS(os))
+    monkeypatch.setattr(e,'processes',lambda:[])
+    e.quiesce()
+    assert json.loads(e.drain.read_text())['phase']=='pause_backends'
 
 
 def test_rollback_never_restores_over_new_evidence(update_world,tmp_path):

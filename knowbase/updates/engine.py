@@ -49,21 +49,120 @@ def validate_source(url,branch='main',*,allow_file=False,allow_insecure=False):
 def atomic(path, data):
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
     temp=path.with_name(path.name+'.'+uuid.uuid4().hex)
-    with temp.open('x') as f:
+    with temp.open('x',encoding='utf-8') as f:
         os.chmod(temp,0o600);json.dump(data,f,ensure_ascii=False,indent=2);f.flush();os.fsync(f.fileno())
     os.replace(temp,path)
 
 
 def read(path, default=None):
     try:
-        value=json.loads(Path(path).read_text())
+        value=json.loads(Path(path).read_text(encoding='utf-8'))
         return value if isinstance(value,dict) else ({} if default is None else default)
     except (OSError,ValueError):return {} if default is None else default
 
 
+_WINDOWS_SYNCHRONIZE=0x100000
+_WINDOWS_QUERY_LIMITED_INFORMATION=0x1000
+_WINDOWS_ERROR_ACCESS_DENIED=5
+_WINDOWS_STILL_ACTIVE=259
+_WINDOWS_WAIT_OBJECT_0=0x00000000
+_WINDOWS_WAIT_TIMEOUT=0x00000102
+
+
+class _WindowsProcessApi:
+    """Read-only Win32 process queries; never signals the target process."""
+
+    def __init__(self):
+        import ctypes
+        from ctypes import wintypes
+        self._ctypes=ctypes
+        self._wintypes=wintypes
+        self._error=0
+        kernel32=ctypes.WinDLL('kernel32',use_last_error=True)
+        kernel32.OpenProcess.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.DWORD]
+        kernel32.OpenProcess.restype=wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes=[wintypes.HANDLE,wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype=wintypes.DWORD
+        kernel32.GetExitCodeProcess.argtypes=[wintypes.HANDLE,ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype=wintypes.BOOL
+        kernel32.CloseHandle.argtypes=[wintypes.HANDLE]
+        kernel32.CloseHandle.restype=wintypes.BOOL
+        self._kernel32=kernel32
+
+    def open_process(self,pid):
+        handle=self._kernel32.OpenProcess(
+            _WINDOWS_SYNCHRONIZE|_WINDOWS_QUERY_LIMITED_INFORMATION,False,pid)
+        # The last error must be read before any other Win32 call resets it.
+        self._error=0 if handle else self._ctypes.get_last_error()
+        return handle
+
+    def last_error(self):
+        return self._error
+
+    def wait(self,handle):
+        return self._kernel32.WaitForSingleObject(handle,0)
+
+    def exit_code(self,handle):
+        code=self._wintypes.DWORD()
+        if not self._kernel32.GetExitCodeProcess(handle,self._ctypes.byref(code)):return None
+        return code.value
+
+    def close(self,handle):
+        self._kernel32.CloseHandle(handle)
+
+
+_WINDOWS_API=None
+
+
+def _windows_api():
+    global _WINDOWS_API
+    if _WINDOWS_API is None:_WINDOWS_API=_WindowsProcessApi()
+    return _WINDOWS_API
+
+
+def _windows_alive(pid,api=None):
+    """Liveness probe on Windows that cannot terminate the inspected process.
+
+    ``os.kill(pid,0)`` is not a probe on Windows: CPython routes it to
+    ``TerminateProcess``, so probing would kill the very client the updater
+    is waiting for. Open a query-only handle and ask the kernel instead.
+    """
+    api=api or _windows_api()
+    handle=api.open_process(pid)
+    if not handle:
+        # ACCESS_DENIED means the process exists but belongs to another user.
+        return api.last_error()==_WINDOWS_ERROR_ACCESS_DENIED
+    try:
+        state=api.wait(handle)
+        if state==_WINDOWS_WAIT_TIMEOUT:return True
+        if state==_WINDOWS_WAIT_OBJECT_0:return False
+        # WAIT_FAILED or any unexpected state: fall back to the exit code.
+        code=api.exit_code(handle)
+        return code is None or code==_WINDOWS_STILL_ACTIVE
+    finally:
+        api.close(handle)
+
+
 def alive(pid):
-    try:os.kill(int(pid),0);return True
-    except (OSError,TypeError,ValueError):return False
+    """Whether a PID is still running, without disturbing that process.
+
+    POSIX: ``os.kill(pid,0)`` only probes existence. Windows: the same call
+    terminates the target, so the probe must go through Win32 handles.
+    """
+    try:
+        pid=int(pid)
+    except (TypeError,ValueError):
+        return False
+    if pid<=0:
+        return False
+    if os.name=='nt':
+        return _windows_alive(pid)
+    try:
+        os.kill(pid,0);return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
 
 
 class Lock:
@@ -96,7 +195,9 @@ def command(args, *, cwd=None, env=None, timeout=120):
         return out
     except (OSError,subprocess.SubprocessError):raise UpdateError('subprocess_unavailable_or_timed_out') from None
     finally:
-        if process is not None and (os.name!='nt' or process.poll() is None):
+        if process is not None:
+            # 正常结束后 Windows 也必须收尾：孙进程（node/MCP 子服务）会继续存活
+            # 并锁住 venv 文件；taskkill 对已退出 PID 报错可容忍（输出被丢弃）。
             if os.name=='nt':subprocess.run(['taskkill','/F','/T','/PID',str(process.pid)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5, **no_window())
             else:
                 try:os.killpg(process.pid,signal.SIGKILL)
@@ -266,13 +367,13 @@ class Engine:
         try:
             import tomllib
         except ImportError:import tomli as tomllib
-        metadata=tomllib.loads((source/'pyproject.toml').read_text());project=metadata['project']
+        metadata=tomllib.loads((source/'pyproject.toml').read_text(encoding='utf-8'));project=metadata['project']
         version=None
         if metadata.get('tool',{}).get('knowbase',{}).get('updates',{}).get('protocol')!=1:
             raise UpdateError('unsupported_update_protocol')
         if not all((source/'knowbase/updates'/name).is_file() for name in ['engine.py','bridge.py','entry.py']):
             raise UpdateError('update_entry_missing')
-        for node in ast.parse((source/'knowbase/__init__.py').read_text()).body:
+        for node in ast.parse((source/'knowbase/__init__.py').read_text(encoding='utf-8')).body:
             if isinstance(node,ast.Assign) and any(isinstance(x,ast.Name) and x.id=='__version__' for x in node.targets):version=ast.literal_eval(node.value)
         if project['name']!='knowbase' or version!=project['version']:raise UpdateError('package_version_mismatch')
         from packaging.specifiers import SpecifierSet
@@ -356,10 +457,16 @@ class Engine:
 
     def processes(self):
         if os.name=='nt':
-            script="Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
-            rows=json.loads(command(['powershell','-NoProfile','-NonInteractive','-Command',script],timeout=15) or b'[]')
-            if isinstance(rows,dict):rows=[rows]
-            return [(int(r['ProcessId']),r.get('CommandLine') or '') for r in rows]
+            # PS 5.1 管道输出走控制台 OEM 代码页（中文系统 cp936），CommandLine
+            # 含中文路径时 json 的编码自动检测会失败；先强制会话输出为 UTF-8。
+            script=("[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+                    "Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress")
+            raw=command(['powershell','-NoProfile','-NonInteractive','-Command',script],timeout=15)
+            try:
+                rows=json.loads(raw.decode('utf-8',errors='replace') or '[]')
+                if isinstance(rows,dict):rows=[rows]
+                return [(int(r['ProcessId']),r.get('CommandLine') or '') for r in rows]
+            except (ValueError,KeyError,TypeError):raise UpdateError('subprocess_failed') from None
         raw=command(['ps','-axo','pid=,command='],timeout=15).decode()
         return [(int(p[0]),p[1]) for line in raw.splitlines() if len(p:=line.strip().split(None,1))==2]
 
@@ -417,7 +524,14 @@ class Engine:
     def worker_running(self):
         if not self.cfg.get('manage_worker',True):return False
         if sys.platform=='darwin':args=['launchctl','print',f'gui/{os.getuid()}/com.knowbase.worker']
-        elif os.name=='nt':args=['schtasks','/Query','/TN','knowbase-worker']
+        elif os.name=='nt':
+            # schtasks /Query 只要任务注册过就返回 0，不代表正在运行；
+            # Get-ScheduledTask 的 State 是英文枚举，不随系统语言本地化。
+            try:
+                out=command(['powershell','-NoProfile','-NonInteractive','-Command',
+                             "(Get-ScheduledTask -TaskName 'knowbase-worker').State.ToString()"],timeout=15)
+                return out.decode('utf-8',errors='replace').strip()=='Running'
+            except UpdateError:return False  # 任务未注册或调度器不可用：按未运行处理
         else:args=['systemctl','--user','is-active','knowbase-worker.service']
         try:return subprocess.run(args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10, **no_window()).returncode==0
         except (OSError,subprocess.SubprocessError):raise UpdateError('scheduler_state_unavailable') from None
@@ -437,7 +551,16 @@ class Engine:
         return directory
 
     def install(self,wheel):
-        command([self.uv,'pip','install','--python',self.python,'--offline','--no-cache','--no-deps','--reinstall',wheel],timeout=180)
+        # Windows 上杀毒/索引进程或存活的 bridge/Hook 进程可能短暂锁住 venv 目标文件；
+        # 失败先退避重试再判定，最终失败仍由 run()/bootstrap 的备份回滚兜底。
+        attempts=3 if os.name=='nt' else 1
+        for i in range(attempts):
+            try:
+                command([self.uv,'pip','install','--python',self.python,'--offline','--no-cache','--no-deps','--reinstall',wheel],timeout=180)
+                return
+            except UpdateError:
+                if i==attempts-1:raise
+                time.sleep(2*(i+1))
 
     def rollback(self, journal, temporary):
         backup=Path(journal['backup']).resolve();allowed=self.home/'.knowbase/backups'

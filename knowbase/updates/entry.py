@@ -25,7 +25,7 @@ def _main(root):
             directory=root/'deferred-hooks';directory.mkdir(parents=True,exist_ok=True,mode=0o700)
             path=directory/(uuid.uuid4().hex+'.json')
             fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
-            with os.fdopen(fd,'w') as f:json.dump(record,f)
+            with os.fdopen(fd,'w',encoding='utf-8') as f:json.dump(record,f)
             return 0  # Never keep the user's task alive for maintenance.
         print('knowbase is updating; retry after the update completes',file=sys.stderr);return 75
     sys.argv[0]='knowbase'
@@ -33,12 +33,19 @@ def _main(root):
     return 0
 
 
+def _utf8_stdin():
+    """宿主按 UTF-8 下发 Hook payload；Windows 管道默认走本地代码页（如 cp936），入口处对齐。"""
+    try:sys.stdin.reconfigure(encoding='utf-8')
+    except (AttributeError,ValueError,OSError):pass
+
+
 def main():
+    _utf8_stdin()
     root=Path(os.environ.get('KNOWBASE_RUNTIME_ROOT',str(Path.home()/'.knowbase/runtime')))
     directory=root/'entries';directory.mkdir(parents=True,exist_ok=True,mode=0o700)
     path=directory/(str(os.getpid())+'-'+uuid.uuid4().hex+'.json')
     fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
-    with os.fdopen(fd,'w') as f:json.dump({'pid':os.getpid(),'started_at':time.time()},f)
+    with os.fdopen(fd,'w',encoding='utf-8') as f:json.dump({'pid':os.getpid(),'started_at':time.time()},f)
     try:return _main(root)
     finally:path.unlink(missing_ok=True)
 

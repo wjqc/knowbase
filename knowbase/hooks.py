@@ -296,7 +296,18 @@ def _try_enqueue_capture(session_id: str, transcript_path: str, cfg: dict) -> st
 
 # ---------- stdin/stdout 包装层 ----------
 
+def _utf8_stdio():
+    """宿主按 UTF-8 收发 Hook 输入输出；Windows 管道默认走本地代码页（如 cp936），
+    中文 payload 会乱码甚至解码失败（异常被吞掉后 Hook 静默失效），入口处统一对齐。"""
+    for stream, extra in ((sys.stdin, {}), (sys.stdout, {"newline": "\n"})):
+        try:
+            stream.reconfigure(encoding="utf-8", **extra)
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def _read_stdin() -> dict:
+    _utf8_stdio()
     try:
         data = json.load(sys.stdin)
         return data if isinstance(data, dict) else {}
@@ -399,6 +410,7 @@ def _emit(text: str, style: str):
     """claude 风格=纯文本注入；zcode 风格=严格 JSON {"additionalContext": ...}。"""
     if not text:
         return
+    _utf8_stdio()
     if style == "zcode":
         print(json.dumps({"additionalContext": text}, ensure_ascii=False))
     else:

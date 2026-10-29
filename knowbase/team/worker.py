@@ -1,10 +1,13 @@
 """One OS-owned collector, using the unique fixed runtime on each platform."""
 import getpass
+import codecs
 import csv
 import io
 import json
+import locale
 import os
 import plistlib
+import re
 import subprocess
 import sys
 import uuid
@@ -18,6 +21,113 @@ from ..integration import _atomic
 LABEL = "com.knowbase.team-stats"
 WINDOWS_TASK = "knowbase-team-stats"
 NS = "http://schemas.microsoft.com/windows/2004/02/mit/task"
+
+_XML_DECLARATION = re.compile(r"^\s*<\?xml[^>]*\?>", re.IGNORECASE)
+_XML_ENCODING_ATTRIBUTE = re.compile(r"""\s+encoding\s*=\s*(["'])[^"']*\1""", re.IGNORECASE)
+_CONSOLE_CODE_PAGES = ("cp936", "cp1252", "cp437", "cp850")
+
+
+def _console_code_pages():
+    """Console code pages to try, most specific first."""
+    pages = []
+    if os.name == "nt":
+        try:
+            import ctypes
+            pages.append("cp%d" % ctypes.windll.kernel32.GetOEMCP())
+        except (OSError, AttributeError, ValueError):
+            pass
+    preferred = locale.getpreferredencoding(False)
+    if preferred:
+        pages.append(preferred)
+    pages.extend(_CONSOLE_CODE_PAGES)
+    unique = []
+    for page in pages:
+        name = str(page).lower()
+        if name not in unique:
+            unique.append(name)
+    return unique
+
+
+def _sniff_utf16(raw):
+    """Detect BOM-less UTF-16 by the NUL distribution inside byte pairs."""
+    sample = raw[:4096]
+    if len(sample) < 4:
+        return None
+    even = sum(1 for i in range(0, len(sample) - 1, 2) if sample[i] == 0)
+    odd = sum(1 for i in range(0, len(sample) - 1, 2) if sample[i + 1] == 0)
+    pairs = len(sample) // 2
+    if odd >= pairs * 0.3 and odd > even * 4:
+        return "utf-16-le"
+    if even >= pairs * 0.3 and even > odd * 4:
+        return "utf-16-be"
+    return None
+
+
+def _decode_variants(raw):
+    """Ordered decoded forms of Windows console output.
+
+    schtasks mixes encodings: the XML query is announced as UTF-16 while the
+    bytes may be OEM single-byte, and the task listing follows the console
+    code page. Decoding first keeps ElementTree from trusting a wrong
+    ``encoding`` declaration.
+    """
+    if isinstance(raw, str):
+        return [raw]
+    if not raw:
+        return [""]
+    if raw.startswith(codecs.BOM_UTF8):
+        return [raw.decode("utf-8-sig", errors="replace")]
+    if raw.startswith(codecs.BOM_UTF16_LE) or raw.startswith(codecs.BOM_UTF16_BE):
+        return [raw.decode("utf-16", errors="replace")]
+    order = []
+    sniffed = _sniff_utf16(raw)
+    if sniffed:
+        order.append(sniffed)
+    order.extend(_console_code_pages())
+    order.append("utf-8")
+    order.extend(("utf-16-le", "utf-16-be"))
+    variants = []
+    for encoding in order:
+        try:
+            text = raw.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+        if "\x00" in text:
+            # A single-byte page never yields NUL; this was UTF-16 read wrongly.
+            continue
+        if text not in variants:
+            variants.append(text)
+    if not variants:
+        variants.append(raw.decode("utf-8", errors="replace"))
+    return variants
+
+
+def _strip_xml_encoding(text):
+    """Drop the encoding attribute; the text is already decoded."""
+    text = text.lstrip("\ufeff")
+
+    def clean(match):
+        return _XML_ENCODING_ATTRIBUTE.sub("", match.group(0))
+    return _XML_DECLARATION.sub(clean, text, count=1)
+
+
+def _parse_task_xml(raw):
+    """Parse scheduler XML output regardless of the encoding it announces.
+
+    ``schtasks /Query /XML`` declares UTF-16 while the bytes may be OEM
+    single-byte, and ElementTree then rejects the document. Decode first,
+    drop the untrustworthy declaration and let the structure decide.
+    """
+    parsed = []
+    for text in _decode_variants(raw):
+        try:
+            task = ET.fromstring(_strip_xml_encoding(text))
+        except (ValueError, ET.ParseError):
+            continue
+        if task.tag.rsplit("}", 1)[-1] != "Task":
+            continue
+        parsed.append(task)
+    return parsed
 
 
 def fixed_python(home=None, platform=None):
@@ -102,24 +212,39 @@ def _restore(values):
         else:_atomic(path,raw)
 
 
+def _csv_lists_task(raw, task_name):
+    """Whether the task listing contains the task, under any plausible code page."""
+    target=task_name.casefold()
+    for text in _decode_variants(raw):
+        for row in csv.reader(io.StringIO(text)):
+            if row and row[0].strip().lstrip("\\").casefold()==target:
+                return True
+    return False
+
+
+def _owned_task(task, python, description):
+    """Whether the registered task really is the knowbase collector."""
+    ns={"t":NS}
+    command=task.find(".//t:Exec/t:Command",ns);description_node=task.find("t:RegistrationInfo/t:Description",ns)
+    return (command is not None and isinstance(command.text,str)
+            and command.text.casefold() in {str(python).casefold(),str(Path(python).with_name('pythonw.exe')).casefold()}
+            and description_node is not None and description_node.text==description)
+
+
 def _windows_snapshot(python, task_name=WINDOWS_TASK,
                       description="knowbase local team statistics collector"):
     """Do not overwrite an unknown task; capture the registered task, not a stale file."""
     listed=_execute(["schtasks","/Query","/FO","CSV","/NH"])
     raw=getattr(listed,"stdout",b"") or b""
-    text=raw.decode("utf-8-sig",errors="replace") if isinstance(raw,bytes) else raw
-    present=any(row and row[0].strip().lstrip("\\").casefold()==task_name.casefold() for row in csv.reader(io.StringIO(text)))
-    if not present:return None
+    if not _csv_lists_task(raw,task_name):return None
     queried=_execute(["schtasks","/Query","/TN",task_name,"/XML"])
     raw=getattr(queried,"stdout",b"") or b""
-    try:task=ET.fromstring(raw)
-    except (ValueError,ET.ParseError):raise RuntimeError("existing scheduler task cannot be verified") from None
-    ns={"t":NS}
-    command=task.find(".//t:Exec/t:Command",ns);description_node=task.find("t:RegistrationInfo/t:Description",ns)
-    if (command is None or not isinstance(command.text,str) or command.text.casefold() not in {str(python).casefold(),str(Path(python).with_name('pythonw.exe')).casefold()} or description_node is None or
-            description_node.text!=description):
+    tasks=_parse_task_xml(raw)
+    if not tasks:raise RuntimeError("existing scheduler task cannot be verified")
+    owned=[t for t in tasks if _owned_task(t,python,description)]
+    if not owned:
         raise RuntimeError("existing task is not an owned knowbase task; configuration preserved")
-    return ET.tostring(task,encoding="utf-16",xml_declaration=True)
+    return ET.tostring(owned[0],encoding="utf-16",xml_declaration=True)
 
 
 def install(*, remove=False, label=LABEL, task_name=WINDOWS_TASK, argv=None,

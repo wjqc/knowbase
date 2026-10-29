@@ -13,17 +13,25 @@ from pathlib import Path
 def no_window():
     return {'creationflags':0x08000000} if os.name=='nt' else {}
 
+def _utf8_stdio():
+    """宿主与 MCP SDK 均按 UTF-8 收发；Windows 管道默认走本地代码页（如 cp936），
+    中文参数会乱码、emoji 直接抛 UnicodeEncodeError，入口处统一对齐为 UTF-8。"""
+    for stream,extra in ((sys.stdin,{}),(sys.stdout,{'newline':'\n'})):
+        try:stream.reconfigure(encoding='utf-8',**extra)
+        except (AttributeError,ValueError,OSError):pass
+
 
 
 def atomic(path, value):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temp=path.with_name(path.name+'.'+uuid.uuid4().hex)
-    with temp.open('x') as f:
-        os.chmod(temp,0o600);json.dump(value,f);f.flush();os.fsync(f.fileno())
+    with temp.open('x',encoding='utf-8') as f:
+        os.chmod(temp,0o600);json.dump(value,f,ensure_ascii=False);f.flush();os.fsync(f.fileno())
     os.replace(temp,path)
 
 
 def run(backend_command=None):
+    _utf8_stdio()
     root=Path(os.environ.get('KNOWBASE_RUNTIME_ROOT',str(Path.home()/'.knowbase/runtime')))
     root.mkdir(parents=True,exist_ok=True,mode=0o700)
     registry=root/'bridges'/f'{os.getpid()}.json';drain=root/'update-drain.json'
@@ -61,7 +69,7 @@ def run(backend_command=None):
         nonlocal backend,generation,replaying,last_restart
         generation+=1;last_restart=time.monotonic()
         backend=subprocess.Popen(backend_command or [sys.executable,'-I','-m','knowbase','serve'],
-            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=sys.stderr,text=True,bufsize=1, **no_window())
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=sys.stderr,text=True,encoding='utf-8',bufsize=1, **no_window())
         threading.Thread(target=read,args=(backend.stdout,'backend',generation),daemon=True).start()
         if initial:
             replaying=True
@@ -73,7 +81,7 @@ def run(backend_command=None):
         while True:
             paused=drain.exists()
             try:
-                marker=json.loads(drain.read_text()) if paused else {}
+                marker=json.loads(drain.read_text(encoding='utf-8')) if paused else {}
                 stop_backend=paused and isinstance(marker,dict) and marker.get('phase','pause_backends')=='pause_backends'
             except (OSError,ValueError):stop_backend=False
             if paused and stop_backend and not pending and not reverse:

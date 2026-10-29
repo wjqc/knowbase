@@ -13,13 +13,20 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
 
 def command(args,**kwargs):
-    result=subprocess.run([str(x) for x in args],capture_output=True,env={**os.environ,'GIT_TERMINAL_PROMPT':'0','GCM_INTERACTIVE':'Never',**kwargs.pop('env',{})},**kwargs)
-    if result.returncode:raise RuntimeError('bootstrap step failed; existing backup/configuration retained')
+    env={**os.environ,'GIT_TERMINAL_PROMPT':'0','GCM_INTERACTIVE':'Never',**kwargs.pop('env',{})}
+    retries=int(kwargs.pop('retries',0))
+    while True:
+        result=subprocess.run([str(x) for x in args],capture_output=True,env=env,**kwargs)
+        if not result.returncode:break
+        # Windows 上杀毒/索引或存活的 bridge/Hook 进程可能短暂锁住 venv 目标文件；退避后重试。
+        if retries<=0:raise RuntimeError('bootstrap step failed; existing backup/configuration retained')
+        retries-=1;time.sleep(2)
     return result.stdout
 
 
@@ -66,8 +73,8 @@ def main(engine_module=None):
                     raw=command([python,'-I','-c',code,engine_path,temp],timeout=30).decode().strip()
                     old_wheel=Path(raw) if raw else None
                 metadata=email.message_from_bytes(next(candidate.glob('*.dist-info/METADATA')).read_bytes())
-                requirements=temp/'requirements.txt';requirements.write_text('\n'.join(x for x in metadata.get_all('Requires-Dist',[]) if 'extra ==' not in x)+'\n')
-                command([uv,'pip','install','--python',python,'-r',requirements],timeout=300)
+                requirements=temp/'requirements.txt';requirements.write_text('\n'.join(x for x in metadata.get_all('Requires-Dist',[]) if 'extra ==' not in x)+'\n',encoding='utf-8')
+                command([uv,'pip','install','--python',python,'-r',requirements],timeout=300,retries=3 if os.name=='nt' else 0)
                 validation="import sys,importlib.util;from pathlib import Path;s=importlib.util.spec_from_file_location('bootstrap_validation',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m);m.Engine(sys.argv[2]).source_info(Path(sys.argv[3]))"
                 command([python,'-I','-c',validation,engine_path,settings,source],timeout=30)
                 if cp.exists():
@@ -75,7 +82,7 @@ def main(engine_module=None):
                     code="import sys;sys.path.insert(0,sys.argv.pop(1));from knowbase.updates.engine import Engine;from pathlib import Path;e=Engine(sys.argv[1]);e.source_info(Path(sys.argv[2]));e.shadow(Path(sys.argv[3]),Path(sys.argv[4]))"
                     (temp/'shadow').mkdir()
                     command([python,'-I','-c',code,str(Path(__file__).resolve().parents[1]),settings,source,candidate,temp/'shadow'],timeout=120)
-                command([uv,'pip','install','--python',python,'--no-deps','--reinstall',wheel],timeout=180)
+                command([uv,'pip','install','--python',python,'--no-deps','--reinstall',wheel],timeout=180,retries=3 if os.name=='nt' else 0)
                 init=[python,'-I','-m','knowbase','init','--non-interactive','--auto-update','--update-source',args.source,'--update-branch',args.branch]
                 if args.agents:init+=['--agents',args.agents]
                 if args.allow_insecure_source:init+=['--allow-insecure-update-source']

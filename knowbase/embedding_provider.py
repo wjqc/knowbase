@@ -130,7 +130,7 @@ class OpenAICompatProvider:
         else:
             p=Path(self.secret_ref[5:]).expanduser()
             try:
-                if not p.is_absolute() or p.is_symlink() or not stat.S_ISREG(p.stat().st_mode) or p.stat().st_size>16384 or p.stat().st_mode & 0o077:
+                if not p.is_absolute() or p.is_symlink() or not stat.S_ISREG(p.stat().st_mode) or p.stat().st_size>16384 or (os.name!='nt' and p.stat().st_mode & 0o077):
                     raise ProviderError("insecure_secret_file")
                 if hasattr(os,"geteuid") and p.stat().st_uid!=os.geteuid():raise ProviderError("insecure_secret_file")
                 value=p.read_text().strip()

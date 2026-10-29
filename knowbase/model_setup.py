@@ -44,7 +44,7 @@ def interactive():
 def read_options(path):
     p=Path(path).expanduser()
     if p.stat().st_size>65536:raise integration.IntegrationError('MODEL_CONFIG_TOO_LARGE')
-    try:return json.loads(p.read_text())
+    try:return json.loads(p.read_text(encoding='utf-8'))
     except ValueError:raise integration.IntegrationError('INVALID_MODEL_JSON') from None
 
 

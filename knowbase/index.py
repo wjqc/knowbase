@@ -172,7 +172,8 @@ def source_current(conn, mid, expected_meta=None):
         raw=path.read_bytes();key=(str(path),hashlib.sha256(raw).hexdigest())
         parsed=_SOURCE_CACHE.get(key)
         if parsed is None:
-            parsed=store.parse_text(raw.decode(),str(path));_SOURCE_CACHE[key]=parsed
+            # utf-8-sig：剥掉可能存在的 BOM，否则带 BOM 的来源文件恒判 source_current=False
+            parsed=store.parse_text(raw.decode("utf-8-sig"),str(path));_SOURCE_CACHE[key]=parsed
             while len(_SOURCE_CACHE)>512:_SOURCE_CACHE.popitem(last=False)
         meta,body=parsed
         from .mutations import _compute_revision

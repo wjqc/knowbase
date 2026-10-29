@@ -94,7 +94,7 @@ def record_conflict(repo: Path, conn, card_id: str, base_rev: str,
             files[key] = ""
             continue
         fpath = qdir / f"{conflict_id}-{key}.md"
-        fpath.write_text(text, encoding="utf-8")
+        store.write_shared_text(fpath, text)
         files[key] = str(fpath)
     local_rev, _ = _revision_of(local_text) if local_text is not None else ("", "")
     remote_rev, _ = _revision_of(remote_text) if remote_text is not None else ("", "")

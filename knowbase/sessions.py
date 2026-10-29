@@ -7,10 +7,12 @@ agent_name 来自各宿主 MCP 配置声明的 KNOWBASE_AGENT_NAME。
 
 import json
 import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config
+from .fsutil import replace_with_retry
 
 MAX_SESSIONS = 50
 
@@ -32,11 +34,14 @@ def _read_json(path: Path, default):
 
 def _write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(json.dumps(data, ensure_ascii=False, indent=2))
-    os.replace(tmp, path)
+    # 多个 MCP 进程可能并发写：固定临时文件名会互相截断/覆盖，必须唯一命名
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False, indent=2))
+        replace_with_retry(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
     try:
         os.chmod(path, 0o600)
     except OSError:
