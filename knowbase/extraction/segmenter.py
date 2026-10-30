@@ -8,6 +8,31 @@ import re
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
+# 模块级编译正则，避免热路径每次 re.match/re.split 重新编译
+_HEADING_RE = re.compile(r'^(#{1,6})\s+(.+)$')
+_PARAGRAPH_SPLIT_RE = re.compile(r'\n\s*\n')
+
+# 符号定义模式（多语言支持），编译为 re.Pattern 列表
+_SYMBOL_RES: list[re.Pattern] = [
+    re.compile(p) for p in (
+        # Python: def func_name, class ClassName
+        r'^\s*(?:async\s+)?def\s+(\w+)',
+        r'^\s*class\s+(\w+)',
+        # JavaScript/TypeScript: function funcName, class ClassName
+        r'^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)',
+        r'^\s*(?:export\s+)?class\s+(\w+)',
+        # Go: func FuncName, type TypeName
+        r'^\s*func\s+(?:\([^)]+\)\s+)?(\w+)',
+        r'^\s*type\s+(\w+)',
+        # Java: public/private/protected class/interface/method
+        r'^\s*(?:public|private|protected)\s+(?:static\s+)?(?:class|interface|void|int|String|boolean)\s+(\w+)',
+        # Rust: fn func_name, struct StructName, impl TypeName
+        r'^\s*(?:pub\s+)?fn\s+(\w+)',
+        r'^\s*(?:pub\s+)?struct\s+(\w+)',
+        r'^\s*impl\s+(?:<[^>]+>\s+)?(\w+)',
+    )
+]
+
 
 class Locator(NamedTuple):
     """文本定位信息。"""
@@ -84,7 +109,7 @@ def _split_by_headings(text: str) -> list[tuple[Locator, str]]:
     start_line = 1
 
     for i, line in enumerate(lines, 1):
-        m = re.match(r'^(#{1,6})\s+(.+)$', line)
+        m = _HEADING_RE.match(line)
         if m:
             # 保存前一段
             if current_lines:
@@ -127,7 +152,7 @@ def _split_by_headings(text: str) -> list[tuple[Locator, str]]:
 
 def _split_by_paragraphs(text: str) -> list[tuple[Locator, str]]:
     """按段落（双换行）切分。"""
-    paragraphs = re.split(r'\n\s*\n', text)
+    paragraphs = _PARAGRAPH_SPLIT_RE.split(text)
     segments = []
     line_offset = 1
     for i, para in enumerate(paragraphs):
@@ -178,29 +203,10 @@ def _split_by_symbols(text: str) -> list[tuple[Locator, str]]:
     start_line = 1
     symbol_index = 0
 
-    # 符号定义模式（多语言支持）
-    symbol_patterns = [
-        # Python: def func_name, class ClassName
-        r'^\s*(?:async\s+)?def\s+(\w+)',
-        r'^\s*class\s+(\w+)',
-        # JavaScript/TypeScript: function funcName, class ClassName
-        r'^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)',
-        r'^\s*(?:export\s+)?class\s+(\w+)',
-        # Go: func FuncName, type TypeName
-        r'^\s*func\s+(?:\([^)]+\)\s+)?(\w+)',
-        r'^\s*type\s+(\w+)',
-        # Java: public/private/protected class/interface/method
-        r'^\s*(?:public|private|protected)\s+(?:static\s+)?(?:class|interface|void|int|String|boolean)\s+(\w+)',
-        # Rust: fn func_name, struct StructName, impl TypeName
-        r'^\s*(?:pub\s+)?fn\s+(\w+)',
-        r'^\s*(?:pub\s+)?struct\s+(\w+)',
-        r'^\s*impl\s+(?:<[^>]+>\s+)?(\w+)',
-    ]
-
     def detect_symbol(line: str) -> str:
         """检测行是否包含符号定义，返回符号名或空字符串。"""
-        for pattern in symbol_patterns:
-            m = re.match(pattern, line)
+        for pattern in _SYMBOL_RES:
+            m = pattern.match(line)
             if m:
                 return m.group(1)
         return ""

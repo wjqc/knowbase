@@ -11,6 +11,10 @@ from pathlib import Path
 
 CONFIG_PATH = Path(os.environ.get("KNOWBASE_CONFIG", str(Path.home() / ".knowbase" / "config.json")))
 
+# 缓存：避免同一进程内反复读文件 + JSON 解析
+_config_cache: dict | None = None
+_config_mtime: float = 0
+
 DEFAULTS = {
     "repo_path": "~/knowbase",
     "knowledge_path": "~/knowledge",
@@ -105,6 +109,22 @@ class ConfigError(ValueError):
 
 
 def load_config() -> dict:
+    global _config_cache, _config_mtime
+
+    # 文件存在且 mtime 未变 → 返回缓存（省去文件 I/O 和 JSON 解析）
+    if CONFIG_PATH.exists():
+        try:
+            mtime = CONFIG_PATH.stat().st_mtime
+        except OSError:
+            mtime = 0
+        if _config_cache is not None and mtime == _config_mtime:
+            cfg = copy.deepcopy(_config_cache)
+            env_repo = os.environ.get("KNOWBASE_REPO_PATH")
+            if env_repo:
+                cfg["repo_path"] = env_repo
+            return cfg
+
+    # 首次调用、mtime 变化或文件不存在 → 重新加载
     cfg = copy.deepcopy(DEFAULTS)
     if CONFIG_PATH.exists():
         try:
@@ -124,6 +144,10 @@ def load_config() -> dict:
                 "请修复或删除该文件，未回退默认配置"
             )
         cfg = _deep_merge(cfg, override)
+        _config_cache = copy.deepcopy(cfg)
+        _config_mtime = mtime
+    # 文件不存在时不设缓存（下次调用继续尝试读取）
+
     env_repo = os.environ.get("KNOWBASE_REPO_PATH")
     if env_repo:
         cfg["repo_path"] = env_repo

@@ -129,20 +129,65 @@ def upsert(conn: sqlite3.Connection, meta: dict, body: str, path: Path, staging:
         schedule(conn)
 
 
-def rebuild(repo: Path) -> int:
-    """全量重建（markdown → db + INDEX.md）。返回记忆条数。"""
+def rebuild(repo: Path, full: bool = False) -> int:
+    """重建索引（markdown → db + INDEX.md）。返回记忆条数。
+
+    full=True 全量重建（DELETE + 全量 INSERT）；full=False 增量重建
+    （仅对 content_revision 变化的实体 upsert，移除已删除的实体）。
+    """
     repo = Path(repo)
     conn = connect(repo)
     try:
         conn.execute("BEGIN IMMEDIATE")
         old_hits = dict(conn.execute("SELECT id, hit_count FROM meta"))
-        conn.execute("DELETE FROM mem_fts")
-        conn.execute("DELETE FROM meta")
         n = 0
-        for meta, body, path in store.iter_all(repo, include_staging=True):
-            upsert(conn, meta, body, path, staging=(path.parent.name == "staging"), commit=False)
-            conn.execute("UPDATE meta SET hit_count=? WHERE id=?", (old_hits.get(meta["id"], 0), meta["id"]))
-            n += 1
+
+        if full:
+            # 全量重建
+            conn.execute("DELETE FROM mem_fts")
+            conn.execute("DELETE FROM meta")
+            for meta, body, path in store.iter_all(repo, include_staging=True):
+                upsert(conn, meta, body, path, staging=(path.parent.name == "staging"), commit=False)
+                conn.execute("UPDATE meta SET hit_count=? WHERE id=?", (old_hits.get(meta["id"], 0), meta["id"]))
+                n += 1
+        else:
+            # 增量重建：对比 entity_heads 中的 content_revision
+            from .mutations import _compute_revision
+            existing_ids = {row[0] for row in conn.execute("SELECT entity_id FROM entity_heads")}
+
+            disk_ids: set[str] = set()
+            for meta, body, path in store.iter_all(repo, include_staging=True):
+                mid = meta["id"]
+                disk_ids.add(mid)
+
+                # 新增实体 → 直接 upsert
+                if mid not in existing_ids:
+                    upsert(conn, meta, body, path, staging=(path.parent.name == "staging"), commit=False)
+                    conn.execute("UPDATE meta SET hit_count=? WHERE id=?", (old_hits.get(mid, 0), mid))
+                    n += 1
+                    continue
+
+                # 已存在实体 → 对比 content_revision
+                row = conn.execute(
+                    "SELECT content_revision FROM entity_heads WHERE entity_id=?", (mid,)
+                ).fetchone()
+                stored_rev = row[0] if row else ""
+                current_rev = _compute_revision(meta, body)
+
+                if current_rev != stored_rev:
+                    # 重建该实体的 FTS（先删后插）
+                    conn.execute("DELETE FROM mem_fts WHERE id=?", (mid,))
+                    upsert(conn, meta, body, path, staging=(path.parent.name == "staging"), commit=False)
+                    conn.execute("UPDATE meta SET hit_count=? WHERE id=?", (old_hits.get(mid, 0), mid))
+                    n += 1
+
+            # 删除已从磁盘移除的实体
+            removed_ids = existing_ids - disk_ids
+            for mid in removed_ids:
+                conn.execute("DELETE FROM mem_fts WHERE id=?", (mid,))
+                conn.execute("DELETE FROM meta WHERE id=?", (mid,))
+                conn.execute("DELETE FROM entity_heads WHERE entity_id=?", (mid,))
+
         conn.execute("DELETE FROM embedding_index WHERE generation_id='' AND memory_id NOT IN (SELECT id FROM meta)")
         conn.commit()
     except Exception:
@@ -151,9 +196,9 @@ def rebuild(repo: Path) -> int:
     finally:
         conn.close()
     build_index_md(repo)
-    with __import__("contextlib").closing(connect(repo)) as conn:
+    with __import__("contextlib").closing(connect(repo)) as conn2:
         from .semantic_index import schedule
-        schedule(conn)
+        schedule(conn2)
     return n
 
 
@@ -220,38 +265,51 @@ def _scope_factor(m: dict, scope: str | None) -> float:
     return 1.2 if m["scope"] == "global" else 1.0
 
 
+def _fts_sanitize(term: str) -> str:
+    """转义 FTS5 双引号内的特殊字符，返回安全的双引号包围短语。"""
+    safe = term.replace('"', '""')
+    return f'"{safe}"'
+
+
 def _match_ids(conn: sqlite3.Connection, terms: list[str]) -> dict[str, float] | None:
     """≥3 字词走 FTS5 MATCH（trigram），返回 {id: 词法分}；不可用返回 None。
 
     多词查询按 OR 召回后按命中词数加权：真实排障提问常是"主体 + 现象/动作"
     （如「EasyConnect 断连 排查」），其中任一词命中即应召回，
     命中越多的排得越前。全 AND 会要求单卡包含全部词，导致召回坍塌。
+
+    优化：逐词 hit_count 查询合并为单次 UNION ALL，从 O(N) 次查询降为 O(1)。
     """
     big = [t.replace('"', "") for t in terms if len(t) >= 3]
     if not big:
         return None
-    match = " OR ".join(f'"{t}"' for t in big)
+    or_parts = " OR ".join(_fts_sanitize(t) for t in big)
     try:
         rows = conn.execute(
             "SELECT id, rank FROM mem_fts WHERE mem_fts MATCH ? ORDER BY rank",
-            (match,),
+            (or_parts,),
         ).fetchall()
     except sqlite3.OperationalError:
         return None
     if not rows:
         return None
     bm25 = {r[0]: -r[1] for r in rows}
-    # 逐词统计命中数，命中词数越多词法分越高（保留 bm25 的相对次序）
-    hit_count: dict[str, int] = {}
-    for term in big:
+
+    # 单次 UNION ALL 统计命中词数（替代逐词循环 N 次查询）
+    if len(big) == 1:
+        hit_count = {mid: 1 for mid in bm25}
+    else:
+        union_parts = " UNION ALL ".join(
+            "SELECT id FROM mem_fts WHERE mem_fts MATCH ?" for _ in big
+        )
+        union_params = [_fts_sanitize(t) for t in big]
+        hit_count: dict[str, int] = {}
         try:
-            sub = conn.execute(
-                "SELECT id FROM mem_fts WHERE mem_fts MATCH ?", (f'"{term}"',)
-            ).fetchall()
+            sub_rows = conn.execute(union_parts, union_params).fetchall()
+            for r in sub_rows:
+                hit_count[r[0]] = hit_count.get(r[0], 0) + 1
         except sqlite3.OperationalError:
-            continue
-        for r in sub:
-            hit_count[r[0]] = hit_count.get(r[0], 0) + 1
+            return bm25
     if not hit_count:
         return bm25
     return {
@@ -406,22 +464,35 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
         lex = _like_ids(conn, terms)
     if policy["level"] == "L2":
         lex = _expanded_lexical_ids(conn, query[:8192], lex, aliases)
+    # 构建参数化 SQL WHERE，将 Python 侧后过滤推入数据库
+    where_parts = ["status != 'archived'", "type != 'reference'"]
+    where_params: list = []
+
+    if not include_inactive:
+        where_parts.append("staging = 0 AND status = 'active'")
+    if mtype:
+        where_parts.append("type = ?")
+        where_params.append(mtype)
+    if scope:
+        where_parts.append("(scope = ? OR scope = 'global')")
+        where_params.append(scope)
+    if tag:
+        # tags 为 JSON 数组字符串，精确匹配元素（含引号避免子串假阳）
+        where_parts.append('instr(tags, \'"\' || ? || \'"\') > 0')
+        where_params.append(tag)
+
     eligible = []
-    for r in conn.execute("SELECT * FROM meta WHERE status != 'archived'"):
+    for r in conn.execute(
+        f"SELECT * FROM meta WHERE {' AND '.join(where_parts)}", where_params
+    ):
         m = _row_meta(r)
-        if m["type"] == "reference":
-            continue  # 原始材料（reference）退出默认检索；显式 type=reference 亦不返回（P0 止血）
-        if not include_inactive and (m["staging"] or m["status"] != "active"):
-            continue
-        if mtype and m["type"] != mtype:
-            continue
-        if scope and m["scope"] not in (scope, "global"):
-            continue
-        if tag and tag not in m["tags"]:
-            continue
-        head=conn.execute("SELECT content_revision FROM entity_heads WHERE entity_id=?",(m["id"],)).fetchone()
-        m["content_revision"]=head[0] if head else ""
-        if origin in {"mcp_search","mcp_context","hook_prompt","hook_inflight"} and not source_current(conn,m["id"],m):
+        head = conn.execute(
+            "SELECT content_revision FROM entity_heads WHERE entity_id=?", (m["id"],)
+        ).fetchone()
+        m["content_revision"] = head[0] if head else ""
+        if origin in {"mcp_search", "mcp_context", "hook_prompt", "hook_inflight"} and not source_current(
+            conn, m["id"], m
+        ):
             continue
         eligible.append(m)
     allowed_ids = {m["id"] for m in eligible}
@@ -444,6 +515,17 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
     if not fused:
         return []
 
+    # 批量获取 snippet（替代逐条 SELECT snippet(...) 查询）
+    fused_ids = list(fused.keys())
+    snippets: dict[str, str] = {}
+    if fused_ids:
+        placeholders = ",".join(["?"] * len(fused_ids))
+        rows = conn.execute(
+            f"SELECT id, snippet(mem_fts, 3, '「', '」', '…', 12) FROM mem_fts WHERE id IN ({placeholders})",
+            fused_ids,
+        ).fetchall()
+        snippets = {row[0]: row[1] for row in rows}
+
     results = []
     for m in eligible:
         if m["id"] not in fused:
@@ -451,13 +533,7 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
         score = fused[m["id"]] * _scope_factor(m, scope) \
             * (1.5 if m["confidence"] == "verified" else 1.0) \
             * _freshness_factor(m) * _feedback_factor(m)
-        snippet = ""
-        row = conn.execute(
-            "SELECT snippet(mem_fts, 3, '「', '」', '…', 12) FROM mem_fts WHERE id=?",
-            (m["id"],),
-        ).fetchone()
-        if row:
-            snippet = row[0]
+        snippet = snippets.get(m["id"], "")
         channels = [name for name, ranking in (("lexical", lex), ("dense", dense)) if m["id"] in ranking]
         results.append({**m, "score": round(score, 6), "snippet": snippet,
                         "channels": channels})
