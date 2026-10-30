@@ -188,11 +188,12 @@ def cmd_init(import_from=None, scope=None, dtype="workflow") -> int:
     return 0
 
 
-def cmd_reindex() -> int:
+def cmd_reindex(full: bool = False) -> int:
     rp = config.repo_path()
     with RepoLock(rp, 10.0):
-        n = index.rebuild(rp)
-    print(f"✓ 已全量重建：{n} 条记忆")
+        n = index.rebuild(rp, full=full)
+    label = "全量" if full else "增量"
+    print(f"✓ 已{label}重建：{n} 条记忆")
     return 0
 
 
@@ -908,7 +909,17 @@ def cmd_executor_probe(isolation: bool = False, scope: str = "probe-orders", exe
     return 0 if chosen is not None else 2
 
 
-def _main(argv=None):
+def _report_error(message, exit_code=2):
+    """输出格式化错误信息到 stderr 并返回退出码。
+
+    统一 _dispatch() 中各 try/except 分支的 print/return 骨架，
+    避免 print(f"错误：{exc}"); return N 的重复模式。
+    """
+    print(message, file=sys.stderr)
+    return exit_code
+
+
+def _parse_args(argv=None):
     parser = argparse.ArgumentParser(prog="knowbase", description="薪火：跨 Agent 经验记忆库")
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_init = sub.add_parser("init", help="初始化/补全（幂等）")
@@ -961,7 +972,8 @@ def _main(argv=None):
     p_publisher.add_argument("--enable", action="store_true")
     p_history = sub.add_parser("history", help="查看搜索命中记录 JSON")
     p_history.add_argument("--limit", type=int, default=100)
-    p_reindex=sub.add_parser("reindex", help="全量重建索引")
+    p_reindex=sub.add_parser("reindex", help="增量重建索引（--full 全量）")
+    p_reindex.add_argument("--full", action="store_true", help="强制全量重建（否则仅更新变化的实体）")
     p_reindex.add_argument("--embed", action="store_true", help="构建内网影子向量代际，质量合格后自动激活")
     p_reindex.add_argument("--deadline-seconds", type=float, default=60)
     p_sem=sub.add_parser("embedding-work", help="处理一个已有索引任务")
@@ -1129,8 +1141,14 @@ def _main(argv=None):
     p_exec_enable=exec_sub.add_parser('enable');p_exec_enable.add_argument('--id',required=True)
     p_exec_enable.add_argument('--scopes',required=True);p_exec_enable.add_argument('--trust-command',action='store_true')
     exec_sub.add_parser('disable')
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
 
+
+def _load_config(args):
+    return config.load_config()
+
+
+def _dispatch(args, cfg):
     if args.cmd == "sync-once":
         from .refresh import run_once
         result = run_once(config.repo_path(), args.remote, args.branch, args.lease_token)
@@ -1151,12 +1169,15 @@ def _main(argv=None):
         if args.auto_update:
             from .updates.engine import validate_source,UpdateError
             try:validate_source(args.update_source,args.update_branch,allow_insecure=args.allow_insecure_update_source)
-            except UpdateError:print('接入未完成：程序更新源配置无效');return 3
+            except UpdateError:
+                return _report_error('接入未完成：程序更新源配置无效', 3)
         from .automation import configuration as executor_configuration
         executor_options=None
         if args.executor_config:
-            try:executor_options=executor_configuration.read_options(args.executor_config)
-            except Exception:print('接入未完成：执行器配置无效');return 3
+            try:
+                executor_options=executor_configuration.read_options(args.executor_config)
+            except (ValueError, OSError):
+                return _report_error('接入未完成：执行器配置无效', 3)
         if args.enable_automation and not args.executor_scopes:
             print('接入未完成：自动提炼需要明确executor-scopes');return 3
         agents = [v.strip() for v in (args.agents or "").split(",") if v.strip()]
@@ -1248,8 +1269,7 @@ def _main(argv=None):
             try:
                 team_snapshot = load_team_snapshot(args.team_data)
             except (ValueError, OSError) as exc:
-                print(f"错误：团队快照不可用（{exc}）；本次仅生成本机看板。")
-                return 2
+                return _report_error(f"错误：团队快照不可用（{exc}）；本次仅生成本机看板。", 2)
         output = generate(config.repo_path(), Path(args.output).expanduser().resolve(),
                           team_snapshot=team_snapshot)
         print(f"✓ 看板已生成 {output}")
@@ -1265,7 +1285,7 @@ def _main(argv=None):
             conn.close()
         return 0
     if args.cmd == "reindex":
-        code=cmd_reindex()
+        code=cmd_reindex(full=args.full)
         if code or not args.embed:return code
         from .semantic_index import build
         import time
@@ -1314,13 +1334,13 @@ def _main(argv=None):
         try:
             executor = getattr(importlib.import_module(mod_name), func_name)
         except (ImportError, AttributeError) as exc:
-            print(f"错误：执行器不可用（{exc}）"); return 2
+            return _report_error(f"错误：执行器不可用（{exc}）", 2)
         try:
             tasks = load_tasks(args.tasks)
             result = run_control(tasks, executor)
             write_report(result, args.out)
         except (ValueError, OSError) as exc:
-            print(f"错误：{exc}"); return 2
+            return _report_error(f"错误：{exc}", 2)
         print(json.dumps({"tasks": result["totals"]["task_count"],
                           "net_token_savings": result["totals"]["net_token_savings"],
                           "net_seconds": result["totals"]["net_seconds"],
@@ -1462,7 +1482,8 @@ def _main(argv=None):
             else:result=control.run(action=args.update_cmd,force=args.update_cmd=='run')
             print(json.dumps(result,ensure_ascii=False,indent=2))
             return 2 if result.get('state') in {'failed','deferred_or_failed'} else 0
-        except (ValueError,RuntimeError,OSError,UpdateError):print('程序更新未完成：检查update status或首次引导条件');return 2
+        except (ValueError,RuntimeError,OSError,UpdateError):
+            return _report_error('程序更新未完成：检查update status或首次引导条件', 2)
     if args.cmd == "value":
         from .value import aggregate, exchange
         if args.value_cmd=='rebuild-evidence':
@@ -1470,7 +1491,8 @@ def _main(argv=None):
             try:
                 result=rebuild(config.repo_path(),args.output,args.package,team_id=args.team_id)
                 print(json.dumps(result,ensure_ascii=False));return 0
-            except (ValueError,OSError):print('重建未完成：需要新输出路径和原始v1事件包');return 2
+            except (ValueError,OSError):
+                return _report_error('重建未完成：需要新输出路径和原始v1事件包', 2)
         agg_default = config.load_config().get("value", {}).get("aggregate_db",
                                                                 "~/.knowbase/value-aggregate.db")
         if args.value_cmd == "export":
@@ -1625,7 +1647,8 @@ def _main(argv=None):
             elif args.executor_cmd=='enable':result=ec.enable(args.id,[s.strip() for s in args.scopes.split(',') if s.strip()],trust_command=args.trust_command)
             else:result=ec.disable()
             print(json.dumps(result,ensure_ascii=False));return 0
-        except (ValueError,OSError,TypeError):print('执行器操作未完成：核对配置、探针回执及范围授权');return 3
+        except (ValueError,OSError,TypeError):
+            return _report_error('执行器操作未完成：核对配置、探针回执及范围授权', 3)
     if args.cmd == "archive-sweep":
         return cmd_archive_sweep()
     if args.cmd == "review-sweep":
@@ -1645,6 +1668,12 @@ def _main(argv=None):
     if args.cmd == "onboarding":
         return cmd_onboarding()
     return 1
+
+
+def _main(argv=None):
+    args = _parse_args(argv)
+    cfg = _load_config(args)
+    return _dispatch(args, cfg)
 
 
 def main(argv=None):

@@ -3,6 +3,7 @@
 Automatic callers never invoke this module. Network always runs outside transactions.
 """
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -19,6 +20,8 @@ _CACHE_LOCK=threading.Lock()
 _WORKERS=set()
 _WORKER_LOCK=threading.Lock()
 
+_log = logging.getLogger(__name__)
+
 
 def provider():return OpenAICompatProvider(si.settings())
 
@@ -32,7 +35,8 @@ def wake(repo):
         _WORKERS.add(key)
     def work():
         try:si.build(repo)
-        except Exception:pass  # Job lease expires; basic retrieval never depends on this worker.
+        except (sqlite3.OperationalError, sqlite3.ProgrammingError):
+            _log.debug("Background index build failed (lease expired or db unavailable)", exc_info=True)
         finally:
             with _WORKER_LOCK:_WORKERS.discard(key)
     threading.Thread(target=work,daemon=True).start()
@@ -69,7 +73,7 @@ def _healthy(conn,p,identity,deadline):
         changed=conn.execute("UPDATE retrieval_provider_state SET lease_owner=?,lease_until=?,state='half_open' "
             "WHERE provider_fp=? AND lease_until<=? AND retry_at<=?",(owner,wall+10,p.fingerprint,wall,wall)).rowcount
         conn.commit()
-    except Exception:conn.rollback();raise
+    except sqlite3.Error:conn.rollback();raise
     if not changed:return False
     try:
         p.probe(identity,deadline=deadline)

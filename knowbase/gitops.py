@@ -9,6 +9,7 @@ sync_attempts 记录每次同步尝试，供观测和诊断。
 
 import os
 import signal
+import sqlite3
 import subprocess
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -94,7 +95,7 @@ def _run_git(cmd: list[str], timeout: float) -> tuple[int, str, str]:
         _kill_tree(proc)
         try:  # 树已死，正常应立即返回；再兜一层超时防句柄泄漏导致的二次挂起
             out, err = proc.communicate(timeout=5)
-        except Exception:
+        except subprocess.TimeoutExpired:
             out, err = "", ""
         raise RuntimeError(
             f"git 超时({timeout}s)，已强制终止进程树: {' '.join(cmd[3:])}"
@@ -160,7 +161,7 @@ def commit_all(repo: Path, message: str) -> str | None:
         if code != 0 and "nothing to commit" not in output:
             return f"git commit 失败: {output.strip()}"
         return None
-    except Exception as e:  # git 缺失、无身份配置、超时等：保存已落盘，只告警
+    except (RuntimeError, OSError) as e:  # git 缺失、无身份配置、超时等：保存已落盘，只告警
         return f"git 操作告警(不影响保存): {e}"
 
 
@@ -181,7 +182,7 @@ def commit_paths(repo: Path, message: str, paths: list[Path]) -> str | None:
         if code != 0 and "nothing to commit" not in output:
             return f"git commit 失败: {output.strip()}"
         return None
-    except Exception as exc:
+    except (RuntimeError, OSError) as exc:
         return f"git 操作告警(不影响保存): {exc}"
 
 
@@ -228,7 +229,7 @@ def _in_rebase_state(repo: Path, default: bool) -> bool:
         if not git_dir.is_absolute():
             git_dir = Path(repo) / git_dir
         return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
-    except Exception:
+    except (RuntimeError, OSError):
         return default
 
 
@@ -240,7 +241,7 @@ def _abort_rebase(repo: Path) -> bool:
     """
     try:
         _run(repo, "rebase", "--abort", timeout=5)
-    except Exception:
+    except (RuntimeError, OSError):
         return _in_rebase_state(repo, default=True)
     return _in_rebase_state(repo, default=False)
 
@@ -279,13 +280,13 @@ def _rebase_onto(repo: Path, remote_ref: str, on_card_conflict=None) -> list[str
     try:
         _run(repo, "rebase", remote_ref, timeout=15)
         return []
-    except Exception as exc:
+    except (RuntimeError, OSError) as exc:
         original = exc
     resolved: list[str] = []
     for _ in range(50):
         try:
             conflicted = _run(repo, "diff", "--name-only", "--diff-filter=U", timeout=3)
-        except Exception:
+        except (RuntimeError, OSError):
             conflicted = ""
         kind = _rebase_failure_kind(str(original), conflicted)
         paths = [line for line in conflicted.splitlines() if line.strip()]
@@ -295,7 +296,7 @@ def _rebase_onto(repo: Path, remote_ref: str, on_card_conflict=None) -> list[str
             _raise_rebase_failure(repo, original, conflicted, kind)
         try:
             on_card_conflict(repo, card_paths)
-        except Exception as exc:
+        except RuntimeError as exc:
             abort_failed = _abort_rebase(repo)
             raise GitSyncConflict(
                 "冲突卡隔离失败，已取消 rebase 并保留本地提交"
@@ -305,7 +306,7 @@ def _rebase_onto(repo: Path, remote_ref: str, on_card_conflict=None) -> list[str
         try:
             _run(repo, "rebase", "--continue", timeout=15)
             return resolved
-        except Exception as exc:
+        except (RuntimeError, OSError) as exc:
             if _in_rebase_state(repo, default=True):
                 original = exc
                 continue
@@ -324,7 +325,7 @@ def _is_ancestor(repo: Path, older: str, newer: str) -> bool:
     try:
         _run(repo, "merge-base", "--is-ancestor", older, newer, timeout=3)
         return True
-    except Exception:
+    except (RuntimeError, OSError):
         return False
 
 
@@ -400,7 +401,7 @@ def confirm_push(repo: Path, remote: str, branch: str, target_sha: str) -> dict:
     try:
         _run(repo, "fetch", remote, branch, timeout=10)
         remote_rev = _run(repo, "rev-parse", f"{remote}/{branch}", timeout=3)
-    except Exception as exc:
+    except (RuntimeError, OSError) as exc:
         return {"confirmed": False, "remote_rev": "", "target_sha": target_sha,
                 "reason": "network_unknown",
                 "diagnosis": diagnose_git_failure(str(exc))}
@@ -442,7 +443,7 @@ def detect_divergent_cards(repo: Path, base_rev: str, local_rev: str,
                                  timeout=10).splitlines())
         remote_changed = set(_run(repo, "diff", "--name-only", base_rev, remote_rev,
                                   timeout=10).splitlines())
-    except Exception:
+    except (RuntimeError, OSError):
         return []
     skip = set(skip_paths)
     found = []
@@ -451,16 +452,16 @@ def detect_divergent_cards(repo: Path, base_rev: str, local_rev: str,
             continue
         try:
             local_sha = _run(repo, "rev-parse", f"{local_rev}:{path}", timeout=3)
-        except Exception:
+        except (RuntimeError, OSError):
             local_sha = ""
         try:
             remote_sha = _run(repo, "rev-parse", f"{remote_rev}:{path}", timeout=3)
-        except Exception:
+        except (RuntimeError, OSError):
             remote_sha = ""
         if local_sha and remote_sha and local_sha != remote_sha:
             try:
                 base_sha = _run(repo, "rev-parse", f"{base_rev}:{path}", timeout=3)
-            except Exception:
+            except (RuntimeError, OSError):
                 base_sha = ""
             found.append({"path": path, "card_id": Path(path).stem,
                           "base_sha": base_sha, "local_sha": local_sha,
@@ -474,11 +475,11 @@ def _quarantine_from_rebase(repo: Path, conn, path: str) -> dict:
     from . import quarantine
     try:
         local_text = _run(repo, "show", f":3:{path}", timeout=3)
-    except Exception as exc:
+    except (RuntimeError, OSError) as exc:
         raise RuntimeError(f"读取冲突本地版失败 {path}: {exc}") from exc
     try:
         remote_text = _run(repo, "show", f":2:{path}", timeout=3)
-    except Exception as exc:
+    except (RuntimeError, OSError) as exc:
         raise RuntimeError(f"读取冲突远端版失败 {path}: {exc}") from exc
     card_id = Path(path).stem
     record = quarantine.record_conflict(repo, conn, card_id, base_rev="",
@@ -504,16 +505,16 @@ def integrate_with_conflicts(repo: Path, remote: str, branch: str) -> tuple[bool
     local_pre = remote_rev = base = ""
     try:
         local_pre = _run(repo, "rev-parse", "HEAD", timeout=3)
-    except Exception:
+    except (RuntimeError, OSError):
         pass
     try:
         remote_rev = _run(repo, "rev-parse", f"{remote}/{branch}", timeout=3)
-    except Exception:
+    except (RuntimeError, OSError):
         pass
     if local_pre and remote_rev and local_pre != remote_rev:
         try:
             base = _run(repo, "merge-base", local_pre, remote_rev, timeout=3)
-        except Exception:
+        except (RuntimeError, OSError):
             base = ""
     diverged = bool(base and base != local_pre and base != remote_rev)
     records: list[dict] = []
@@ -540,16 +541,16 @@ def integrate_with_conflicts(repo: Path, remote: str, branch: str) -> tuple[bool
                                             skip_paths=tuple(resolved_paths)):
             try:
                 local_text = _run(repo, "show", f"{local_pre}:{found['path']}", timeout=3)
-            except Exception:
+            except (RuntimeError, OSError):
                 local_text = None
             try:
                 remote_text = _run(repo, "show", f"{remote_rev}:{found['path']}", timeout=3)
-            except Exception:
+            except (RuntimeError, OSError):
                 remote_text = None
             merged_text = None
             try:
                 merged_text = (Path(repo) / found["path"]).read_text(encoding="utf-8")
-            except Exception:
+            except OSError:
                 pass
             records.append(quarantine.record_conflict(
                 repo, conn, found["card_id"], base_rev="",
@@ -597,7 +598,7 @@ def push(repo: Path, remote_url: str, allowed_prefixes: list[str]) -> str | None
                 _run(repo, "push", "-u", remote, f"HEAD:{branch}", timeout=20)
                 last_error = None
                 break
-            except Exception as exc:
+            except RuntimeError as exc:
                 last_error = exc
                 # 认证错误立即停止，不重试
                 if _is_auth_error(exc):
@@ -631,7 +632,7 @@ def push(repo: Path, remote_url: str, allowed_prefixes: list[str]) -> str | None
     except GitSyncConflict as exc:
         _record_sync(repo, remote, branch, "conflict", error=str(exc), fetch=True)
         return f"同步冲突(本地提交已保留): {exc}"
-    except Exception as e:
+    except (RuntimeError, OSError) as e:
         error_type = "unknown"
         if _is_auth_error(e):
             error_type = "auth"
@@ -643,7 +644,7 @@ def push(repo: Path, remote_url: str, allowed_prefixes: list[str]) -> str | None
             _record_sync(repo, remote, branch, "error", 
                          error=f"[{error_type}] {e}" + (f" (push_sha={push_sha})" if push_sha else ""),
                          push=True)
-        except Exception:
+        except (RuntimeError, OSError):
             pass
         # 网络未知结果明确报告
         if error_type == "network":
@@ -665,7 +666,7 @@ def _record_sync(repo: Path, remote: str, branch: str, status: str, error: str =
         local = _run(repo, "rev-parse", "HEAD", timeout=3)
         try:
             remote_rev = _run(repo, "rev-parse", f"{remote}/{branch}", timeout=3)
-        except Exception:
+        except (RuntimeError, OSError):
             remote_rev = ""
         now = datetime.now().isoformat(timespec="seconds")
         index.record_sync_state(conn, f"{remote}/{branch}", local_revision=local,
@@ -674,7 +675,7 @@ def _record_sync(repo: Path, remote: str, branch: str, status: str, error: str =
                                 last_push_at=now if push else None,
                                 status=status, error=error)
         conn.close()
-    except Exception:
+    except (RuntimeError, OSError):
         pass
 
 
@@ -701,12 +702,11 @@ def record_sync_attempt(repo: Path, remote: str, branch: str, target_sha: str,
         conn.commit()
         conn.close()
         return attempt_id
-    except Exception:
+    except (sqlite3.Error, OSError):
         return ""
 
 
 def _lease_connection(repo: Path):
-    import sqlite3
     from .index import db_path
     conn = sqlite3.connect(db_path(repo), timeout=0.05)
     conn.execute("PRAGMA busy_timeout=50")
@@ -760,7 +760,7 @@ def acquire_sync_lease(repo: Path, remote: str, branch: str, *,
                      (str(Path(repo).resolve()), remote, branch, owner, expires, stamp, target_hash))
         conn.commit()
         return owner, ""
-    except Exception as exc:
+    except sqlite3.Error as exc:
         if conn:
             conn.rollback()
         return None, "同步租约不可用：" + type(exc).__name__
@@ -776,7 +776,7 @@ def _owns_sync_lease(repo: Path, remote: str, branch: str, owner: str) -> bool:
         row = conn.execute("SELECT lease_owner,lease_until FROM sync_lease WHERE repo=? AND remote=? AND branch=?",
                            (str(Path(repo).resolve()), remote, branch)).fetchone()
         return bool(row and row[0] == owner and row[1] and row[1] > datetime.now(timezone.utc).isoformat(timespec="seconds"))
-    except Exception:
+    except sqlite3.Error:
         return False
     finally:
         if conn:
@@ -801,7 +801,7 @@ def _release_sync_lease(repo: Path, remote: str, branch: str, success: bool, *,
                      "last_success=CASE WHEN ? THEN ? ELSE last_success END WHERE " + where,
                      [next_at, int(success), now.isoformat(timespec="seconds"), *params])
         conn.commit()
-    except Exception:
+    except sqlite3.Error:
         if conn:
             conn.rollback()  # 无法持久释放时保留旧租约，过期后才能接管。
     finally:
@@ -889,7 +889,7 @@ def sync_before_read(repo: Path, cfg: dict, *, lease_owner: str | None = None,
             int((time.monotonic()-started)*1000), confirmed_revision=_run(repo,"rev-parse","HEAD",timeout=3),
             pending_push_count=int(push_needed and not gcfg.get("auto_push",False)))
         return updated, warning
-    except Exception as exc:
+    except (RuntimeError, OSError) as exc:
         warning = "远程同步检查失败，继续使用 last-known-good: " + str(exc)
         # 迟到工作不能覆盖新持有者的当前同步状态。
         if not owner or (lease_target == (remote,branch) and _owns_sync_lease(repo, remote, branch, owner)):

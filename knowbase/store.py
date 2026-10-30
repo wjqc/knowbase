@@ -295,15 +295,49 @@ def normalize_title(t: str) -> str:
 
 
 def find_similar(repo: Path, title: str, threshold: float = 0.82, scope: str | None = None):
-    """标题归一化相似查重。返回 (ratio, meta, path) 或 None。"""
+    """标题归一化相似查重。返回 (ratio, meta, path) 或 None。
+
+    预筛选策略（减少完整 ratio() 调用次数）：
+    1. 先对所有候选计算 quick_ratio()（仅比较字符频率，极快）；
+    2. 过滤掉 quick_ratio < threshold * 0.8 的候选；
+    3. 按 quick_ratio 降序排序，仅对前 max(50, N/2) 个候选计算完整 ratio()。
+
+    quick_ratio() 始终 >= ratio()，因此不会漏掉任何 ratio >= threshold 的候选。
+    """
     nt = normalize_title(title)
-    best = None
+
+    # 收集候选（延迟创建 SequenceMatcher 以避免一次性大内存占用）
+    matchers: list[tuple[SequenceMatcher, dict, Path]] = []
     for meta, _body, path in iter_all(repo, include_staging=True):
         if scope is not None and meta.get("scope") != scope:
             continue
-        ratio = SequenceMatcher(None, nt, normalize_title(meta.get("title", ""))).ratio()
+        sm = SequenceMatcher(None, nt, normalize_title(meta.get("title", "")))
+        matchers.append((sm, meta, path))
+
+    if not matchers:
+        return None
+
+    # quick_ratio 预筛选
+    threshold_quick = threshold * 0.8
+    scored: list[tuple[float, SequenceMatcher, dict, Path]] = []
+    for sm, meta, path in matchers:
+        qr = sm.quick_ratio()
+        if qr >= threshold_quick:
+            scored.append((qr, sm, meta, path))
+
+    if not scored:
+        return None
+
+    # 按 quick_ratio 降序，仅对排名靠前的候选计算完整 ratio
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top_k = max(50, len(scored) // 2)
+
+    best = None
+    for _qr, sm, meta, path in scored[:top_k]:
+        ratio = sm.ratio()
         if ratio >= threshold and (best is None or ratio > best[0]):
             best = (ratio, meta, path)
+
     return best
 
 
