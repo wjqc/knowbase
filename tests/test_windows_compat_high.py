@@ -237,18 +237,56 @@ def test_bootstrap_command_retries_before_failing(monkeypatch, tmp_path):
     spec.loader.exec_module(bootstrap)
     attempts = []
 
-    def fake_run(args, **kw):
-        attempts.append(1)
-        return SimpleNamespace(returncode=0 if len(attempts) > 1 else 1, stdout=b"ok")
+    class FakeProc:
+        def __init__(self, rc):
+            self.returncode = rc
+            self.pid = 0
+        def communicate(self, timeout=None):
+            return (b"ok", b"")
+        def poll(self):
+            return self.returncode
+        def kill(self):
+            pass
 
-    monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
+    def fake_popen(args, **kw):
+        attempts.append(1)
+        return FakeProc(0 if len(attempts) > 1 else 1)
+
+    monkeypatch.setattr(bootstrap.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(bootstrap.time, "sleep", lambda s: None)
     assert bootstrap.command(["uv", "pip", "install"], retries=2) == b"ok"
     assert len(attempts) == 2
-    monkeypatch.setattr(bootstrap.subprocess, "run",
-                        lambda args, **kw: SimpleNamespace(returncode=1, stdout=b""))
+    monkeypatch.setattr(bootstrap.subprocess, "Popen", lambda args, **kw: FakeProc(1))
     with pytest.raises(RuntimeError):
         bootstrap.command(["uv", "pip", "install"], retries=1)
+
+
+def test_bootstrap_command_kills_tree_on_timeout(monkeypatch):
+    spec = importlib.util.spec_from_file_location(
+        "bootstrap_timeout_test", Path(__file__).parent.parent / "scripts" / "bootstrap_auto_update.py")
+    bootstrap = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bootstrap)
+    killed = []
+
+    class SlowProc:
+        returncode = 0
+        pid = 424244
+        def communicate(self, timeout=None):
+            if timeout is not None and timeout < 5:
+                raise subprocess.TimeoutExpired(cmd="slow", timeout=timeout)
+            return (b"out", b"")
+        def poll(self):
+            return None
+        def kill(self):
+            killed.append("kill")
+
+    monkeypatch.setattr(bootstrap.subprocess, "Popen", lambda args, **kw: SlowProc())
+    monkeypatch.setattr(bootstrap._no_window, "__call__", lambda: {}, raising=False)
+    monkeypatch.setattr(bootstrap.subprocess, "run",
+                        lambda args, **kw: killed.append(tuple(args)) or SimpleNamespace(returncode=0))
+    with pytest.raises(RuntimeError, match="timed out"):
+        bootstrap.command(["uv", "pip", "install"], timeout=1)
+    assert killed  # 超时后必须有整树回收动作
 
 
 # ---------- H-E：执行器程序名识别 ----------

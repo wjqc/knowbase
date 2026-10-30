@@ -58,7 +58,8 @@ class GitData:
 
     def run(self, *args):
         name, email = self.identity or self.DEFAULT_IDENTITY
-        return self._raw(["git", "--git-dir", str(self.repo), "-c", "core.hooksPath=/dev/null",
+        # os.devnull：Windows 上映射为 nul，/dev/null 字面量只对 POSIX 有效
+        return self._raw(["git", "--git-dir", str(self.repo), "-c", "core.hooksPath="+os.devnull,
                           "-c", f"user.name={name}", "-c", f"user.email={email}", *args])
 
     def fetch(self, branch):

@@ -600,7 +600,8 @@ def build_index_md(repo: Path, cfg: dict | None = None) -> Path:
         lines = kept
 
     out = repo / "INDEX.md"
-    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # 本地视图与 .gitattributes 声明一致，固定 LF 避免跨平台抖动
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return out
 
 

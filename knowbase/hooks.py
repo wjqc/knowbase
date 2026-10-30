@@ -7,6 +7,7 @@
 
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -199,15 +200,20 @@ def _transcript_stats(path: str) -> dict:
     return stats
 
 
+def _safe_session_token(session_id: str) -> str:
+    """Windows 文件名禁止 : * ? 等字符；同一 session_id 必须稳定映射到同一路径。"""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", session_id)[:120]
+
+
 def _flag_path(session_id: str) -> Path:
     base = os.environ.get("KNOWBASE_HOOK_STATE") or tempfile.gettempdir()
-    return Path(base) / f"knowbase-hook-{session_id}.flag"
+    return Path(base) / f"knowbase-hook-{_safe_session_token(session_id)}.flag"
 
 
 def _mid_capture_flag_path(session_id: str) -> Path:
     """中途 capture 的 flag 文件路径（每个会话最多触发一次）。"""
     base = os.environ.get("KNOWBASE_HOOK_STATE") or tempfile.gettempdir()
-    return Path(base) / f"knowbase-mid-capture-{session_id}.flag"
+    return Path(base) / f"knowbase-mid-capture-{_safe_session_token(session_id)}.flag"
 
 
 def _maybe_trigger_mid_session_capture(session_id: str, transcript_path: str) -> None:

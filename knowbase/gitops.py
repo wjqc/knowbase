@@ -84,7 +84,8 @@ def _run_git(cmd: list[str], timeout: float) -> tuple[int, str, str]:
         kwargs["start_new_session"] = True
     proc = subprocess.Popen(
         cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env, **kwargs,
+        # errors=replace：Windows 本地化 git 消息/凭据管理器输出可能非 UTF-8
+        stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", env=env, **kwargs,
     )
     try:
         out, err = proc.communicate(timeout=timeout)

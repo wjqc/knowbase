@@ -27,12 +27,19 @@ try:  # POSIX (macOS / Linux)
 except ImportError:  # Windows
     import msvcrt
 
+    # msvcrt.locking 在锁被占用时抛 EACCES(EDEADLK 同义)；其余 OSError
+    # （句柄失效、磁盘错误等）是真实故障，必须上抛而不是伪装成"等锁超时"。
+    _LOCK_BUSY_ERRNOS = {errno.EACCES, getattr(errno, "EDEADLK", errno.EACCES),
+                         getattr(errno, "EDEADLOCK", errno.EACCES)}
+
     def _try_lock(fh) -> bool:
         try:
             fh.seek(0)
             msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
             return True
-        except OSError:
+        except OSError as e:
+            if e.errno not in _LOCK_BUSY_ERRNOS:
+                raise
             return False
 
     def _unlock(fh):

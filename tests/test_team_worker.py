@@ -49,10 +49,11 @@ def test_launchagent_failure_restores_old_file(memory_repo,tmp_path,monkeypatch)
     home,python,root=prepare(memory_repo,tmp_path,monkeypatch,'darwin');path=home/'Library/LaunchAgents'/f'{worker.LABEL}.plist';path.parent.mkdir(parents=True)
     old=plistlib.dumps({'Label':worker.LABEL,'ProgramArguments':['old']});path.write_bytes(old);calls=[]
     def run(args,**kw):
-        calls.append(args);return SimpleNamespace(returncode=1 if args[1]=='bootstrap' and len(calls)==2 else 0)
+        # 两域（gui/user）bootstrap 从第 3 次调用起全部失败：验证回滚恢复旧配置
+        calls.append(args);return SimpleNamespace(returncode=1 if args[1]=='bootstrap' and len(calls)>=3 else 0)
     monkeypatch.setattr(worker.subprocess,'run',run)
     with pytest.raises(RuntimeError,match='previous configuration restored'):worker.install()
-    assert path.read_bytes()==old and len(calls)==4
+    assert path.read_bytes()==old and len(calls)==8
 
 
 def test_linux_scheduler_configuration_and_removal(memory_repo,tmp_path,monkeypatch):

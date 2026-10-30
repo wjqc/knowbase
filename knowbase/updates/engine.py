@@ -50,7 +50,8 @@ def atomic(path, data):
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
     temp=path.with_name(path.name+'.'+uuid.uuid4().hex)
     with temp.open('x',encoding='utf-8') as f:
-        os.chmod(temp,0o600);json.dump(data,f,ensure_ascii=False,indent=2);f.flush();os.fsync(f.fileno())
+        os.chmod(temp,0o600)  # Windows 上仅切换只读位，无实义但无害
+        json.dump(data,f,ensure_ascii=False,indent=2);f.flush();os.fsync(f.fileno())
     os.replace(temp,path)
 
 
@@ -513,9 +514,14 @@ class Engine:
         if not self.cfg.get('manage_worker',True):return
         label='com.knowbase.worker'
         if sys.platform=='darwin':
-            domain=f'gui/{os.getuid()}';plist=self.home/'Library/LaunchAgents'/f'{label}.plist'
-            if start and plist.exists():command(['launchctl','bootstrap',domain,plist],timeout=15)
-            elif not start:subprocess.run(['launchctl','bootout',domain+'/'+label],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15, **no_window())
+            domains=[f'gui/{os.getuid()}',f'user/{os.getuid()}']  # SSH/无 GUI 会话没有 gui 域
+            plist=self.home/'Library/LaunchAgents'/f'{label}.plist'
+            if start and plist.exists():
+                try:command(['launchctl','bootstrap',domains[0],plist],timeout=15)
+                except UpdateError:command(['launchctl','bootstrap',domains[1],plist],timeout=15)
+            elif not start:
+                for domain in domains:
+                    subprocess.run(['launchctl','bootout',domain+'/'+label],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15, **no_window())
         elif os.name=='nt':
             subprocess.run(['schtasks','/Run' if start else '/End','/TN','knowbase-worker'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15, **no_window())
         else:
@@ -523,7 +529,14 @@ class Engine:
 
     def worker_running(self):
         if not self.cfg.get('manage_worker',True):return False
-        if sys.platform=='darwin':args=['launchctl','print',f'gui/{os.getuid()}/com.knowbase.worker']
+        if sys.platform=='darwin':
+            # SSH/无 GUI 会话的 LaunchAgent 落在 user 域；两个域任一在跑即视为运行。
+            for domain in (f'gui/{os.getuid()}',f'user/{os.getuid()}'):
+                args=['launchctl','print',domain+'/com.knowbase.worker']
+                try:
+                    if subprocess.run(args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10, **no_window()).returncode==0:return True
+                except (OSError,subprocess.SubprocessError):raise UpdateError('scheduler_state_unavailable') from None
+            return False
         elif os.name=='nt':
             # schtasks /Query 只要任务注册过就返回 0，不代表正在运行；
             # Get-ScheduledTask 的 State 是英文枚举，不随系统语言本地化。

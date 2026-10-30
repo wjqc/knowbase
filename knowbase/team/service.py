@@ -35,7 +35,7 @@ def _machine_identifier():
                                 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
                 value = winreg.QueryValueEx(key, "MachineGuid")[0]
         else:
-            value = Path("/etc/machine-id").read_text().strip()
+            value = Path("/etc/machine-id").read_text(encoding="utf-8").strip()
         if not isinstance(value, str) or not re.fullmatch(r"[A-Fa-f0-9-]{16,64}", value):
             raise ValueError("stable local machine identity unavailable")
         return value.lower()

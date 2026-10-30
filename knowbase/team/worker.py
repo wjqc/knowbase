@@ -258,9 +258,10 @@ def install(*, remove=False, label=LABEL, task_name=WINDOWS_TASK, argv=None,
     interval=max(300,int(interval_seconds)) if interval_seconds is not None else max(900,int(cfg["team"].get("interval_seconds",900)))
     if interval>86400:raise ValueError("worker interval must be between 900 and 86400 seconds")
     if sys.platform=="darwin":
-        path=Path.home()/f"Library/LaunchAgents/{label}.plist";target=f"gui/{os.getuid()}"
+        path=Path.home()/f"Library/LaunchAgents/{label}.plist"
+        targets=[f"gui/{os.getuid()}",f"user/{os.getuid()}"]  # SSH/无 GUI 会话没有 gui 域
         old=_backup(root,[path])
-        _execute(["launchctl","bootout",f"{target}/{label}"],required=False)
+        for target in targets:_execute(["launchctl","bootout",f"{target}/{label}"],required=False)
         if remove:
             path.unlink(missing_ok=True);return {"worker":"removed","platform":"launchagent"}
         value={"Label":label,"ProgramArguments":[str(python)]+(entry_args if entry_args is not None else ["-I","-m","knowbase"]+(argv or ["team","sync"])),
@@ -270,13 +271,17 @@ def install(*, remove=False, label=LABEL, task_name=WINDOWS_TASK, argv=None,
         if persistent:
             value.pop('StartInterval',None);value.update(KeepAlive=True,ThrottleInterval=5)
         elif restart_on_failure:value.update(KeepAlive={'SuccessfulExit':False},ThrottleInterval=30)
+        def _bootstrap(domain):
+            _execute(["launchctl","bootstrap",domain,str(path)])
         try:
             _atomic(path,plistlib.dumps(value))
-            _execute(["launchctl","bootstrap",target,str(path)])
+            try:_bootstrap(targets[0])
+            except RuntimeError:_bootstrap(targets[1])  # gui 域不可用（SSH 登录）时回退 user 域
         except (OSError,RuntimeError):
-            _execute(["launchctl","bootout",f"{target}/{label}"],required=False)
+            for target in targets:_execute(["launchctl","bootout",f"{target}/{label}"],required=False)
             _restore(old)
-            if old[path] is not None:_execute(["launchctl","bootstrap",target,str(path)],required=False)
+            if old[path] is not None:
+                for target in targets:_execute(["launchctl","bootstrap",target,str(path)],required=False)
             raise RuntimeError("LaunchAgent install failed; previous configuration restored") from None
         return {"worker":"installed","platform":"launchagent","interval_seconds":interval,"path":str(path)}
     if sys.platform.startswith("linux"):

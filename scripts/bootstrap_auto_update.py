@@ -18,16 +18,42 @@ import zipfile
 from pathlib import Path
 
 
+def _no_window():
+    """Windows 上避免每次子进程闪出控制台窗口。"""
+    return {'creationflags':0x08000000} if os.name=='nt' else {}
+
+
+def _kill_tree(proc):
+    """超时后整树回收：Windows 用 taskkill /T；POSIX 用进程组击杀。"""
+    if os.name=='nt':
+        subprocess.run(['taskkill','/F','/T','/PID',str(proc.pid)],capture_output=True,timeout=5,**_no_window())
+    else:
+        import signal
+        try:os.killpg(proc.pid,signal.SIGKILL)
+        except (ProcessLookupError,PermissionError):pass
+    if proc.poll() is None:proc.kill()
+
+
 def command(args,**kwargs):
     env={**os.environ,'GIT_TERMINAL_PROMPT':'0','GCM_INTERACTIVE':'Never',**kwargs.pop('env',{})}
     retries=int(kwargs.pop('retries',0))
+    timeout=kwargs.pop('timeout',None)
+    group={'start_new_session':True} if os.name!='nt' else {'creationflags':0x08000000}
     while True:
-        result=subprocess.run([str(x) for x in args],capture_output=True,env=env,**kwargs)
-        if not result.returncode:break
+        proc=subprocess.Popen([str(x) for x in args],stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                              env=env,**group,**kwargs)
+        try:
+            out,_=proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc)
+            try:out,_=proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:out=b''
+            raise RuntimeError('bootstrap step timed out; existing backup/configuration retained')
+        if not proc.returncode:break
         # Windows 上杀毒/索引或存活的 bridge/Hook 进程可能短暂锁住 venv 目标文件；退避后重试。
         if retries<=0:raise RuntimeError('bootstrap step failed; existing backup/configuration retained')
         retries-=1;time.sleep(2)
-    return result.stdout
+    return out
 
 
 def main(engine_module=None):

@@ -328,7 +328,10 @@ def recover(journal_path):
             if _digest(raw) != item["before_hash"]:
                 conflicts.append(str(target)); continue
             _atomic(target, raw)
-            os.chmod(target, item["mode"])
+            if os.name != "nt":
+                os.chmod(target, item["mode"])  # Windows 上 st_mode 只映射只读位，恢复会误设只读
+            else:
+                os.chmod(target, 0o666)
         else:
             target.unlink()
     journal["state"] = "rollback_conflict" if conflicts else "rolled_back"
@@ -561,4 +564,14 @@ def host_metadata(name,home=None):
                 value=plistlib.loads(p.read_bytes()).get('CFBundleShortVersionString')
                 result.update(installed=True,version=value,version_source='application_bundle')
             except (OSError,ValueError):pass
+    if os.name=='nt':
+        # Windows 没有统一的应用目录清单：按各宿主已知安装位置探测，仅判存在性。
+        rels={'trae':'Trae CN/Trae CN.exe','cursor':'cursor/Cursor.exe'}
+        rel=rels.get(name)
+        if rel:
+            for base in (os.environ.get('LOCALAPPDATA'),os.environ.get('PROGRAMFILES'),
+                         str(home/'AppData/Local'),str(home/'AppData/Roaming')):
+                if base and (Path(base)/'Programs'/rel).exists():
+                    result.update(installed=True,version_source='application_install')
+                    break
     return result

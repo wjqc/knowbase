@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -51,15 +52,8 @@ class OcrParser(DocumentParser):
                              reason="Pillow not installed; uv add pillow",
                              path=str(path)) from e
 
-        # Layer 2: pytesseract（可选，但必需做 OCR）
-        try:
-            import pytesseract  # type: ignore
-        except ImportError as e:
-            raise ParseError(parser=self.name,
-                             reason="pytesseract not installed; pip install pytesseract",
-                             path=str(path)) from e
-
-        # Layer 3: tesseract 二进制（可选，但必需做 OCR）
+        # Layer 2/3: 引擎选择——macOS Vision 原生可用时不再要求 pytesseract；
+        # 否则 tesseract 二进制与 pytesseract 包装缺一不可。
         binary = _check_tesseract_binary()
         native = binary is None and native_ocr.available()
         if binary is None and not native:
@@ -73,6 +67,14 @@ class OcrParser(DocumentParser):
                 ),
                 path=str(path),
             )
+        pytesseract = None
+        if not native:
+            try:
+                import pytesseract  # type: ignore
+            except ImportError as e:
+                raise ParseError(parser=self.name,
+                                 reason="pytesseract not installed; pip install pytesseract",
+                                 path=str(path)) from e
 
         # 打开图片
         try:
@@ -88,7 +90,9 @@ class OcrParser(DocumentParser):
 
         # OCR
         try:
-            text = native_ocr.recognize(path) if native else pytesseract.image_to_string(img, lang="eng")
+            # tesseract 语言可配置（默认 eng）；Vision 按系统语言自动选择
+            lang = os.environ.get("KNOWBASE_OCR_LANG", "eng")
+            text = native_ocr.recognize(path) if native else pytesseract.image_to_string(img, lang=lang)
         except Exception as e:
             raise ParseError(parser=self.name,
                              reason=f"OCR failed: {e}",

@@ -41,7 +41,8 @@ def _git(repo: Path, *args: str, timeout: float = 10.0) -> str:
     full_env.update(env)
     proc = subprocess.run(
         ["git", "-C", str(repo), *args], stdin=subprocess.DEVNULL,
-        capture_output=True, text=True, encoding="utf-8", timeout=timeout,
+        # errors=replace：Windows 本地化 git 消息可能非 UTF-8
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
         env=full_env, **no_window())
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout).strip())
