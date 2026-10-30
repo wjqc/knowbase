@@ -38,9 +38,10 @@ def _git_env() -> dict:
     for name in _IDENTITY_ENV_VARS:
         env.pop(name, None)
     env["GIT_TERMINAL_PROMPT"] = "0"
-    # rebase --continue 等流程不得打开编辑器（自动化下会永久挂起）
-    env["GIT_EDITOR"] = "true"
-    env["GIT_SEQUENCE_EDITOR"] = "true"
+    # rebase --continue 等流程不得打开编辑器（自动化下会永久挂起）；
+    # ":" 在 sh 与 cmd 下都是空操作，不依赖 Git for Windows 自带的 sh true
+    env["GIT_EDITOR"] = ":"
+    env["GIT_SEQUENCE_EDITOR"] = ":"
     return env
 
 

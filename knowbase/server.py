@@ -4,6 +4,7 @@
 confidence/status 是服务端状态机的输出，任何工具的入参都不包含它们。
 """
 
+import os
 from datetime import date
 from pathlib import Path
 
@@ -926,10 +927,38 @@ mcp.tool(name="memory_import", description="M4-5: 导入文档目录，入队 ex
 mcp.tool(name="memory_metrics", description="只读导出本机隐私最小化汇总（schema knowbase.metrics.v1）；UTC时间窗，缺数据返回null，不含查询/对话/业务正文，不自动上传。source_label只是操作者标签，不认证人数")(metrics_impl)
 
 
+def _force_lf_stdio():
+    """Windows 上 MCP SDK 的 stdio_server 会用 TextIOWrapper(newline=None)
+    重包 sys.stdout.buffer，把每个换行写成 CRLF；在 buffer 层把 CRLF 归一为
+    LF，与 macOS/Linux 输出一致（POSIX 上 os.linesep 本就是 LF，无需处理）。"""
+    import sys
+    from io import TextIOWrapper
+    if os.name != "nt":
+        return
+    # detach：旧文本 wrapper 失去 buffer，被 GC 时不会关闭底层 fd
+    raw = sys.stdout.detach()
+
+    class _LFBuffer:
+        def write(self, data):
+            return raw.write(data.replace(b"\r\n", b"\n"))
+
+        def flush(self):
+            return raw.flush()
+
+        def writable(self):
+            return True
+
+        def __getattr__(self, name):
+            return getattr(raw, name)
+
+    sys.stdout = TextIOWrapper(_LFBuffer(), encoding="utf-8", newline="\n")
+
+
 def main():
     import sys
     import threading
     from .retrieval_state import maintenance
+    _force_lf_stdio()
     # P4：记录一次 serve 启动（宿主已加载的证据；失败绝不阻断 serve）。
     try:
         from .sessions import record_session

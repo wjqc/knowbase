@@ -332,3 +332,58 @@ def test_index_md_is_written_with_lf():
     from knowbase import index
     source = Path(index.__file__).read_text(encoding="utf-8")
     assert 'out.write_text("\\n".join(lines) + "\\n", encoding="utf-8", newline="\\n")' in source
+
+
+# ---------- 补充：审计残留可选项（GIT_EDITOR 可移植性 / stdio LF 行尾） ----------
+
+def test_git_env_noop_editor_is_portable():
+    from knowbase import gitops
+    env = gitops._git_env()
+    # 修复前："true" 依赖 Git for Windows 自带 sh；":" 在 sh 与 cmd 下都是空操作
+    assert env["GIT_EDITOR"] == ":"
+    assert env["GIT_SEQUENCE_EDITOR"] == ":"
+
+
+def test_stdio_lf_buffer_normalizes_crlf(monkeypatch):
+    """SDK 用 TextIOWrapper(newline=None) 重包 stdout.buffer，Windows 上写出 CRLF；
+    _force_lf_stdio 在 buffer 层归一为 LF。用 newline="\\r\\n" 模拟 Windows 翻译，
+    使测试在任意平台都能捕获回归。"""
+    import io
+    from knowbase import server
+    chunks = []
+
+    class FakeRaw:
+        def write(self, data):
+            chunks.append(data)
+            return len(data)
+
+        def flush(self):
+            pass
+
+        def writable(self):
+            return True
+
+        def seekable(self):
+            return False
+
+        def close(self):
+            pass
+
+        @property
+        def closed(self):
+            return False
+
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(io.BufferedWriter(FakeRaw()), encoding="utf-8"))
+    monkeypatch.setattr(server, "os", SimpleNamespace(name="nt", environ=os.environ))
+    server._force_lf_stdio()
+    # 模拟 SDK：拿 sys.stdout.buffer 再包一层 newline 翻译的 wrapper
+    sdk_like = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", newline="\r\n")
+    sdk_like.write("msg\n")
+    sdk_like.flush()
+    assert b"".join(chunks) == b"msg\n"  # 修复前：直落 b"msg\r\n"
+
+    # POSIX 上不做任何替换
+    monkeypatch.setattr(server, "os", SimpleNamespace(name="posix", environ=os.environ))
+    before = sys.stdout
+    server._force_lf_stdio()
+    assert sys.stdout is before
