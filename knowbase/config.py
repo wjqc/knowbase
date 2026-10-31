@@ -14,6 +14,8 @@ CONFIG_PATH = Path(os.environ.get("KNOWBASE_CONFIG", str(Path.home() / ".knowbas
 # 缓存：避免同一进程内反复读文件 + JSON 解析
 _config_cache: dict | None = None
 _config_mtime: float = 0
+_config_path: str = ""
+_config_size: int = 0
 
 DEFAULTS = {
     "repo_path": "~/knowbase",
@@ -109,24 +111,32 @@ class ConfigError(ValueError):
 
 
 def load_config() -> dict:
-    global _config_cache, _config_mtime
+    global _config_cache, _config_mtime, _config_path, _config_size
 
-    # 文件存在且 mtime 未变 → 返回缓存（省去文件 I/O 和 JSON 解析）
-    if CONFIG_PATH.exists():
-        try:
-            mtime = CONFIG_PATH.stat().st_mtime
-        except OSError:
-            mtime = 0
-        if _config_cache is not None and mtime == _config_mtime:
-            cfg = copy.deepcopy(_config_cache)
-            env_repo = os.environ.get("KNOWBASE_REPO_PATH")
-            if env_repo:
-                cfg["repo_path"] = env_repo
-            return cfg
+    # 调用一次 stat() 避免 TOCTOU（两次 exists() 调用之间文件状态可能变化）
+    path_str = str(CONFIG_PATH)
+    try:
+        st = CONFIG_PATH.stat()
+        mtime = st.st_mtime
+        size = st.st_size
+        exists = True
+    except OSError:
+        mtime = 0
+        size = 0
+        exists = False
 
-    # 首次调用、mtime 变化或文件不存在 → 重新加载
+    # 文件路径、mtime、大小均未变 → 返回缓存（省去文件 I/O 和 JSON 解析）
+    if (_config_cache is not None and _config_path == path_str
+            and mtime == _config_mtime and size == _config_size):
+        cfg = copy.deepcopy(_config_cache)
+        env_repo = os.environ.get("KNOWBASE_REPO_PATH")
+        if env_repo:
+            cfg["repo_path"] = env_repo
+        return cfg
+
+    # 首次调用、路径/mtime/大小变化或文件不存在 → 重新加载
     cfg = copy.deepcopy(DEFAULTS)
-    if CONFIG_PATH.exists():
+    if exists:
         try:
             raw = CONFIG_PATH.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
@@ -146,6 +156,8 @@ def load_config() -> dict:
         cfg = _deep_merge(cfg, override)
         _config_cache = copy.deepcopy(cfg)
         _config_mtime = mtime
+        _config_path = path_str
+        _config_size = size
     # 文件不存在时不设缓存（下次调用继续尝试读取）
 
     env_repo = os.environ.get("KNOWBASE_REPO_PATH")

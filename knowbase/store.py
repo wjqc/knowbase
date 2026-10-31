@@ -9,8 +9,6 @@ from datetime import date
 from difflib import SequenceMatcher
 from pathlib import Path
 
-import yaml
-
 from .credentials import SECRET_PATTERNS, SECRET_RE, contains_credentials
 
 TYPES = ("pitfall", "standard", "decision", "workflow", "preference", "reference", "bizrule")
@@ -185,19 +183,23 @@ def parse(path: Path) -> tuple[dict, str]:
 
 
 def parse_text(text: str, source: str = "memory") -> tuple[dict, str]:
+    import yaml as _yaml
+
     path=source
     if not text.startswith("---"):
         raise ValueError(f"{path} 缺少 frontmatter")
     end = text.find("\n---", 3)
     if end < 0:
         raise ValueError(f"{path} frontmatter 未闭合")
-    meta = yaml.safe_load(text[3:end].strip()) or {}
+    meta = _yaml.safe_load(text[3:end].strip()) or {}
     body = text[end + 4:].lstrip("\n")
     return meta, body
 
 
 def render(meta: dict, body: str) -> str:
-    fm = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False, default_flow_style=False)
+    import yaml as _yaml
+
+    fm = _yaml.safe_dump(meta, allow_unicode=True, sort_keys=False, default_flow_style=False)
     return f"---\n{fm}---\n\n{body.strip()}\n"
 
 
@@ -328,12 +330,12 @@ def find_similar(repo: Path, title: str, threshold: float = 0.82, scope: str | N
     if not scored:
         return None
 
-    # 按 quick_ratio 降序，仅对排名靠前的候选计算完整 ratio
+    # 按 quick_ratio 降序计算完整 ratio（不截断：截断可能导致高 ratio 候选
+    # 因 quick_ratio 被低排而漏判，违背 docstring "不会漏掉" 的保证）
     scored.sort(key=lambda x: x[0], reverse=True)
-    top_k = max(50, len(scored) // 2)
 
     best = None
-    for _qr, sm, meta, path in scored[:top_k]:
+    for _qr, sm, meta, path in scored:
         ratio = sm.ratio()
         if ratio >= threshold and (best is None or ratio > best[0]):
             best = (ratio, meta, path)

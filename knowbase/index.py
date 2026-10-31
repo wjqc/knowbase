@@ -11,6 +11,8 @@ import os
 import re
 import sqlite3
 import time
+
+import yaml
 from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -117,11 +119,12 @@ def upsert(conn: sqlite3.Connection, meta: dict, body: str, path: Path, staging:
     )
     # 卡片是内容权威；Git 克隆/同步后也要能读取版本并进行 CAS。
     from .mutations import _compute_revision, _compute_governance_revision
+    _governance_meta = {**meta, "staging": staging}
     conn.execute("INSERT INTO entity_heads(entity_id,content_revision,governance_revision,updated_at) "
                  "VALUES(?,?,?,?) ON CONFLICT(entity_id) DO UPDATE SET "
                  "content_revision=excluded.content_revision,governance_revision=excluded.governance_revision,"
                  "updated_at=excluded.updated_at",
-                 (meta["id"], _compute_revision(meta, body), _compute_governance_revision(meta),
+                 (meta["id"], _compute_revision(meta, body), _compute_governance_revision(_governance_meta),
                   datetime.now().isoformat(timespec="seconds")))
     if commit:
         conn.commit()
@@ -151,8 +154,8 @@ def rebuild(repo: Path, full: bool = False) -> int:
                 conn.execute("UPDATE meta SET hit_count=? WHERE id=?", (old_hits.get(meta["id"], 0), meta["id"]))
                 n += 1
         else:
-            # 增量重建：对比 entity_heads 中的 content_revision
-            from .mutations import _compute_revision
+            # 增量重建：对比 entity_heads 中的 content_revision 和 governance_revision
+            from .mutations import _compute_revision, _compute_governance_revision
             existing_ids = {row[0] for row in conn.execute("SELECT entity_id FROM entity_heads")}
 
             disk_ids: set[str] = set()
@@ -167,16 +170,23 @@ def rebuild(repo: Path, full: bool = False) -> int:
                     n += 1
                     continue
 
-                # 已存在实体 → 对比 content_revision
+                # 已存在实体 → 对比 content_revision 和 governance_revision
                 row = conn.execute(
-                    "SELECT content_revision FROM entity_heads WHERE entity_id=?", (mid,)
+                    "SELECT content_revision, governance_revision FROM entity_heads WHERE entity_id=?", (mid,)
                 ).fetchone()
-                stored_rev = row[0] if row else ""
-                current_rev = _compute_revision(meta, body)
+                stored_content_rev = row[0] if row else ""
+                stored_gov_rev = row[1] if row else ""
+                current_content_rev = _compute_revision(meta, body)
+                current_gov_rev = _compute_governance_revision(
+                    {**meta, "staging": (path.parent.name == "staging")})
 
-                if current_rev != stored_rev:
-                    # 重建该实体的 FTS（先删后插）
-                    conn.execute("DELETE FROM mem_fts WHERE id=?", (mid,))
+                content_changed = current_content_rev != stored_content_rev
+                gov_changed = current_gov_rev != stored_gov_rev
+
+                if content_changed or gov_changed:
+                    # 只有内容变化时才重建 FTS；治理变化只更新 meta/entity_heads
+                    if content_changed:
+                        conn.execute("DELETE FROM mem_fts WHERE id=?", (mid,))
                     upsert(conn, meta, body, path, staging=(path.parent.name == "staging"), commit=False)
                     conn.execute("UPDATE meta SET hit_count=? WHERE id=?", (old_hits.get(mid, 0), mid))
                     n += 1
@@ -224,7 +234,7 @@ def source_current(conn, mid, expected_meta=None):
         from .mutations import _compute_revision
         return (meta.get("id")==mid and meta.get("scope")==row[1] and meta.get("status","active")==row[2]
                 and meta.get("confidence","once")==row[3] and _compute_revision(meta,body)==row[4])
-    except (OSError,UnicodeError,ValueError,TypeError,AttributeError,store.yaml.YAMLError):return False
+    except (OSError,UnicodeError,ValueError,TypeError,AttributeError,yaml.YAMLError):return False
 
 
 # ---------- 检索与排序 ----------
@@ -295,21 +305,21 @@ def _match_ids(conn: sqlite3.Connection, terms: list[str]) -> dict[str, float] |
         return None
     bm25 = {r[0]: -r[1] for r in rows}
 
-    # 单次 UNION ALL 统计命中词数（替代逐词循环 N 次查询）
+    # 逐词统计命中数：任一单词语法异常只跳过该词，不丢失其他词的命中
     if len(big) == 1:
         hit_count = {mid: 1 for mid in bm25}
     else:
-        union_parts = " UNION ALL ".join(
-            "SELECT id FROM mem_fts WHERE mem_fts MATCH ?" for _ in big
-        )
-        union_params = [_fts_sanitize(t) for t in big]
         hit_count: dict[str, int] = {}
-        try:
-            sub_rows = conn.execute(union_parts, union_params).fetchall()
-            for r in sub_rows:
-                hit_count[r[0]] = hit_count.get(r[0], 0) + 1
-        except sqlite3.OperationalError:
-            return bm25
+        for t in big:
+            try:
+                sub_rows = conn.execute(
+                    "SELECT id FROM mem_fts WHERE mem_fts MATCH ?",
+                    (_fts_sanitize(t),),
+                ).fetchall()
+                for r in sub_rows:
+                    hit_count[r[0]] = hit_count.get(r[0], 0) + 1
+            except sqlite3.OperationalError:
+                continue
     if not hit_count:
         return bm25
     return {
@@ -515,16 +525,19 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
     if not fused:
         return []
 
-    # 批量获取 snippet（替代逐条 SELECT snippet(...) 查询）
+    # 批量获取 snippet（替代逐条 SELECT snippet(...) 查询），分块避免超 SQLite 变量上限
     fused_ids = list(fused.keys())
     snippets: dict[str, str] = {}
     if fused_ids:
-        placeholders = ",".join(["?"] * len(fused_ids))
-        rows = conn.execute(
-            f"SELECT id, snippet(mem_fts, 3, '「', '」', '…', 12) FROM mem_fts WHERE id IN ({placeholders})",
-            fused_ids,
-        ).fetchall()
-        snippets = {row[0]: row[1] for row in rows}
+        chunk_size = 900
+        for chunk_start in range(0, len(fused_ids), chunk_size):
+            chunk = fused_ids[chunk_start:chunk_start + chunk_size]
+            placeholders = ",".join(["?"] * len(chunk))
+            rows = conn.execute(
+                f"SELECT id, snippet(mem_fts, 3, '「', '」', '…', 12) FROM mem_fts WHERE id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            snippets.update({row[0]: row[1] for row in rows})
 
     results = []
     for m in eligible:

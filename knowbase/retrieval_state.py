@@ -35,8 +35,8 @@ def wake(repo):
         _WORKERS.add(key)
     def work():
         try:si.build(repo)
-        except (sqlite3.OperationalError, sqlite3.ProgrammingError):
-            _log.debug("Background index build failed (lease expired or db unavailable)", exc_info=True)
+        except Exception:
+            _log.warning("Background index build failed", exc_info=True)
         finally:
             with _WORKER_LOCK:_WORKERS.discard(key)
     threading.Thread(target=work,daemon=True).start()

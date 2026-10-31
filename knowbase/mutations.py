@@ -66,6 +66,7 @@ def _compute_governance_revision(meta: dict) -> str:
         "verified_content_revision": meta.get("verified_content_revision", ""),
         "helpful_count": meta.get("helpful_count", 0),
         "unhelpful_count": meta.get("unhelpful_count", 0),
+        "staging": meta.get("staging", False),
     }
     raw = json.dumps(gov_fields, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]

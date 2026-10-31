@@ -129,8 +129,7 @@ class TestDispatch:
 
         args = MagicMock()
         args.cmd = "nonexistent-command-xyz"
-        cfg = {"repo_path": str(tmp_path)}
-        code = _dispatch(args, cfg)
+        code = _dispatch(args)
         assert code == 1
 
     def test_dispatch_stats_cmd(self, tmp_path, monkeypatch):
@@ -147,9 +146,8 @@ class TestDispatch:
         args.scope = None
         args.json = False
 
-        cfg = {"repo_path": str(tmp_path)}
         # stats 在无 repo 时会失败但不应崩溃
-        code = _dispatch(args, cfg)
+        code = _dispatch(args)
         assert isinstance(code, int)
 
 

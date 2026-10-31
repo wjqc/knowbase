@@ -632,7 +632,7 @@ def push(repo: Path, remote_url: str, allowed_prefixes: list[str]) -> str | None
     except GitSyncConflict as exc:
         _record_sync(repo, remote, branch, "conflict", error=str(exc), fetch=True)
         return f"同步冲突(本地提交已保留): {exc}"
-    except (RuntimeError, OSError) as e:
+    except (RuntimeError, OSError, sqlite3.Error) as e:
         error_type = "unknown"
         if _is_auth_error(e):
             error_type = "auth"
@@ -644,7 +644,7 @@ def push(repo: Path, remote_url: str, allowed_prefixes: list[str]) -> str | None
             _record_sync(repo, remote, branch, "error", 
                          error=f"[{error_type}] {e}" + (f" (push_sha={push_sha})" if push_sha else ""),
                          push=True)
-        except (RuntimeError, OSError):
+        except (RuntimeError, OSError, sqlite3.Error):
             pass
         # 网络未知结果明确报告
         if error_type == "network":
@@ -675,7 +675,7 @@ def _record_sync(repo: Path, remote: str, branch: str, status: str, error: str =
                                 last_push_at=now if push else None,
                                 status=status, error=error)
         conn.close()
-    except (RuntimeError, OSError):
+    except (RuntimeError, OSError, sqlite3.Error):
         pass
 
 
@@ -889,7 +889,7 @@ def sync_before_read(repo: Path, cfg: dict, *, lease_owner: str | None = None,
             int((time.monotonic()-started)*1000), confirmed_revision=_run(repo,"rev-parse","HEAD",timeout=3),
             pending_push_count=int(push_needed and not gcfg.get("auto_push",False)))
         return updated, warning
-    except (RuntimeError, OSError) as exc:
+    except (RuntimeError, OSError, sqlite3.Error) as exc:
         warning = "远程同步检查失败，继续使用 last-known-good: " + str(exc)
         # 迟到工作不能覆盖新持有者的当前同步状态。
         if not owner or (lease_target == (remote,branch) and _owns_sync_lease(repo, remote, branch, owner)):

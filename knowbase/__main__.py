@@ -915,7 +915,7 @@ def _report_error(message, exit_code=2):
     统一 _dispatch() 中各 try/except 分支的 print/return 骨架，
     避免 print(f"错误：{exc}"); return N 的重复模式。
     """
-    print(message, file=sys.stderr)
+    print(message)
     return exit_code
 
 
@@ -1144,11 +1144,7 @@ def _parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def _load_config(args):
-    return config.load_config()
-
-
-def _dispatch(args, cfg):
+def _dispatch(args):
     if args.cmd == "sync-once":
         from .refresh import run_once
         result = run_once(config.repo_path(), args.remote, args.branch, args.lease_token)
@@ -1672,8 +1668,7 @@ def _dispatch(args, cfg):
 
 def _main(argv=None):
     args = _parse_args(argv)
-    cfg = _load_config(args)
-    return _dispatch(args, cfg)
+    return _dispatch(args)
 
 
 def main(argv=None):

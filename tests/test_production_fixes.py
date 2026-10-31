@@ -214,6 +214,8 @@ def test_sync_pushes_local_ahead_branch_after_releasing_lock(isolated_repo, monk
             return "local"
         if args[:2] == ("rev-parse", "origin/trunk"):
             return "remote"
+        if args[:2] == ("merge-base", "local") and len(args) >= 3 and args[2] == "remote":
+            return "remote"
         if args[:3] == ("merge-base", "--is-ancestor", "local"):
             raise RuntimeError("local is not ancestor of remote")
         if args[:3] == ("merge-base", "--is-ancestor", "remote"):
@@ -255,9 +257,13 @@ def test_sync_rebases_diverged_branch_when_changes_do_not_overlap(isolated_repo,
             return "local"
         if args[:2] == ("rev-parse", "origin/trunk"):
             return "remote"
+        if args[:2] == ("merge-base", "local") and len(args) >= 3 and args[2] == "remote":
+            return "base"
         if args[:2] == ("merge-base", "--is-ancestor"):
             raise RuntimeError("not ancestor")
         if args[:2] == ("rebase", "origin/trunk"):
+            return ""
+        if args[:5] == ("diff", "--name-only", "base", "local") or args[:5] == ("diff", "--name-only", "base", "remote"):
             return ""
         raise AssertionError(args)
 
@@ -294,6 +300,8 @@ def test_sync_aborts_rebase_and_reports_only_real_content_conflicts(isolated_rep
             return "local"
         if args[:2] == ("rev-parse", "origin/trunk"):
             return "remote"
+        if args[:2] == ("merge-base", "local") and len(args) >= 3 and args[2] == "remote":
+            return "base"
         if args[:2] == ("merge-base", "--is-ancestor"):
             raise RuntimeError("not ancestor")
         if args[:2] == ("rebase", "origin/trunk"):
@@ -302,6 +310,14 @@ def test_sync_aborts_rebase_and_reports_only_real_content_conflicts(isolated_rep
             return "memories/P-1.md"
         if args[:2] == ("rebase", "--abort"):
             return ""
+        if args[:3] == ("rev-parse", "--git-dir"):
+            return ".git"
+        if args[:5] == ("diff", "--name-only", "base", "local") or args[:5] == ("diff", "--name-only", "base", "remote"):
+            return "memories/P-1.md"
+        if len(args) >= 3 and args[0] == "rev-parse" and ":" in args[1]:
+            return "sha-" + args[1].replace(":", "-")
+        if len(args) >= 3 and args[0] == "show" and ":" in args[1]:
+            return "mock-content"
         raise AssertionError(args)
 
     monkeypatch.setattr(gitops, "_run", fake_run)
@@ -340,10 +356,14 @@ def test_push_fetches_rebases_and_retries_when_remote_moves_first(isolated_repo,
         if args[:2] == ("rev-parse", "origin/trunk"):
             # P3 §6.2 读回确认：第二次推送成功后远端跟踪引用即为 local。
             return "local" if pushed else "remote"
+        if args[:2] == ("merge-base", "local") and len(args) >= 3 and args[2] == "remote":
+            return "base"
         if args[:2] == ("merge-base", "--is-ancestor"):
             if len(args) >= 4 and args[2] == args[3]:
                 return ""
             raise RuntimeError("diverged")
+        if args[:5] == ("diff", "--name-only", "base", "local") or args[:5] == ("diff", "--name-only", "base", "remote"):
+            return ""
         if args[:2] == ("rebase", "origin/trunk"):
             return ""
         if args[:2] == ("push", "-u"):
