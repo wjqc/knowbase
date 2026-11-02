@@ -9,7 +9,7 @@
 
 import json
 import subprocess
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -17,7 +17,8 @@ import pytest
 from knowbase import build_identity, config, doctor, index, store, writer
 from knowbase.__main__ import (cmd_init, cmd_maintenance_run, cmd_maintenance_status,
                                cmd_onboarding, cmd_scope_bind, cmd_scope_resolve)
-from knowbase.maintenance import maintenance_status, plan_maintenance, reverify_conflicts
+from knowbase.maintenance import (apply_retention, maintenance_status, plan_maintenance,
+                                  retention_plan, reverify_conflicts)
 from knowbase.onboarding import pending_notices, readiness
 from knowbase.scope_binding import (bind_explicit, list_bindings, record_candidate,
                                     resolve_binding)
@@ -367,3 +368,74 @@ def test_init_prints_readiness_summary(memory_repo, capsys):
     out = capsys.readouterr().out
     assert "接入就绪" in out
     assert "配置=✓" in out
+
+
+def test_retention_prunes_runtime_ledgers_but_keeps_active_jobs(memory_repo):
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    old = "2020-01-01T00:00:00+00:00"
+    recent = now.isoformat()
+    conn = index.connect(memory_repo)
+    try:
+        conn.execute(
+            "INSERT INTO context_events(host_profile,session_id,event_id,trigger,"
+            "payload_hash,status,created_at) VALUES('h','s','e-old','x','p','executed',?)", (old,))
+        conn.execute(
+            "INSERT INTO context_events(host_profile,session_id,event_id,trigger,"
+            "payload_hash,status,created_at) VALUES('h','s','e-new','x','p','executed',?)", (recent,))
+        conn.execute(
+            "INSERT INTO command_calls(call_id,ts,transport,command,status,duration_ms) "
+            "VALUES('c-old',?,'cli','x','ok',1)", (old,))
+        conn.execute("INSERT INTO usage_log(ts,agent,tool,memory_id,detail) "
+                     "VALUES(?,'a','search','m','{}')", (old,))
+        conn.execute("INSERT INTO retrieval_observations(event_id,occurred_at,origin,level,reason,"
+                     "detail_json) VALUES('o-old',?,'x','local','','{}')", (old,))
+        conn.execute("INSERT INTO jobs(job_id,kind,state,created_at,updated_at) "
+                     "VALUES('J-done','capture','no_candidate',?,?)", (old, old))
+        conn.execute("INSERT INTO job_spool(spool_id,job_id,input_json,checksum,created_at) "
+                     "VALUES('S-done','J-done','{}','x',?)", (old,))
+        conn.execute("INSERT INTO jobs(job_id,kind,state,created_at,updated_at) "
+                     "VALUES('J-wait','capture','awaiting_agent',?,?)", (old, old))
+        conn.execute("INSERT INTO job_spool(spool_id,job_id,input_json,checksum,created_at) "
+                     "VALUES('S-wait','J-wait','{}','x',?)", (old,))
+        conn.commit()
+
+        plan = retention_plan(conn, now=now)
+        assert plan["context_events"] == 1
+        assert plan["command_calls"] == 1
+        assert plan["usage_log"] == 1
+        assert plan["retrieval_observations"] == 1
+        assert plan["job_spool"] == 1
+
+        assert apply_retention(conn, now=now) == plan
+        assert conn.execute("SELECT COUNT(*) FROM context_events").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM job_spool").fetchone()[0] == 1
+        assert conn.execute("SELECT job_id FROM job_spool").fetchone()[0] == "J-wait"
+    finally:
+        conn.close()
+
+
+def test_hook_auto_inject_records_retrieval_delivery(memory_repo, monkeypatch):
+    from knowbase import hooks
+    created = writer.create(memory_repo, "pitfall", "库存补货阈值排查",
+                            BODY, scope="global")
+    assert not created.get("error"), created
+    mid = created["entity_id"]
+    cfg = config.load_config()
+    cfg["hooks"] = {"enabled": True, "inject_min_confidence": "any"}
+    cfg["inflight"]["enabled"] = False
+    monkeypatch.setattr(config, "load_config", lambda: cfg)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.delenv("ZCODE_PROJECT_DIR", raising=False)
+
+    info = {"session_id": "sess-1", "host_profile": "pytest"}
+    text = hooks.user_prompt("库存补货阈值", delivery_info=info)
+    assert mid in text
+    assert info["delivery_ids"]
+    conn = index.connect(memory_repo)
+    try:
+        rows = conn.execute(
+            "SELECT host_profile,session_id,context_event_id FROM retrieval_deliveries "
+            "WHERE memory_id=?", (mid,)).fetchall()
+    finally:
+        conn.close()
+    assert rows == [("pytest", "sess-1", f"hook:{info['search_id']}")]

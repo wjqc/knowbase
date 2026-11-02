@@ -63,6 +63,12 @@ DEFAULTS = {
               "evidence_role": "off", "evidence_remote": "",
               "evidence_branch": "knowbase-value-events-v2",
               "evidence_root": "~/.knowbase/evidence", "evidence_team_id": "default"},
+    # 本机运行账本保留策略：只清理运行观测，不动知识卡、证据账本与待领作业。
+    # job_spool 仅在作业进入终态后按天数清理，等待 Agent 的作业永不删除。
+    "retention": {"enabled": True, "context_events_days": 30,
+                  "command_calls_days": 365, "usage_log_days": 180,
+                  "retrieval_observations_days": 90, "job_spool_terminal_days": 7,
+                  "db_size_warn_mb": 512},
     # P3 §6.1：worker 常驻循环 tick 间隔（秒）；OS 负责启动/保活。
     "worker": {"tick_seconds": 5.0},
     "hooks": {"enabled": True, "inject_min_confidence": "verified",

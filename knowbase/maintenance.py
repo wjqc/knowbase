@@ -9,9 +9,126 @@
 本模块不直接写卡片文件、不直接改索引、不绕过上述函数。
 """
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 from . import config, index, store
+
+
+RETENTION_DEFAULTS = {
+    "enabled": True,
+    "context_events_days": 30,
+    "command_calls_days": 365,
+    "usage_log_days": 180,
+    "retrieval_observations_days": 90,
+    "job_spool_terminal_days": 7,
+    "db_size_warn_mb": 512,
+}
+# 只清理这些终态作业的原始材料；awaiting/claimed 等活跃作业的 spool 永不删除。
+_JOB_SPOOL_TERMINAL_STATES = ("succeeded", "no_candidate", "failed")
+
+
+def _retention(cfg) -> dict:
+    raw = cfg.get("retention") or {}
+    spec = dict(RETENTION_DEFAULTS)
+    spec["enabled"] = bool(raw.get("enabled", spec["enabled"]))
+    for key in spec:
+        if key == "enabled":
+            continue
+        try:
+            spec[key] = max(1, int(raw.get(key, spec[key])))
+        except (TypeError, ValueError):
+            pass
+    return spec
+
+
+def _cutoff(now, days: int) -> str:
+    return (now - timedelta(days=days)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _tables(conn) -> set[str]:
+    try:
+        return {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    except Exception:
+        return set()
+
+
+def _count(conn, sql: str, params) -> int:
+    try:
+        return conn.execute(sql, params).fetchone()[0]
+    except Exception:
+        return 0
+
+
+def _context_event_delete_sql(tables) -> tuple[str, str]:
+    base = "FROM context_events WHERE datetime(created_at) < datetime(?)"
+    if "retrieval_deliveries" in tables:
+        base += (" AND NOT EXISTS (SELECT 1 FROM retrieval_deliveries d "
+                 "WHERE d.context_event_id = context_events.event_id)")
+    return base, base.replace("FROM context_events", "DELETE FROM context_events", 1)
+
+
+def retention_plan(conn, *, cfg=None, now=None) -> dict:
+    """只读：各运行账本按保留期可清理的行数。"""
+    spec = _retention(cfg or config.load_config())
+    if not spec["enabled"]:
+        return {"enabled": False, "context_events": 0, "command_calls": 0,
+                "usage_log": 0, "retrieval_observations": 0, "job_spool": 0}
+    now = now or datetime.now(timezone.utc)
+    tables = _tables(conn)
+    plan = {"enabled": True}
+    if "context_events" in tables:
+        where, _ = _context_event_delete_sql(tables)
+        plan["context_events"] = _count(conn, f"SELECT COUNT(*) {where}",
+                                        (_cutoff(now, spec["context_events_days"]),))
+    else:
+        plan["context_events"] = 0
+    plan["command_calls"] = _count(
+        conn, "SELECT COUNT(*) FROM command_calls WHERE datetime(ts) < datetime(?)",
+        (_cutoff(now, spec["command_calls_days"]),)) if "command_calls" in tables else 0
+    plan["usage_log"] = _count(
+        conn, "SELECT COUNT(*) FROM usage_log WHERE datetime(ts) < datetime(?)",
+        (_cutoff(now, spec["usage_log_days"]),)) if "usage_log" in tables else 0
+    plan["retrieval_observations"] = _count(
+        conn, "SELECT COUNT(*) FROM retrieval_observations WHERE datetime(occurred_at) < datetime(?)",
+        (_cutoff(now, spec["retrieval_observations_days"]),)) if "retrieval_observations" in tables else 0
+    plan["job_spool"] = _count(
+        conn,
+        "SELECT COUNT(*) FROM job_spool WHERE datetime(created_at) < datetime(?) "
+        "AND job_id IN (SELECT job_id FROM jobs WHERE state IN (%s))" %
+        ",".join("?" * len(_JOB_SPOOL_TERMINAL_STATES)),
+        (_cutoff(now, spec["job_spool_terminal_days"]), *_JOB_SPOOL_TERMINAL_STATES),
+    ) if {"job_spool", "jobs"} <= tables else 0
+    return plan
+
+
+def apply_retention(conn, *, cfg=None, now=None) -> dict:
+    """按保留期清理运行账本；返回实际删除行数。等待 Agent 的作业材料不动。"""
+    spec = _retention(cfg or config.load_config())
+    plan = retention_plan(conn, cfg=cfg, now=now)
+    if not spec["enabled"]:
+        return plan
+    now = now or datetime.now(timezone.utc)
+    tables = _tables(conn)
+    if "context_events" in tables:
+        _, delete = _context_event_delete_sql(tables)
+        conn.execute(delete, (_cutoff(now, spec["context_events_days"]),))
+    if "command_calls" in tables:
+        conn.execute("DELETE FROM command_calls WHERE datetime(ts) < datetime(?)",
+                     (_cutoff(now, spec["command_calls_days"]),))
+    if "usage_log" in tables:
+        conn.execute("DELETE FROM usage_log WHERE datetime(ts) < datetime(?)",
+                     (_cutoff(now, spec["usage_log_days"]),))
+    if "retrieval_observations" in tables:
+        conn.execute("DELETE FROM retrieval_observations WHERE datetime(occurred_at) < datetime(?)",
+                     (_cutoff(now, spec["retrieval_observations_days"]),))
+    if {"job_spool", "jobs"} <= tables:
+        conn.execute(
+            "DELETE FROM job_spool WHERE datetime(created_at) < datetime(?) "
+            "AND job_id IN (SELECT job_id FROM jobs WHERE state IN (%s))" %
+            ",".join("?" * len(_JOB_SPOOL_TERMINAL_STATES)),
+            (_cutoff(now, spec["job_spool_terminal_days"]), *_JOB_SPOOL_TERMINAL_STATES))
+    conn.commit()
+    return plan
 
 
 def _days(cfg) -> int:
@@ -120,6 +237,7 @@ def plan_maintenance(repo, conn, *, today=None) -> dict:
         "review_candidates_expired": _review_expired(conn, _ttl_days(cfg), today),
         "pending_intents": _pending_intents(conn),
         "open_conflicts": _open_conflicts(conn),
+        "retention": retention_plan(conn, cfg=cfg),
     }
 
 
@@ -131,6 +249,7 @@ def maintenance_status(repo, conn, *, today=None) -> dict:
         "review_candidates_expired": plan["review_candidates_expired"],
         "pending_intents": plan["pending_intents"],
         "open_conflicts": plan["open_conflicts"],
+        "retention": plan["retention"],
         "last_archived_at": _last_archived_at(repo),
         "last_discarded_at": _last_discarded_at(conn),
     }
@@ -170,9 +289,11 @@ def run_maintenance(repo, conn, *, today=None) -> dict:
     discarded = materialize.sweep_review_candidates(
         conn, ttl_days=_ttl_days(cfg))
     reverified = reverify_conflicts(repo, conn)
+    retention = apply_retention(conn, cfg=cfg)
     return {
         "recovered_intents": recovered,
         "archived": archived,
         "discarded_review_candidates": discarded,
         "reverified_conflicts": reverified,
+        "retention": retention,
     }

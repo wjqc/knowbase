@@ -1,6 +1,7 @@
 """Read-only diagnostics: no migrations, index rebuild, network or telemetry writes."""
 import hashlib
 from contextlib import closing
+from datetime import datetime, timezone
 import json
 import sqlite3
 import shutil
@@ -121,9 +122,32 @@ def inspect(repo):
                     add("inflight_events", "pass", json.dumps(events))
                 else:
                     add("inflight_queue", "fail", "required tables missing")
+            # 提炼积压：不依赖 inflight.enabled，始终报告最老等待作业与状态分布。
+            if "jobs" in tables:
+                by_state = dict(conn.execute(
+                    "SELECT state,COUNT(*) FROM jobs GROUP BY state"))
+                oldest = conn.execute(
+                    "SELECT MIN(updated_at) FROM jobs WHERE state='awaiting_agent'").fetchone()[0]
+                age_days = None
+                if oldest:
+                    try:
+                        ts = datetime.fromisoformat(str(oldest).replace("Z", "+00:00"))
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        age_days = (datetime.now(timezone.utc) - ts).days
+                    except (ValueError, TypeError):
+                        pass
+                alert_days = int((config.load_config().get("inflight") or {}).get(
+                    "backlog_alert_days", 7))
+                add("job_backlog", "warn" if age_days is not None and age_days > alert_days else "pass",
+                    json.dumps({"by_state": by_state, "oldest_awaiting_days": age_days,
+                                "alert_days": alert_days}, ensure_ascii=False))
             if "sync_state" in tables:
-                row = conn.execute("SELECT status FROM sync_state ORDER BY rowid DESC LIMIT 1").fetchone()
-                add("sync", "pass" if row and row[0] == "ok" else "warn", row[0] if row else "unknown")
+                row = conn.execute(
+                    "SELECT status,error FROM sync_state ORDER BY rowid DESC LIMIT 1").fetchone()
+                add("sync", "pass" if row and row[0] == "ok" else "warn", json.dumps(
+                    {"status": row[0] if row else "unknown",
+                     "error": row[1] if row else ""}, ensure_ascii=False))
             # P4：项目识别绑定（迁移 v27 的 project_bindings 表）。
             try:
                 from .scope_binding import list_bindings
@@ -143,6 +167,17 @@ def inspect(repo):
                     maintenance_status(repo, conn), ensure_ascii=False))
             except Exception as exc:
                 add("maintenance", "warn", type(exc).__name__)
+            # 存储水位与可清理量：只读，不执行清理。
+            try:
+                from .maintenance import retention_plan
+                db_mb = round(path.stat().st_size / 1048576, 1) if path.exists() else 0
+                warn_mb = int((config.load_config().get("retention") or {}).get(
+                    "db_size_warn_mb", 512))
+                add("storage", "warn" if db_mb >= warn_mb else "pass", json.dumps(
+                    {"db_mb": db_mb, "warn_mb": warn_mb,
+                     "retention_candidates": retention_plan(conn)}, ensure_ascii=False))
+            except Exception as exc:
+                add("storage", "warn", type(exc).__name__)
             # P4：证据包待确认（value_outbox 未 ACK 的事件与最长账龄）。
             try:
                 if "value_outbox" in tables:

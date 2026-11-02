@@ -168,7 +168,19 @@ def user_prompt(prompt: str, project_dir=None, delivery_info=None) -> str:
         search_id=index.record_search(conn, hy["query"], scope, delivered, tool="auto_search",
                             query_class=hy["query_class"], raw_len=len(prompt), retrieval=diagnostics)
         if delivery_info is not None:
+            from . import delivery as _delivery
+            host = delivery_info.get("host_profile") or os.environ.get("KNOWBASE_AGENT_NAME", "unknown")
+            sid = delivery_info.get("session_id") or ""
+            delivery_ids = []
+            for rank, hit in enumerate(delivered, 1):
+                delivery_ids.append(_delivery.record_delivery(
+                    conn, search_id=search_id, host_profile=host, session_id=sid,
+                    context_event_id=f"hook:{search_id}", task_id="", task_revision="",
+                    scope=scope, memory_id=hit["id"],
+                    content_revision=hit.get("content_revision") or "", rank=rank))
+            conn.commit()
             delivery_info["search_id"]=search_id
+            delivery_info["delivery_ids"]=delivery_ids
             delivery_info["tiers"]=delivered_tiers
             delivery_info["dropped_once"]=dropped_once
         return text
@@ -350,7 +362,7 @@ def cmd_user_prompt(style: str = "claude"):
     transcript = _first(data, "transcript_path", "transcriptPath", "transcript")
     if sid and transcript and not config.load_config()["inflight"]["enabled"]:
         _maybe_trigger_mid_session_capture(sid, transcript)
-    delivery_info={}
+    delivery_info={"session_id": sid or "", "host_profile": style}
     text = user_prompt(prompt, data.get("cwd") or data.get("project_dir"), delivery_info)
     if config.load_config()["inflight"]["enabled"]:
         from .adapters import host_events
