@@ -1,6 +1,9 @@
 """Scheduler contract/rollback tests; Windows native execution is separate acceptance."""
 import json
 import plistlib
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from xml.etree import ElementTree as ET
@@ -54,6 +57,22 @@ def test_launchagent_failure_restores_old_file(memory_repo,tmp_path,monkeypatch)
     monkeypatch.setattr(worker.subprocess,'run',run)
     with pytest.raises(RuntimeError,match='previous configuration restored'):worker.install()
     assert path.read_bytes()==old and len(calls)==8
+
+
+def test_launchagent_environment_can_start_configured_cli_runtime(memory_repo,tmp_path,monkeypatch):
+    real_run=subprocess.run
+    home,python,root=prepare(memory_repo,tmp_path,monkeypatch,'darwin')
+    binaries=tmp_path/'cli-bin';binaries.mkdir()
+    (binaries/'fixture-runtime').symlink_to(sys.executable)
+    script=tmp_path/'executor';script.write_text('#!/usr/bin/env fixture-runtime\nprint("scheduled-ok")\n');script.chmod(0o700)
+    monkeypatch.setenv('PATH',str(binaries)+os.pathsep+os.defpath)
+    monkeypatch.setattr(worker.subprocess,'run',lambda *a,**kw:SimpleNamespace(returncode=0))
+    worker.install()
+    document=plistlib.loads((home/'Library/LaunchAgents'/f'{worker.LABEL}.plist').read_bytes())
+    env=document['EnvironmentVariables']
+    result=real_run([str(script)],env=env,capture_output=True,text=True)
+    assert result.returncode==0 and result.stdout.strip()=='scheduled-ok'
+    assert env['KNOWBASE_CONFIG']==str(config.CONFIG_PATH.resolve())
 
 
 def test_linux_scheduler_configuration_and_removal(memory_repo,tmp_path,monkeypatch):

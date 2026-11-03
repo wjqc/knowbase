@@ -56,6 +56,7 @@ python scripts/bootstrap_auto_update.py --source <PROGRAM_GIT_URL> --agents trae
 
 - 唯一路径：macOS/Linux `~/.knowbase/runtime/venv/bin/python`；Windows 同目录 `venv/Scripts/python.exe`。
 - 独立任务：macOS `com.knowbase.updater`，Linux 用户级 `knowbase-updater.timer/service`，Windows 用户级任务 `knowbase-updater`。不依赖可替换应用包成功导入才启动。
+- macOS/Linux 任务保留安装时的 `PATH`，使已配置的 Node/CLI 执行器在后台也能启动；不复制认证环境变量。旧任务需重新运行 `knowbase worker install` 和升级器接入命令，首次引导会重新注册任务。
 - 默认周期900秒，可配置300–86400秒。断网/认证失败/忙碌均保留当前包，指数退避到最多6小时；恢复后再次检查。关机期间不更新，登录后再运行；不承诺推送后立刻在线。
 - MCP 配置使用同一个固定 Python 启动 `runtime/mcp_bridge.py`。代理保留宿主 stdio 连接，等待旧调用结束，在安装完成后重新启动新版后端并内部初始化；不自动重放断线中的写操作。
 - Hook 使用固定 Python + `runtime/entry.py`。维护期不阻塞用户任务，不远程检索；只保存会话/显式 transcript 引用等元数据。后续 worker 按已有 scope 与会话绑定补采；缺 transcript 则记录真实 `capture_gap`，不伪造完整覆盖。

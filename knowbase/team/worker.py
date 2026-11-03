@@ -266,7 +266,8 @@ def install(*, remove=False, label=LABEL, task_name=WINDOWS_TASK, argv=None,
             path.unlink(missing_ok=True);return {"worker":"removed","platform":"launchagent"}
         value={"Label":label,"ProgramArguments":[str(python)]+(entry_args if entry_args is not None else ["-I","-m","knowbase"]+(argv or ["team","sync"])),
                "StartInterval":interval,"RunAtLoad":True,
-               "EnvironmentVariables":{"KNOWBASE_CONFIG":str(config.CONFIG_PATH.resolve())},
+               "EnvironmentVariables":{"KNOWBASE_CONFIG":str(config.CONFIG_PATH.resolve()),
+                                       "PATH":os.environ.get('PATH',os.defpath)},
                "StandardOutPath":str(root/"worker.log"),"StandardErrorPath":str(root/"worker-error.log")}
         if persistent:
             value.pop('StartInterval',None);value.update(KeepAlive=True,ThrottleInterval=5)
@@ -296,7 +297,7 @@ def install(*, remove=False, label=LABEL, task_name=WINDOWS_TASK, argv=None,
             return {"worker":"removed","platform":"systemd-user"}
         quote=lambda value:json.dumps(str(value).replace("%","%%"))
         command=" ".join(quote(arg) for arg in [python]+(entry_args if entry_args is not None else ["-I","-m","knowbase"]+(argv or ["team","sync"])))
-        env=quote("KNOWBASE_CONFIG="+str(config.CONFIG_PATH.resolve()))
+        env=quote("KNOWBASE_CONFIG="+str(config.CONFIG_PATH.resolve()))+' '+quote('PATH='+os.environ.get('PATH',os.defpath))
         try:
             if persistent:
                 _execute(['systemctl','--user','disable','--now',name+'.timer'],required=False)
