@@ -1,3 +1,12 @@
+# 2026-11-03 交付状态
+
+- 修复提交07c9919、556f8bf已推送；唯一runtime完成首次引导与独立自动更新，worker/updater已重装并保留PATH。
+- 最终源码1084 passed、1 skipped；真实模型探针、三配置入口MCP/Hook、实际后台2条成卡、远端克隆读回与统计ACK通过。
+- 统计页PC切换/125%缩放通过。其他项目材料未动；uv.lock及知识库无关工作保留。
+- 交付文档docs/operations/runtime-readiness-2026-11-03.md；同事首次接入、旧宿主聊天重连、未支持Token来源和历史统计缺口保留真实边界。
+
+---
+
 # 2026-10-28 Windows 后台弹窗修复
 
 已定位并修复直接python.exe任务入口，保留固定运行环境与MCP stdio；增加同venv pythonw启动器、CREATE_NO_WINDOW子进程选项、任务日志/退出码；补Windows时区依赖和Trae APPDATA路径。定向27项通过，全量960 passed/1 skipped（161.62秒）；未修改本机或Windows真实运行时。旧Windows电脑需重新执行新版bootstrap以补依赖并注册无窗口任务，实际桌面效果待验证。
