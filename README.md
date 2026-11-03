@@ -70,6 +70,8 @@ uv pip install --python ~/.knowbase/runtime/venv/bin/python .
 # 5. 验证：重启 Agent 后问一句 "搜下 EasyConnect"，应命中 P-2026-0001
 ```
 
+基础接入只保证本地检索可用。团队使用还需分别完成程序升级器接入、成员统计登记及后台提炼授权，见[一次接入说明](docs/program-auto-update.md)。`knowbase doctor --json` 会分别报告这些能力的关闭、待接入、待首次运行、过期及失败状态；配置正确不等于宿主当前会话已加载。
+
 ## 两种开局
 
 | 模式 | 做法 | 适用 |
@@ -83,7 +85,7 @@ uv pip install --python ~/.knowbase/runtime/venv/bin/python .
 `rebase --abort` 并保留本地提交。网络超时只记录为同步失败，不会误报成内容冲突，也不会回滚本地保存。
 索引可随时重建。
 
-执行中检索、版本反馈与本机统计导出见[消费和统计协议](docs/inflight-consumption-metrics.md)。新版提供 `memory_use`、`memory_metrics` 和 `knowbase metrics`；历史本机日志不能代表全团队总量。
+执行中检索、版本反馈与本机统计导出见[消费和统计协议](docs/inflight-consumption-metrics.md)。新版提供 `memory_use`、`memory_metrics` 和 `knowbase metrics`；历史本机日志不能代表全团队总量。统计页和团队README把知识工具调用、Hook、维护及其他调用分别展示；所有调用均为尝试次数，不能直接当成知识复用收益。工具来源接受 `工具-姓名` 标签，未知来源保留未知，不追溯猜测历史身份。
 
 ## 可选：任务前自动检索 / 任务后漏存兜底（hooks）
 

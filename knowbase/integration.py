@@ -457,8 +457,14 @@ def extra_plan(agents,home, *, managed=False):
                 raise IntegrationError('DUPLICATE_INLINE_HOOK_SOURCE:codex')
             current=doc.get('mcp_servers',{}).get('knowbase')
             if current is not None:
+                if managed:
+                    current_env=current.get('env',{})
+                    if (not isinstance(current_env,dict) or current.get('command')!=command or
+                            current_env.get('KNOWBASE_CONFIG',str(config.CONFIG_PATH.resolve()))!=str(config.CONFIG_PATH.resolve())):
+                        raise IntegrationError("EXISTING_KNOWBASE_ENV_CONFLICT:codex")
+                    server={**current,'command':command,'args':serve_args(home,True)}
                 if current!=server:
-                    if not managed or not valid_serve_args(current.get('args'),home) or current.get('env')!=ownenv:
+                    if not managed or not valid_serve_args(current.get('args'),home):
                         raise IntegrationError("EXISTING_KNOWBASE_CONFLICT:codex")
                     import re
                     text=(before or b'').decode()

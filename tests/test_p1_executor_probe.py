@@ -231,6 +231,8 @@ def test_malformed_candidate_fails_structured_output(memory_repo):
     report = run_isolation_probe(MalformedRunner(), repo=memory_repo, scope=SCOPE)
     assert report["passed"] is False
     assert report["checks"]["structured_output"] is False
+    assert report['submit_error']=='VALIDATION_FAILED'
+    assert report['validation_errors']
 
 
 # ---------------------------------------------------------------------------
@@ -455,7 +457,9 @@ def test_material_invariants():
 
 def test_cli_probe_reports_blocked_without_executors(tmp_path, monkeypatch, capsys):
     from knowbase.__main__ import _main
+    from knowbase import config
 
+    monkeypatch.setattr(config, 'CONFIG_PATH', tmp_path/'config.json')
     monkeypatch.setenv("PATH", str(tmp_path))
     assert _main(["executor", "probe"]) == 2
     out = json.loads(capsys.readouterr().out)

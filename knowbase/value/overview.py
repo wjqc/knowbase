@@ -4,6 +4,20 @@ import math
 from collections import Counter
 
 
+def call_breakdown(commands, *, known=False):
+    """Classify observed commands; legacy logs cannot establish the same denominator."""
+    counts = dict.fromkeys(('knowledge', 'hooks', 'maintenance', 'other'), 0)
+    knowledge = {'memory_search', 'memory_read', 'memory_context', 'memory_save',
+                 'memory_update', 'memory_use', 'memory_feedback'}
+    for name, count in commands.items():
+        kind = ('hooks' if name.startswith('hook.') else 'knowledge' if name in knowledge else
+                'maintenance' if name.startswith('memory_job_') or name in
+                {'memory_capture', 'sync-once', 'doctor', 'reindex', 'init', 'dashboard',
+                 'stats', 'memory_stats', 'memory_metrics'} else 'other')
+        counts[kind] += count
+    return counts if commands or known else dict.fromkeys(counts)
+
+
 def _numeric(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
 
@@ -70,6 +84,7 @@ def build(conn, *, local_usage=None):
     if not usage_records and local_usage is None:
         usage["source"] = "尚无可用请求计量"
     return {"scope": "本机", "calls": sum(current.values()) if calls_known else None,
+            "call_breakdown": call_breakdown(commands, known='command_calls' in tables and not legacy),
             "calls_source": "command_calls · 含 Hook 与重试" if commands else "历史 usage_log",
             "legacy_calls": sum(legacy.values()), "command_status": by_status,
             "commands": [{"name": k, "count": v} for k, v in sorted(current.items(), key=lambda r: (-r[1], r[0]))],

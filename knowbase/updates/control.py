@@ -100,7 +100,7 @@ def disable():
 
 def status():
     cfg=read(settings_path());home=Path(cfg.get('home',str(Path.home())))
-    return {'enabled':bool(cfg.get('enabled')),'source_url':cfg.get('source_url'),
+    return {'configured':settings_path().exists(),'enabled':bool(cfg.get('enabled')),'source_url':cfg.get('source_url'),
             'branch':cfg.get('branch'),'interval_seconds':cfg.get('interval_seconds'),
             'last_run':read(home/'.knowbase/updates/state.json'),
             'draining':(home/'.knowbase/runtime/update-drain.json').exists(),

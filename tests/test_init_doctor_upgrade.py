@@ -129,3 +129,30 @@ def test_doctor_checks_content_beyond_equal_row_counts(memory_repo,capsys):
     assert main(['doctor','--json'])==2
     output=capsys.readouterr().out
     assert 'content_parity' in output and 'mismatched_cards=1' in output
+
+
+def test_managed_codex_migration_preserves_custom_identity_and_options(tmp_path,monkeypatch):
+    monkeypatch.setattr(config,'CONFIG_PATH',tmp_path/'.knowbase/config.json')
+    path=tmp_path/'.codex/config.toml';path.parent.mkdir()
+    path.write_text('# keep unrelated settings\nmodel = "existing"\n[mcp_servers.knowbase]\n'
+        'command = '+json.dumps(integration.runtime_command(tmp_path))+'\n'
+        'args = ["-I", "-m", "knowbase", "serve"]\nenabled = true\nstartup_timeout_sec = 30\n'
+        '[mcp_servers.knowbase.env]\nKNOWBASE_AGENT_NAME = "codex-alice"\nCUSTOM_OPTION = "keep"\n')
+    integration.apply(integration.plan(['codex'],tmp_path,managed=True),tmp_path)
+    doc=integration._toml(path.read_bytes());server=doc['mcp_servers']['knowbase']
+    assert server['env']=={'KNOWBASE_AGENT_NAME':'codex-alice','CUSTOM_OPTION':'keep'}
+    assert server['args']==integration.serve_args(tmp_path,True)
+    assert server['enabled'] is True and server['startup_timeout_sec']==30
+    assert doc['model']=='existing' and path.read_text().startswith('# keep unrelated settings')
+    assert integration.plan(['codex'],tmp_path,managed=True)==[]
+
+
+def test_managed_codex_migration_rejects_another_knowledge_config(tmp_path,monkeypatch):
+    monkeypatch.setattr(config,'CONFIG_PATH',tmp_path/'.knowbase/config.json')
+    path=tmp_path/'.codex/config.toml';path.parent.mkdir()
+    path.write_text('[mcp_servers.knowbase]\ncommand = '+json.dumps(integration.runtime_command(tmp_path))+
+        '\nargs = ["-I", "-m", "knowbase", "serve"]\n[mcp_servers.knowbase.env]\nKNOWBASE_CONFIG = "/other/config.json"\n')
+    before=path.read_bytes()
+    with pytest.raises(integration.IntegrationError,match='ENV_CONFLICT'):
+        integration.plan(['codex'],tmp_path,managed=True)
+    assert path.read_bytes()==before

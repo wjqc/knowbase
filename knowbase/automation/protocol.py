@@ -408,7 +408,9 @@ def run_isolation_probe(runner, *, repo, scope: str, session_id: str | None = No
         checks["structured_output"] = False
         failures.append("submit_failed")
         return {"passed": False, "read_mode": read_mode, "checks": checks,
-                "failure_reasons": failures, "usage_source": usage_source}
+                "failure_reasons": failures, "usage_source": usage_source,
+                "submit_error": submit_result.get('error') if isinstance(submit_result,dict) else 'not_submitted',
+                "validation_errors": submit_result.get('errors',[]) if isinstance(submit_result,dict) else []}
     failed = submit_result.get("failed", 0)
     saved = (submit_result.get("saved_staging", 0) or 0) + (submit_result.get("saved_active", 0) or 0)
     checks["structured_output"] = failed == 0 and saved >= 1

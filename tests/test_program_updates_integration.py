@@ -128,8 +128,9 @@ def test_two_members_automatically_update_and_recover_without_host_reconnect():
         bootstrap=checkout/'scripts/bootstrap_auto_update.py'
         code="import sys,importlib.util;sys.path.insert(0,sys.argv.pop(1));from knowbase.updates import engine;engine.Engine.worker=lambda *a:None;engine.Engine.worker_running=lambda *a:False;s=importlib.util.spec_from_file_location('bootstrap_fixture',sys.argv.pop(1));m=importlib.util.module_from_spec(s);s.loader.exec_module(m);m.main(engine_module=engine)"
         client=clients[1]
-        run([client[2],'-I','-c',code,checkout,bootstrap,'--source','https://fixture.invalid/program.git'],
+        enrolled=run([client[2],'-I','-c',code,checkout,bootstrap,'--source','https://fixture.invalid/program.git'],
             env={**client[4],'GIT_CONFIG_GLOBAL':str(alias),'UV_OFFLINE':'1'},timeout=240)
+        assert 'operational_checks' in enrolled.stdout and 'awaiting_first_run' in enrolled.stdout
         assert json.loads((client[1]/'active.json').read_text())['version']=='0.2.0rc9'
         # Normal scheduled updates have no scheduler substitutions in the test harness.
         settings=client[0]/'.knowbase/updates.json';cfg=json.loads(settings.read_text())

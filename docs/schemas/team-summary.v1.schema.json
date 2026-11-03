@@ -40,7 +40,7 @@
           "required": ["command", "host", "transport", "status", "count"],
           "properties": {
             "command": {"type": "string", "pattern": "^[a-zA-Z0-9_.:-]{1,80}$"},
-            "host": {"enum": ["zcode", "claude-code", "trae", "cli", "unknown"]},
+            "host": {"enum": ["zcode", "claude-code", "trae", "codex", "cursor", "opencode", "cli", "unknown"]},
             "transport": {"enum": ["mcp", "hook", "cli"]},
             "status": {"enum": ["ok", "returned_error", "raised", "unknown"]},
             "count": {"type": "integer", "minimum": 0}
@@ -50,7 +50,7 @@
           "type": "object", "additionalProperties": false,
           "required": ["host", "source", "model", "requests", "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"],
           "properties": {
-            "host": {"enum": ["zcode", "claude-code", "trae", "unknown"]},
+            "host": {"enum": ["zcode", "claude-code", "trae", "codex", "cursor", "opencode", "unknown"]},
             "source": {"enum": ["request_log", "model_usage", "unknown"]},
             "model": {"type": "string", "maxLength": 160},
             "requests": {"$ref": "#/$defs/count"},

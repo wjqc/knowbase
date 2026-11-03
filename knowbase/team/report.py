@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import state
 from .contracts import COUNTS, TOKEN_FIELDS, stamp, utc
+from ..value.overview import call_breakdown
 
 
 def _sum(values):
@@ -22,6 +23,7 @@ def totals(snapshots):
             commands[c["command"]] += c["count"]
             hosts[c["host"]] += c["count"]
     result["commands"] = [{"name": k, "count": n} for k, n in commands.most_common()]
+    result["call_breakdown"] = call_breakdown(commands, known=bool(rows) and result['calls'] is not None)
     result["host_calls"] = dict(hosts)
     usage = [u for r in rows for u in r["metrics"]["usage"]]
     fields = {f: _sum(u[f] for u in usage) for f in TOKEN_FIELDS}
@@ -29,10 +31,10 @@ def totals(snapshots):
     result["usage"] = {"fields": fields, "requests": _sum(u["requests"] for u in usage),
                        "total": fields["input_tokens"] + fields["output_tokens"] if complete else None,
                        "complete": complete, "saved_tokens": None,
-                       "source": "已上报设备的请求观测 · ZCode/Trae 未采集来源单列缺口",
+                       "source": "已上报设备的请求观测 · 未采集来源单列缺口",
                        "savings_note": "暂无同模型、同任务配对测量，净节省待测",
                        "observed_hosts": sorted({u["host"] for u in usage}),
-                       "missing_hosts": sorted({"zcode", "claude-code", "trae"} - {u["host"] for u in usage})}
+                       "missing_hosts": sorted(({'zcode','claude-code','trae'} | (set(hosts)-{'cli','unknown'})) - {u["host"] for u in usage})}
     return result
 
 

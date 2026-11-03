@@ -30,6 +30,8 @@ python scripts/bootstrap_auto_update.py --source <PROGRAM_GIT_URL> --branch main
 python scripts/bootstrap_auto_update.py --source <PROGRAM_GIT_URL> --agents zcode --member-id <自己的成员ID> --label <自己的姓名>
 ```
 
+首次接入后会立即尝试统计同步，并输出升级、提炼、团队覆盖、宿主加载和知识同步的运行检查。待接入、关闭、待首次运行及失败均明确显示，安装成功不代表这些链路已全部验收。离线或健康检查告警保留具体状态，不撤销已完成的程序安装。
+
 不猜测身份、不替其他成员确认 enroll，不重新生成已存在的设备/统计身份。显式 `--publisher` 才配置发布角色。现有 config、Markdown、SQLite 和统计发送积压保留。默认要求 HTTPS/SSH；旧内网 HTTP 源须显式 `--allow-insecure-source`，不降低 Git 的 TLS 校验。
 
 已有**完整、发布态的 rc9 固定运行包**也可使用：
@@ -39,6 +41,16 @@ python scripts/bootstrap_auto_update.py --source <PROGRAM_GIT_URL> --agents zcod
 ```
 
 若安装态能与源上当前构建逐文件匹配，第一次定时检查建立来源记录；若安装态更旧、被手改或不一致，返回 `bootstrap_provenance_required`，使用上面的首次引导，不凭版本号猜测来源。
+
+## 同时接入后台提炼
+
+已有受信任执行器配置文件时，可在首次引导中追加：
+
+```bash
+python scripts/bootstrap_auto_update.py --source <PROGRAM_GIT_URL> --agents trae --member-id <自己的成员ID> --executor-config <本机执行器配置.json> --enable-automation --executor-scopes <明确授权的项目名> --trust-executor-command
+```
+
+引导先做隔离探针，通过后才启用指定scope。`--trust-executor-command`仅用于已授权的命令执行器；文本接口不需要此参数。未提供执行器时继续保留基础检索，检查结果显示自动提炼关闭，不把MCP连通当作自动成卡。旧客户端首次迁移仍需重连一次。
 
 ## 后续无人值守升级
 

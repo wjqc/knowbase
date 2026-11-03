@@ -287,14 +287,45 @@ def inspect(repo):
     try:
         from .automation.distillation import ready_executor
         cfg=config.load_config();selected,reason=ready_executor(cfg)
-        add('automation','warn' if cfg['automation'].get('enabled') and not selected else 'pass',
+        add('automation','pass' if selected else 'warn',
             json.dumps({'enabled':bool(cfg['automation'].get('enabled')),'ready':selected is not None,
+                        'state':'ready' if selected else reason,
                         'reason':reason,'configured_executors':len(cfg['automation'].get('executors',[])),
                         'allowed_scope_count':len(cfg['automation'].get('allowed_scopes',[]))},ensure_ascii=False))
     except Exception:add('automation','warn','invalid_automation_configuration')
     try:
         from .updates.control import status as update_status
-        state=update_status();bad=state.get('last_run',{}).get('state')=='deferred_or_failed'
-        add('program_updates','warn' if bad else 'pass',json.dumps(state,ensure_ascii=False))
+        state=update_status()
+        observed=state.get('last_run',{}).get('state')
+        readiness=('not_enrolled' if not state['configured'] else 'disabled' if not state['enabled'] else 'recovery_required' if state['draining'] or
+                   state['journal_phase'] in {'installing','migrating'} else
+                   'awaiting_first_run' if not observed else observed)
+        checked_at=state.get('last_run',{}).get('checked_at')
+        if readiness in {'updated','up_to_date'} and (checked_at is None or
+                datetime.now(timezone.utc).timestamp()-checked_at>max(3600,3*state['interval_seconds'])):
+            readiness='stale'
+        state['readiness']=readiness
+        add('program_updates','pass' if readiness in {'updated','up_to_date'} else 'warn',
+            json.dumps(state,ensure_ascii=False))
     except Exception:add('program_updates','warn','update_state_unavailable')
+    try:
+        cfg=config.load_config();team=cfg['team']
+        snapshot_path=Path(team['data_dir']).expanduser()/'snapshot.json'
+        snapshot=json.loads(snapshot_path.read_text(encoding='utf-8')) if snapshot_path.exists() else {}
+        coverage=snapshot.get('coverage',{})
+        generated=snapshot.get('generated_at')
+        age=(datetime.now(timezone.utc)-datetime.fromisoformat(generated.replace('Z','+00:00'))).total_seconds() if generated else None
+        members=[{'member_id':m['member_id'],'coverage':m['coverage'],'last_report':m['last_report']}
+                 for m in snapshot.get('members',[]) if m['current']]
+        ready=(team['enabled'] and age is not None and age <= max(3600,3*team['interval_seconds'])
+               and coverage.get('registered',0)>0 and coverage.get('received')==coverage['registered']
+               and not coverage.get('recovery_members') and not coverage.get('rejected')
+               and not snapshot.get('pending_files') and not snapshot.get('sync_errors')
+               and snapshot.get('last_sync',{}).get('ok') is True)
+        add('team_statistics','pass' if ready else 'warn',json.dumps(
+            {'enabled':team['enabled'],'ready':bool(ready),'snapshot_age_seconds':age,
+             'coverage':coverage,'members':members,'pending_files':snapshot.get('pending_files'),
+             'sync_errors':snapshot.get('sync_errors',[]),
+             'next_action':None if ready else 'team enroll / team sync；待接入成员须在各自电脑确认身份'},ensure_ascii=False))
+    except (OSError,ValueError,KeyError,TypeError):add('team_statistics','warn','team_state_unavailable')
     return checks

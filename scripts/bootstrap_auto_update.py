@@ -37,6 +37,7 @@ def _kill_tree(proc):
 def command(args,**kwargs):
     env={**os.environ,'GIT_TERMINAL_PROMPT':'0','GCM_INTERACTIVE':'Never',**kwargs.pop('env',{})}
     retries=int(kwargs.pop('retries',0))
+    check=kwargs.pop('check',True)
     timeout=kwargs.pop('timeout',None)
     group={'start_new_session':True} if os.name!='nt' else {'creationflags':0x08000000}
     while True:
@@ -49,7 +50,7 @@ def command(args,**kwargs):
             try:out,_=proc.communicate(timeout=5)
             except subprocess.TimeoutExpired:out=b''
             raise RuntimeError('bootstrap step timed out; existing backup/configuration retained')
-        if not proc.returncode:break
+        if not proc.returncode or not check:break
         # Windows 上杀毒/索引或存活的 bridge/Hook 进程可能短暂锁住 venv 目标文件；退避后重试。
         if retries<=0:raise RuntimeError('bootstrap step failed; existing backup/configuration retained')
         retries-=1;time.sleep(2)
@@ -59,7 +60,13 @@ def command(args,**kwargs):
 def main(engine_module=None):
     parser=argparse.ArgumentParser();parser.add_argument('--source',required=True);parser.add_argument('--branch',default='main')
     parser.add_argument('--agents',default='');parser.add_argument('--member-id');parser.add_argument('--label');parser.add_argument('--publisher',action='store_true')
+    parser.add_argument('--executor-config');parser.add_argument('--executor-scopes',default='')
+    parser.add_argument('--enable-automation',action='store_true');parser.add_argument('--trust-executor-command',action='store_true')
     parser.add_argument('--allow-insecure-source',action='store_true');args=parser.parse_args()
+    if args.enable_automation and not args.executor_scopes:
+        parser.error('--enable-automation requires --executor-scopes')
+    if args.enable_automation and not args.executor_config:
+        parser.error('--enable-automation requires --executor-config')
     if sys.version_info<(3,10):raise RuntimeError('Python >=3.10 required')
     uv=shutil.which('uv')
     if not uv or not shutil.which('git'):raise RuntimeError('Git and uv must be installed once')
@@ -112,6 +119,9 @@ def main(engine_module=None):
                 init=[python,'-I','-m','knowbase','init','--non-interactive','--auto-update','--update-source',args.source,'--update-branch',args.branch]
                 if args.agents:init+=['--agents',args.agents]
                 if args.allow_insecure_source:init+=['--allow-insecure-update-source']
+                if args.executor_config:init+=['--executor-config',args.executor_config,'--verify-executor']
+                if args.enable_automation:init+=['--enable-automation','--executor-scopes',args.executor_scopes]
+                if args.trust_executor_command:init+=['--trust-executor-command']
                 profiles_started=True
                 command(init,env={'KNOWBASE_MANAGED_UPDATE':'1'},timeout=120)
                 engine.app=module.read(cp);engine.repo=Path(os.path.expanduser(engine.app['repo_path'])).resolve()
@@ -143,6 +153,11 @@ def main(engine_module=None):
                 if running:engine.worker(True)
         if args.member_id:
             command([python,'-I','-m','knowbase','team','enroll','--member-id',args.member_id,'--label',args.label or args.member_id]+(['--publisher'] if args.publisher else []),timeout=30)
+        if module.read(cp).get('team',{}).get('enabled'):
+            print(command([python,'-I','-m','knowbase','team','sync'],timeout=180,check=False).decode('utf-8'))
+        health=json.loads(command([python,'-I','-m','knowbase','doctor','--json'],timeout=60,check=False))
+        print(json.dumps({'operational_checks':[c for c in health if c['name'] in
+            {'automation','program_updates','team_statistics','session_states','sync_confirmed'}]},ensure_ascii=False))
     print('Initial enrollment complete. Start a new/reconnected Agent session once; subsequent program updates are scheduled automatically.')
 
 

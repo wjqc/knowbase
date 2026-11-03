@@ -5,7 +5,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-HOSTS = {"zcode", "claude-code", "trae", "unknown"}
+HOSTS = {"zcode", "claude-code", "trae", "codex", "cursor", "opencode", "unknown"}
 COUNTS = {"calls", "legacy_calls", "known_searches", "hit_searches", "missing_searches",
           "updates", "adoption_receipts", "helpful_receipts", "negative_receipts", "promotions", "retirements"}
 TOKEN_FIELDS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")

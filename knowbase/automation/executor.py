@@ -320,10 +320,24 @@ class CommandExecutorRunner:
         "segment_ids、evidence_refs=[{segment_id, text_hash}]；"
         "segments 清单给出全部片段的 segment_id/text_hash，"
         "evidence_refs 必须引用其中实际读取的片段；"
-        "bizrule 候选还需 provenance 与 rule_context；body 必须为八项结构对象"
+        "bizrule 候选还需 provenance 与 rule_context 对象，后者必填 business_object、trigger、"
+        "required_or_forbidden、exceptions、applicable_version（未知项明确标注未知），"
+        "business_confirmation 只能为 explicit_source|code_inferred|unconfirmed，"
+        "implementation_status 只能为 not_implemented|implemented_unverified|verified|unknown。"
+        '这7个字段都必须放在 rule_context 内，不能放到候选顶层。完整结构示例：'
+        '{"business_object":"业务对象","trigger":"触发条件","required_or_forbidden":"约束",'
+        '"exceptions":"例外或未知","applicable_version":"未知",'
+        '"business_confirmation":"unconfirmed","implementation_status":"unknown"}。'
+        "出处只能引用材料，不得把推断当作已确认规则；无明确出处时用 action=review。"
+        "key_evidence 中逐字引用材料中的最终规则和例外原句，不用概述替代，"
+        "不要引用已被后文更正的初步结论。"
+        "body 必须为八项结构对象"
         "（conclusion/problem/applicable_when/not_applicable_when/actionable_steps/"
         "key_evidence/verification/unknown_items）。无价值时 candidates 为空数组，"
-        "并给出 segment_results（每项 decision 为 skipped 或 no_value 并附 reason）。"
+        '并给出 segment_results。每项必填 segment_id 和 decision；decision 只能为 '
+        'distilled、skipped、no_value 三个字符串之一。提炼成候选的片段必须标为 distilled，'
+        '并由 candidates[].segment_ids 引用；skipped/no_value 必须附 reason 且不能被候选引用。'
+        '示例：{"segment_id":"seg-0000","decision":"distilled"}。'
         "如材料末尾含RELATED_KNOWLEDGE_DATA，先判断是否与已有卡重复；相同知识用link_existing，"
         "补充用update并附期望版本，独立知识用create。每条候选附duplicate_evaluation={"
         "snapshot_hash:similarity_snapshot,evaluated_cards:[{id,content_revision}],rationale:判断依据}。"

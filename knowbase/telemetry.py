@@ -25,9 +25,10 @@ _INSTALLATION_CACHE: dict[str, str] = {}
 
 def host_name(value):
     value = str(value or "unknown").lower()
-    if value in {"claude", "claude-code", "claudecode"}:
-        return "claude-code"
-    return value if value in {"zcode", "trae", "cli"} else "unknown"
+    for name in ('claude-code','claudecode','claude','opencode','cursor','codex','zcode','trae','cli'):
+        if value == name or value.startswith(name+'-'):
+            return 'claude-code' if name in {'claude','claudecode'} else name
+    return "unknown"
 
 
 def _installation_id(path) -> str:

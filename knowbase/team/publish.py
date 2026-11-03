@@ -6,6 +6,7 @@ from collections import Counter
 import yaml
 
 from .. import store
+from ..value.overview import call_breakdown
 from .transport import TransportError
 
 START = "<!-- knowbase:team-stats:start"
@@ -45,20 +46,24 @@ def _fmt(value):
 
 def markdown(snapshot):
     c = snapshot["coverage"]
+    breakdown = call_breakdown({x['name']:x['count'] for x in snapshot['commands']}, known=snapshot['calls'] is not None)
     lines = ["### 团队知识库使用统计", "",
              f"更新：{snapshot['generated_at']} · 已收到 **{c['received']}/{c['registered']}** 名已登记成员。",
              "仅统计已接入设备的观测数据；未登记成员不在覆盖范围，当日数据持续补报。", "",
-             f"调用 **{_fmt(snapshot['calls'])}** · 命中 **{_fmt(snapshot['hit_searches'])}** / 已知检索 {_fmt(snapshot['known_searches'])} · 更新 **{_fmt(snapshot['updates'])}**。",
+             f"知识工具调用 **{_fmt(breakdown['knowledge'])}** · Hook 调用 **{_fmt(breakdown['hooks'])}** · 维护调用 **{_fmt(breakdown['maintenance'])}** · 其他调用 **{_fmt(breakdown['other'])}**。",
+             f"全部命令观测 {_fmt(snapshot['calls'])} 次（含重试，不代表知识复用）；命中 {_fmt(snapshot['hit_searches'])} / 已知检索 {_fmt(snapshot['known_searches'])} · 更新调用 {_fmt(snapshot['updates'])}。",
              f"共享知识 **{_fmt(snapshot['knowledge_total'])}** 张（固定 revision：{(snapshot.get('inventory_revision') or '未知')[:12]}）。",
              f"统计窗口：{c['since'] or '未知'} 至 {c['watermark'] or '未知'}；库存按当前共享版本计一次。", "",
-             "| 成员 | 上报状态 | 调用 | 命中 | 更新 | 请求 Token | 最后上报（UTC） |",
-             "| --- | --- | ---: | ---: | ---: | ---: | --- |"]
+             "| 成员 | 上报状态 | 知识工具调用 | Hook 调用 | 命中 | 更新 | 请求 Token | 最后上报（UTC） |",
+             "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |"]
     names = {"received": "已收到", "partial": "部分来源", "stale": "已过期", "missing": "未上报", "pending": "待接入", "recovery_required": "恢复待核对"}
     for m in snapshot["members"]:
         t = m["totals"]
         label = m["label"] + ("（已退出，保留历史）" if not m["current"] else "")
-        lines.append(f"| {label} | {names[m['coverage']]} | {_fmt(t['calls'])} | {_fmt(t['hit_searches'])} | {_fmt(t['updates'])} | {_fmt(t['usage']['total'])} | {m['last_report'] or '未上报'} |")
+        b = call_breakdown({x['name']:x['count'] for x in t['commands']}, known=t['calls'] is not None)
+        lines.append(f"| {label} | {names[m['coverage']]} | {_fmt(b['knowledge'])} | {_fmt(b['hooks'])} | {_fmt(t['hit_searches'])} | {_fmt(t['updates'])} | {_fmt(t['usage']['total'])} | {m['last_report'] or '未上报'} |")
     lines += ["", "历史 usage_log 与新调用不相加；请求 Token 仅为已采集来源。ZCode/Trae 用量未采集，Token 净节省待配对测量。",
+              "知识工具调用按 memory_search/read/context/save/update/use/feedback 的尝试计数；维护、Hook 单列。待接入或未上报不能据此判定 MCP 断连。",
               f"自动晋升 {_fmt(snapshot['evolution']['promoted'])} 次 · 自动失效 {_fmt(snapshot['evolution']['retired'])} 次；回执次数不等同于独立受益任务数。", ""]
     return "\n".join(lines)
 
