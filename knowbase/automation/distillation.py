@@ -240,7 +240,11 @@ def _one(repo, conn, job_id, options, policy, guard):
         submitted = materialize.submit(repo,conn,job_id,claim['batch_id'],claim['lease_token'],request_id,
                                         candidates,result['segment_results'],claim['fencing_token'])
         if submitted.get('error') or submitted.get('failed'):
-            conn.execute('UPDATE executor_runs SET response_json=NULL WHERE run_id=?',(run_id,));conn.commit()
+            # 失败详情落账供诊断（只存验证器返回的错误结构，不再丢弃后无从排查）。
+            detail = json.dumps({k: submitted.get(k) for k in ('error', 'failed') if submitted.get(k)},
+                                ensure_ascii=False, default=str)
+            conn.execute('UPDATE executor_runs SET response_json=NULL,result_json=? WHERE run_id=?',
+                         (detail[:65536], run_id));conn.commit()
             raise ExecutorFailure('candidate_validation_failed')
         for item in submitted.get('results',[]):
             if item.get('memory_id'):
