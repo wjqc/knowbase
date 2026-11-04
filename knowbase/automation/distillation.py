@@ -18,6 +18,54 @@ def now():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
 
+def _coerce(value, want):
+    """字符串化的结构 → 真结构：先 json.loads，失败再按 Python repr 解（模型常输出单引号 repr）。"""
+    if not isinstance(value, str) or not value.strip():
+        return value
+    text = value.strip()
+    for parser in (json.loads, lambda s: __import__('ast').literal_eval(s)):
+        try:
+            parsed = parser(text)
+        except (ValueError, SyntaxError, TypeError):
+            continue
+        if isinstance(parsed, want):
+            return parsed
+    return value
+
+
+def _normalize_candidates(candidates, conn, job_id):
+    """执行器输出的保守规范化（仅自动化路径，不影响 Agent 提交协议的严格性）。
+
+    真实网关模型（推理型）常把嵌套结构输出成字符串化的 Python repr（单引号列表/
+    字典），且抄写 text_hash 不忠实。这里做两类修复：
+    1. 已知结构字段的 str→list/dict 强制转换（body/segment_ids/evidence_refs/
+       code_refs/relations/rule_context）；转换不了保持原样，交给验证器拒绝。
+    2. evidence_refs 的 text_hash 按 segment_id 从权威 manifest 回填（提示词给的
+       就是 manifest 值；segment_id 有效性仍由验证器强制）。
+    """
+    if not isinstance(candidates, list):
+        return candidates
+    hashes = {m.get('segment_id'): m.get('text_hash')
+              for m in materials.manifest_for_job(conn, job_id)}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        candidate['body'] = _coerce(candidate.get('body'), dict)
+        candidate['segment_ids'] = _coerce(candidate.get('segment_ids'), list)
+        candidate['evidence_refs'] = _coerce(candidate.get('evidence_refs'), list)
+        candidate['code_refs'] = _coerce(candidate.get('code_refs'), list)
+        candidate['relations'] = _coerce(candidate.get('relations'), list)
+        candidate['rule_context'] = _coerce(candidate.get('rule_context'), dict)
+        refs = candidate.get('evidence_refs')
+        if isinstance(refs, list):
+            for ref in refs:
+                if isinstance(ref, dict) and ref.get('segment_id') in hashes:
+                    known = hashes[ref['segment_id']]
+                    if known and ref.get('text_hash') != known:
+                        ref['text_hash'] = known
+    return candidates
+
+
 def prepare_due(repo, conn):
     """Repair a crash between durable enqueue and manifest preparation, without inference."""
     rows=conn.execute("SELECT job_id,state FROM jobs WHERE kind IN ('capture','extract') "
@@ -186,6 +234,7 @@ def _one(repo, conn, job_id, options, policy, guard):
         if lost.is_set() or not guard() or not receipts.verified(options) or not _owned(conn,job_id,claim):
             raise ExecutorFailure('authority_changed')
         candidates = json.loads(json.dumps(result['candidates']))
+        candidates = _normalize_candidates(candidates, conn, job_id)
         for candidate in candidates:
             candidate['candidate_key'] = 'auto-'+digest([manifest['batch_segment_ids'],candidate.get('candidate_key')])[:32]
         submitted = materialize.submit(repo,conn,job_id,claim['batch_id'],claim['lease_token'],request_id,

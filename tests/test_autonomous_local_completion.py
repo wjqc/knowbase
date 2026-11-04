@@ -224,3 +224,24 @@ def test_worker_recognizes_batch_failure_lists():
 def test_windows_mcp_uses_same_fixed_scripts_runtime(tmp_path):
     from knowbase.integration import runtime_command
     assert runtime_command(tmp_path,platform='win32')==str(tmp_path/'.knowbase/runtime/venv/Scripts/python.exe')
+
+
+def test_distillation_candidate_normalization(monkeypatch):
+    """执行器输出规范化：字符串化结构（Python repr）转真结构；text_hash 从权威 manifest 回填。"""
+    from knowbase.automation import distillation
+    monkeypatch.setattr(distillation.materials, 'manifest_for_job',
+                        lambda conn, job_id: [{'segment_id': 's1', 'text_hash': 'h1'},
+                                              {'segment_id': 's2', 'text_hash': 'h2'}])
+    raw = [{'candidate_key': 'k', 'title': 't', 'type': 'pitfall', 'scope': 'orders',
+            'segment_ids': "['s1', 's2']",                      # 单引号 repr 字符串
+            'evidence_refs': "[{'segment_id': 's1', 'text_hash': 'unknown'}]",  # 哈希抄错
+            'body': '{"结论": "x", "适用条件": "y"}',            # JSON 字符串
+            'code_refs': '[]', 'relations': '[]'}]
+    out = distillation._normalize_candidates(raw, None, 'J-x')
+    c = out[0]
+    assert c['segment_ids'] == ['s1', 's2']                     # 转成真列表
+    assert c['body'] == {'结论': 'x', '适用条件': 'y'}            # 转成真对象
+    assert c['evidence_refs'] == [{'segment_id': 's1', 'text_hash': 'h1'}]  # 哈希回填为 manifest 值
+    # 转换不了的垃圾保持原样，交给验证器拒绝（不静默丢弃也不放行）
+    junk = distillation._normalize_candidates([{'segment_ids': 'not-a-list('}], None, 'J-x')
+    assert junk[0]['segment_ids'] == 'not-a-list('
