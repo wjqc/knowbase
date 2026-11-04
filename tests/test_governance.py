@@ -38,7 +38,9 @@ assert main(['promote',mid])==0
 assert hooks.user_prompt('AlphaUnique 工程部署')==''  # once 未验证不注入（默认 verified 开关）
 assert main(['verify',mid])==0
 os.environ['CLAUDE_PROJECT_DIR']='/tmp/unrelated'
-assert '未配置 scope_map' in hooks.user_prompt('AlphaUnique 工程部署')
+# 2026-11-04 裁决：未映射不再整场跳过——自动绑定 unrelated scope 后检索该 scope+global；
+# demo 卡不在其中 → 静默无注入（既无旧跳过文案，也无跨 scope 泄漏）
+assert hooks.user_prompt('AlphaUnique 工程部署')==''
 os.environ['CLAUDE_PROJECT_DIR']='/tmp/demo'
 assert mid in hooks.user_prompt('AlphaUnique 工程部署')
 read_impl(mid);feedback_impl(mid,'helpful')

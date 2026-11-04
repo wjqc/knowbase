@@ -12,7 +12,9 @@
 后台只补充未确认的候选元数据，不产生已确认绑定。
 """
 
+import hashlib
 import os
+import re
 import sqlite3
 import subprocess
 from datetime import datetime, timezone
@@ -173,14 +175,16 @@ def resolve_binding(conn, path, cfg: dict | None = None) -> dict:
             "path": str(norm)}
 
 
-def record_binding(conn, path, scope: str, source: str, confirmed: bool) -> dict:
+def record_binding(conn, path, scope: str, source: str, confirmed: bool, ident: dict | None = None) -> dict:
     """写入一条绑定（按规范化路径 upsert）；后台补充时 confirmed=False。
 
     只记录路径与 Git 身份元数据，不读任何项目知识。调用方负责提交事务
     （本函数只执行语句不 commit，与调用方事务保持一致）。
+    ident 可传入已取得的 git_identity 结果，避免调用方重复起 git 子进程。
     """
     norm = normalize_path(path)
-    ident = git_identity(path) or {}
+    if ident is None:
+        ident = git_identity(path) or {}
     now = _now()
     conn.execute(
         "INSERT INTO project_bindings(project_path,scope,git_toplevel,git_remote,"
@@ -243,3 +247,88 @@ def list_bindings(conn) -> list[dict]:
     return [{"project_path": p, "scope": s, "git_toplevel": t, "git_remote": r,
              "source": src, "confirmed": bool(c), "created_at": ca, "updated_at": u}
             for p, s, t, r, src, c, ca, u in rows]
+
+
+# ---------- 自动绑定（2026-11-04 裁决：未映射项目自动建立 scope，检索/采集链路不再整场跳过） ----------
+
+
+def _sanitize_scope(name: str) -> str:
+    """任意 repo/目录名 → 合法 scope：小写、[a-z0-9-]、压缩连续分隔、上限 64。"""
+    text = re.sub(r"[^a-z0-9]+", "-", str(name).lower()).strip("-")
+    return text[:64].strip("-") or "project"
+
+
+def _remote_segments(remote: str) -> list[str]:
+    """remote URL → 有效段：去协议头后按 '/'、':' 切段。
+
+    http(s) 带端口与 scp 形式（git@host:group/repo.git）均成立；host/user 段
+    天然参与切段，只取末两段作 basename/parent，不受端口段污染。
+    """
+    body = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", str(remote).strip())
+    return [p for p in re.split(r"[/:]+", body) if p]
+
+
+def _name_occupied(conn, name: str, remote: str) -> bool:
+    """派生名是否已被他属占用：其他 remote 的已确认绑定，或库内同名 scope 的卡。
+
+    同 remote 已绑此名不算占用（同一项目的另一处 checkout）。
+    """
+    own = conn.execute(
+        "SELECT 1 FROM project_bindings WHERE confirmed=1 AND scope=? AND git_remote=? LIMIT 1",
+        (name, remote)).fetchone()
+    if own:
+        return False
+    if conn.execute("SELECT 1 FROM project_bindings WHERE confirmed=1 AND scope=? LIMIT 1",
+                    (name,)).fetchone():
+        return True
+    return conn.execute(
+        "SELECT 1 FROM meta WHERE scope=? AND staging=0 LIMIT 1", (name,)).fetchone() is not None
+
+
+def _derive_auto_name(conn, remote: str) -> tuple[str, str]:
+    """remote → scope 名，三级防同名融合：basename > 父目录前缀 > 哈希后缀。"""
+    segs = _remote_segments(remote)
+    base = (segs[-1] if segs else "").removesuffix(".git")
+    name = _sanitize_scope(base)
+    if not _name_occupied(conn, name, remote):
+        return name, "basename"
+    if len(segs) >= 2:
+        parent = segs[-2].removesuffix(".git")
+        candidate = _sanitize_scope(f"{parent}-{base}")
+        if candidate != name and not _name_occupied(conn, candidate, remote):
+            return candidate, "parent_prefixed"
+    suffix = hashlib.sha1(remote.encode("utf-8")).hexdigest()[:6]
+    return f"{name}-{suffix}", "hash_suffixed"
+
+
+def auto_bind(conn, path) -> dict:
+    """未解析路径的自动绑定。
+
+    git 仓库以 remote 派生 scope 名（跨机稳定：同仓库不同 checkout/不同机器落同一
+    scope；同名不同库加父目录或哈希前缀防融合）；无 remote 的 git 仓库与非 git
+    目录按规范化绝对路径绑定（本机私有，不跨机融合）。绑定写 project_bindings
+    （confirmed=1），config 的 scope_map 不被触碰——显式映射优先级仍最高。
+
+    首次绑定付出 2 次 git 子进程（约几十毫秒），此后路径祖先匹配纯 DB 读。
+    任何失败返回 scope_unresolved，由调用方回退 global，不阻断检索。
+    """
+    norm = normalize_path(path)
+    ident = git_identity(path) or {}
+    remote = ident.get("remote")
+    bind_path = ident.get("toplevel") or str(norm)
+    source = "auto_remote" if remote else "auto_path"
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if remote:
+            name, how = _derive_auto_name(conn, remote)
+        else:
+            name, how = _sanitize_scope(Path(bind_path).name), "path_basename"
+        record_binding(conn, bind_path, name, source, True, ident=ident)
+        conn.commit()
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        return {"status": "scope_unresolved", "scope": None, "source": "",
+                "reason": "bind_failed", "path": str(norm)}
+    return {"status": "resolved", "scope": name, "source": source, "reason": "",
+            "path": str(norm), "detail": f"auto:{how}"}

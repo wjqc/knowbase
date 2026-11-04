@@ -43,7 +43,15 @@ def session_start() -> str:
 
 
 def _infer_scope(conn, project_dir=None) -> str | None:
-    """从 hook 环境变量的项目目录推断当前项目 scope（目录名与 scope 精确匹配，未知项目不退化为全库）。"""
+    """推断当前项目 scope。解析链（2026-11-04 裁决：未映射自动绑定，不再整场跳过）：
+
+    1. config scope_map 显式映射（含 bare-name 别名，原有行为）；
+    2. DB 已确认绑定（路径祖先最具体 / git 身份：toplevel 或 remote 相同即同项目）；
+    3. 目录名恰等于已有 scope 名（精确等值，无融合风险，原有行为）；
+    4. 自动绑定（git remote 派生 scope 名，同名不同库加父目录/哈希前缀防融合；
+       非 git 目录按绝对路径绑定，本机私有）；
+    5. 全部未命中返回 None，调用方回退 global。
+    """
     project_dir = project_dir or os.environ.get("CLAUDE_PROJECT_DIR") or os.environ.get("ZCODE_PROJECT_DIR")
     if not project_dir:
         return None
@@ -51,13 +59,23 @@ def _infer_scope(conn, project_dir=None) -> str | None:
     mapped = config.mapped_scope(project_dir)
     if mapped:
         return str(mapped)
+    from . import scope_binding
+    result = scope_binding.resolve_binding(conn, resolved)
+    if result.get("status") == "resolved":
+        return result["scope"]
     name = Path(resolved).name.lower()
-    if not name:
-        return None
-    scopes = [r[0] for r in conn.execute(
-        "SELECT DISTINCT scope FROM meta WHERE staging = 0 AND scope != 'global'")]
-    matches = [s for s in scopes if s and s.lower() == name]
-    return max(matches, key=len) if matches else None
+    if name:
+        scopes = [r[0] for r in conn.execute(
+            "SELECT DISTINCT scope FROM meta WHERE staging = 0 AND scope != 'global'")]
+        matches = [s for s in scopes if s and s.lower() == name]
+        if matches:
+            return max(matches, key=len)
+    if result.get("reason") != "ambiguous":
+        # 歧义（多条同等具体的已确认绑定指向不同 scope）不自动绑，留人工裁决。
+        bound = scope_binding.auto_bind(conn, resolved)
+        if bound.get("status") == "resolved":
+            return bound["scope"]
+    return None
 
 
 def has_project_context() -> bool:
@@ -126,10 +144,10 @@ def user_prompt(prompt: str, project_dir=None, delivery_info=None) -> str:
                                 query_class=f"skipped:{hy['reason']}", raw_len=len(prompt))
             return ""
         inferred = _infer_scope(conn, project_dir)
-        if (project_dir or has_project_context()) and inferred is None:
-            return "[knowbase] 当前项目未配置 scope_map，已跳过自动检索，避免跨项目召回。"
+        # 2026-11-04 裁决：未映射项目由 _infer_scope 自动绑定；彻底无法解析时回退
+        # global（search 的 scope 过滤恒含 global 卡），不再整场跳过。
         scope = inferred or "global"
-        diagnostics = {}
+        diagnostics = {"scope_resolved": bool(inferred)}
         hits = index.search(conn, hy["query"], scope=scope, limit=100, origin="hook_prompt", diagnostics=diagnostics)
         min_conf = hooks_cfg.get("inject_min_confidence", "verified")
         # 矛盾知识只供主动调查，不自动建议采用。

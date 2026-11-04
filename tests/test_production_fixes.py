@@ -136,12 +136,20 @@ def test_push_is_only_scheduled_after_repo_lock_is_released(isolated_repo, monke
 
 
 def test_project_context_requires_resolvable_scope(isolated_repo, monkeypatch, tmp_path):
+    """2026-11-04 裁决：未映射项目不再报错阻断——自动绑定派生 scope 后正常检索（恒含 global）。"""
+    from knowbase import index as kb_index
     project = tmp_path / "unknown-project"
     project.mkdir()
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
     result = search_impl("任意查询")
-    assert result.startswith("错误：")
-    assert "scope" in result
+    assert not result.startswith("错误：")
+    conn = kb_index.connect(config.repo_path())
+    try:
+        bindings = conn.execute(
+            "SELECT scope, source FROM project_bindings WHERE confirmed=1").fetchall()
+    finally:
+        conn.close()
+    assert bindings == [("unknown-project", "auto_path")]
 
 
 def test_hook_uses_unified_search_for_chinese_prompt(isolated_repo, monkeypatch):

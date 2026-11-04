@@ -56,9 +56,11 @@ def test_formal_hook_keeps_har_and_respects_exact_total_budget(memory_repo, monk
 
 
 def test_formal_hook_uses_stdin_project_instead_of_global_fallback(memory_repo, tmp_path, monkeypatch, capsys):
-    mid = seed(memory_repo)
+    """2026-11-04 裁决后语义：未知 cwd 自动绑定派生 scope 并与 global 共享（global 卡可召回）；
+    但其他项目的非 global 卡绝不能经未知项目泄漏进来。"""
+    other = seed(memory_repo, "HAR 压缩排查（orders 项目）", scope="orders")
     monkeypatch.setattr(hooks.sys,'stdin',io.StringIO(json.dumps({'prompt':'HAR','cwd':str(tmp_path/'unknown')})))
-    hooks.cmd_user_prompt('trae');assert mid not in capsys.readouterr().out
+    hooks.cmd_user_prompt('trae');assert other not in capsys.readouterr().out
 
 
 def test_error_code_gate_rejects_similar_code_and_long_bypass(memory_repo):
