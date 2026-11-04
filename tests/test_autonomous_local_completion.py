@@ -90,6 +90,28 @@ def test_intranet_text_model_echo_normalization_boundary():
     finally:s3.shutdown();s3.server_close()
 
 
+def test_intranet_text_reasoning_model_caps():
+    """推理型模型上限：max_tokens 容纳思考+正文（钳 32768），超时对齐命令执行器（钳 300s）。"""
+    seen=[]
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self,*a):pass
+        def do_POST(self):
+            body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            seen.append(body)
+            raw=json.dumps({'model':'fixture','choices':[{'message':{'content':'{"candidates":[],"segment_results":[]}'}}]}).encode()
+            self.send_response(200);self.end_headers();self.wfile.write(raw)
+    server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+    threading.Thread(target=server.serve_forever,daemon=True).start()
+    try:
+        runner=IntranetTextRunner({'kind':'intranet_text','protocol':'openai_chat_completions',
+            'endpoint':f'http://127.0.0.1:{server.server_port}/v1','model':'fixture',
+            'allowed_hosts':['127.0.0.1'],'auth_kind':'none','allow_insecure_http':True,
+            'max_output_tokens':999999,'timeout_seconds':9999})
+        runner.run_text(DistillationRequest('j','orders','j'),'text',[])
+        assert seen[0]['max_tokens']==32768
+    finally:server.shutdown();server.server_close()
+
+
 def test_persistent_scheduler_descriptors_do_not_kill_worker_after_five_minutes(memory_repo,tmp_path,monkeypatch):
     from test_team_worker import prepare
     from knowbase.team import worker
