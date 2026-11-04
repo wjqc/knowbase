@@ -318,6 +318,9 @@ class CommandExecutorRunner:
         '{"candidates": [...], "segment_results": [...]}。'
         "每条候选必填 candidate_key/type/title/scope/action（create|update|link_existing|review）、"
         "segment_ids、evidence_refs=[{segment_id, text_hash}]；"
+        "type 只能为 pitfall|standard|decision|workflow|preference|reference|bizrule 之一"
+        "（不存在 knowledge 等其他类型）；跨 scope 或 global 已有卡的补充判定用 link_existing"
+        "（目标允许本 scope 或 global），update 仅限同 scope 目标且必须附 expected_content_revision；"
         "segments 清单给出全部片段的 segment_id/text_hash，"
         "evidence_refs 必须引用其中实际读取的片段；"
         "bizrule 候选还需 provenance 与 rule_context 对象，后者必填 business_object、trigger、"
