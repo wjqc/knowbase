@@ -1105,3 +1105,10 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - 与裁决的一处有意偏差：目录名精确等值优先于自动绑定（而非裁决原文的反之）——保住 ~/work/knowbase→knowbase 既有行为；精确等值本身零融合风险。
 - 回归：新增 tests/test_scope_autobind.py 13 项（同名双库/worktree .git 文件/无 remote/非 git/优先级/歧义不自动绑/sanitize/URL 形态/hook 集成×2）；test_governance、test_local_retrieval_upgrade、test_production_fixes 三处旧策略断言按新契约改写（保留跨项目不泄漏本义）。全量 pytest 1097 passed 1 skipped + 脚本式 92 断言 + golden 12/12。测试环境注意：宿主 CLAUDE_PROJECT_DIR 泄漏会假失败，须 -u 清除。
 - 待部署验证：原地安装后 hook 冒烟（未映射目录自动绑定+global 卡召回）；MCP serve 旧连接需重连才走新解析链。
+
+## 2026-11-04 内网文本执行器 intranet-deepseek 上线（提炼不再依赖外网/ChatGPT）
+- 背景：chatgpt.com 经代理超时致 codex 执行器持续 process_exited（11-03 rate_limited 同源）；Trae-only 同事机器本无可行执行器。用户提供同网关 chat 模型 AI/deekseek-v4.1-flash，端点/凭据与向量模型同源。
+- 网关实测：/models 确认模型名确为 "deekseek" 拼写；chat 回显归一化为 "deepseek-v4.1-flash"（去 AI/ 前缀+纠正拼写），JSON mode 与 usage 均可用（推理型，含 reasoning_tokens）。
+- 代码修复：text.py 模型回显硬校验改选择式 response_model（与 embedding provider 同语义：网关只回别名时声明期望回显）；executor FIELDS 白名单放行 response_model。回归 test_autonomous_local_completion 新增归一化三边界（声明放行/未声明 mismatch/一致无需声明）。
+- 上线：executor configure → 隔离探针 8/8 全绿（结构化输出/规则例外/注入拒绝/读回，探针卡 B-7acac3972c70）→ enable（scopes 沿用 knowbase/cmi/cmi-sales-assistant，selected_executor 从 codex 切至 intranet-deepseek，codex 保留配置可回切）。当日字符预算已被 codex 耗尽（500000/512000），次日重置后自动开工。
+- 配置模板（同事机器可复制，仅 secret_ref 路径各机自建）：~/.knowbase/intranet-executor.json（0600，无明文密钥）。

@@ -8,8 +8,8 @@ from . import receipts
 
 FIELDS = {'kind','executor_id','command','noninteractive_argv','version_arg','timeout_seconds',
           'auth_check','endpoint','protocol','allowed_hosts','allow_insecure_http','ca_bundle',
-          'model','secret_ref','auth_kind','usage_source','bounded_tools','structured_output',
-          'mcp_v2','max_output_tokens'}
+          'model','response_model','secret_ref','auth_kind','usage_source','bounded_tools',
+          'structured_output','mcp_v2','max_output_tokens'}
 
 
 def read_options(path):

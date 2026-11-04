@@ -28,7 +28,10 @@ class IntranetTextRunner:
                 'response_format': {'type': 'json_object'},
                 'max_tokens': max(256, min(8192, int(self.options.get('max_output_tokens', 4096))))},
                 deadline=time.monotonic()+seconds, timeout_budget=seconds)
-            if data.get('model') and data['model'] != self.transport.model:
+            # 网关常对模型名归一化回显（如去命名空间前缀/纠正别名），与请求名永不相等。
+            # response_model 是选择式的期望回显（与 embedding provider 同语义）；缺省退回请求名。
+            expected_model = self.options.get('response_model') or self.transport.model
+            if data.get('model') and data['model'] != expected_model:
                 raise ExecutorFailure('model_mismatch')
             result = json.loads(data['choices'][0]['message']['content'])
             if not isinstance(result, dict): raise ValueError()

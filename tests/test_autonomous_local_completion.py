@@ -51,6 +51,45 @@ def test_intranet_text_uses_explicit_chat_protocol_on_local_fixture_only():
     finally:server.shutdown();server.server_close();thread.join()
 
 
+def test_intranet_text_model_echo_normalization_boundary():
+    """网关对模型名归一化回显（去命名空间/纠正别名）：response_model 选择式期望回显放行，
+    无 response_model 且回显不同必须 model_mismatch，回显一致无需 response_model。"""
+    def serve(echo_model):
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self,*a):pass
+            def do_POST(self):
+                self.rfile.read(int(self.headers['Content-Length']))
+                raw=json.dumps({'model':echo_model,'choices':[{'message':{'content':'{"candidates":[],"segment_results":[]}'}}]}).encode()
+                self.send_response(200);self.end_headers();self.wfile.write(raw)
+        server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        threading.Thread(target=server.serve_forever,daemon=True).start()
+        return server
+    base={'kind':'intranet_text','protocol':'openai_chat_completions',
+          'model':'AI/deekseek-v4.1-flash','allowed_hosts':['127.0.0.1'],
+          'auth_kind':'none','allow_insecure_http':True}
+    # 1) 回显归一化 + response_model 声明期望回显 → 通过
+    s1=serve('deepseek-v4.1-flash')
+    try:
+        runner=IntranetTextRunner({**base,'response_model':'deepseek-v4.1-flash',
+            'endpoint':f'http://127.0.0.1:{s1.server_port}/v1'})
+        runner.run_text(DistillationRequest('j','orders','j'),'text',[])
+    finally:s1.shutdown();s1.server_close()
+    # 2) 回显归一化但未声明 response_model → model_mismatch
+    s2=serve('deepseek-v4.1-flash')
+    try:
+        runner=IntranetTextRunner({**base,'endpoint':f'http://127.0.0.1:{s2.server_port}/v1'})
+        with pytest.raises(ExecutorFailure) as exc:
+            runner.run_text(DistillationRequest('j','orders','j'),'text',[])
+        assert 'model_mismatch' in str(exc.value)
+    finally:s2.shutdown();s2.server_close()
+    # 3) 回显与请求一致（无归一化网关）→ 无需 response_model，原有行为不回退
+    s3=serve('AI/deekseek-v4.1-flash')
+    try:
+        runner=IntranetTextRunner({**base,'endpoint':f'http://127.0.0.1:{s3.server_port}/v1'})
+        runner.run_text(DistillationRequest('j','orders','j'),'text',[])
+    finally:s3.shutdown();s3.server_close()
+
+
 def test_persistent_scheduler_descriptors_do_not_kill_worker_after_five_minutes(memory_repo,tmp_path,monkeypatch):
     from test_team_worker import prepare
     from knowbase.team import worker
