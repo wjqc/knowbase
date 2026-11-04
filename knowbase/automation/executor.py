@@ -319,8 +319,8 @@ class CommandExecutorRunner:
         "每条候选必填 candidate_key/type/title/scope/action（create|update|link_existing|review）、"
         "segment_ids、evidence_refs=[{segment_id, text_hash}]；"
         "type 只能为 pitfall|standard|decision|workflow|preference|reference|bizrule 之一"
-        "（不存在 knowledge 等其他类型）；跨 scope 或 global 已有卡的补充判定用 link_existing"
-        "（目标允许本 scope 或 global），update 仅限同 scope 目标且必须附 expected_content_revision；"
+        "（不存在 knowledge 等其他类型）；执行器只使用 create 与 review 两个动作，"
+        "禁止 update/link_existing（它们要求目标卡当前的 content/governance 双版本号，执行器无法可靠持有）；"
         "segments 清单给出全部片段的 segment_id/text_hash，"
         "evidence_refs 必须引用其中实际读取的片段；"
         "bizrule 候选还需 provenance 与 rule_context 对象，后者必填 business_object、trigger、"
@@ -341,9 +341,11 @@ class CommandExecutorRunner:
         'distilled、skipped、no_value 三个字符串之一。提炼成候选的片段必须标为 distilled，'
         '并由 candidates[].segment_ids 引用；skipped/no_value 必须附 reason 且不能被候选引用。'
         '示例：{"segment_id":"seg-0000","decision":"distilled"}。'
-        "如材料末尾含RELATED_KNOWLEDGE_DATA，先判断是否与已有卡重复；相同知识用link_existing，"
-        "补充用update并附期望版本，独立知识用create。每条候选附duplicate_evaluation={"
+        "如材料末尾含RELATED_KNOWLEDGE_DATA，先判断是否与已有卡重复；相同或补充性知识不要新建卡："
+        "action 用 review 并在 duplicate_evaluation.rationale 写明与哪张卡重复/如何补充，由人工合并；"
+        "独立知识才用 create。每条候选附duplicate_evaluation={"
         "snapshot_hash:similarity_snapshot,evaluated_cards:[{id,content_revision}],rationale:判断依据}。"
+        "code_refs 只引用材料中明确出现的仓库路径，材料里没有就不填 code_refs。"
     )
 
     def __init__(self, cfg: dict):
