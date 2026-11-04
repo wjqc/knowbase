@@ -1098,3 +1098,10 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - 生产：备份 ~/.knowbase/backups/team-identity-20261026-170306（config + memory.db SQLite backup + team/state.db）；版本 0.2.0rc9 原地安装唯一运行时，模块与源码逐字节一致；生产 config team 块显式写入 commit_name/commit_email=wenjian3/wenjian3@asiainfo.com（LaunchAgent 环境不依赖 HOME 解析）。
 - 验证：team sync 首次全绿，13 份待发全部 ACK 清零（accepted 120→132），远端 knowbase-stats 恢复推进，README 重发布（469ab5cf）；快照 calls 3824→7187、水位 10-26 09:03、zcode 宿主归因 3606 次显现。wenjian3 因恢复期重叠标记 recovery_required（保守下界口径）。
 - 边界与待办：yizhuo/zhaozk11 仍为 pending 0 设备 0 上报——"成员在用"未在统计链路兑现；两台设备需安装含本修复的版本并 enroll，否则同样会被门禁拒绝。本修复 5 个文件未提交待审。
+
+## 2026-11-04 scope 自动绑定与未映射回退 global（用户四点裁决）
+- 裁决：①绑定键用 git remote URL（跨机稳定、免同名融合），非 git 目录降级绝对路径（本机私有）；②自动绑定落 memory.db 的 project_bindings（Hook 写 DB 是安全路径），config scope_map 显式绑定优先级最高；③未映射不再整场跳过，回退检索（search 的 scope 过滤恒含 global）；④提炼产能恢复另行核查。
+- 实现：scope_binding.auto_bind（basename > 父目录前缀 > 哈希后缀三级防同名融合；占用判定含库内同名 scope 卡；首次绑定 2 次 git 子进程，此后路径祖先纯 DB 读）+ hooks._infer_scope 解析链改为 config > DB 已确认绑定 > 目录名精确等值 > 自动绑定 > global（单一咽喉，MCP search/context/Stop 采集四链路同时受益——未映射项目此前连 capture 都被跳过）+ user_prompt 删除硬跳过并记 diagnostics.scope_resolved。
+- 与裁决的一处有意偏差：目录名精确等值优先于自动绑定（而非裁决原文的反之）——保住 ~/work/knowbase→knowbase 既有行为；精确等值本身零融合风险。
+- 回归：新增 tests/test_scope_autobind.py 13 项（同名双库/worktree .git 文件/无 remote/非 git/优先级/歧义不自动绑/sanitize/URL 形态/hook 集成×2）；test_governance、test_local_retrieval_upgrade、test_production_fixes 三处旧策略断言按新契约改写（保留跨项目不泄漏本义）。全量 pytest 1097 passed 1 skipped + 脚本式 92 断言 + golden 12/12。测试环境注意：宿主 CLAUDE_PROJECT_DIR 泄漏会假失败，须 -u 清除。
+- 待部署验证：原地安装后 hook 冒烟（未映射目录自动绑定+global 卡召回）；MCP serve 旧连接需重连才走新解析链。
