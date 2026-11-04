@@ -33,7 +33,7 @@ def _coerce(value, want):
     return value
 
 
-def _normalize_candidates(candidates, conn, job_id):
+def _normalize_candidates(candidates, conn, job_id, manifest=None):
     """执行器输出的保守规范化（仅自动化路径，不影响 Agent 提交协议的严格性）。
 
     真实网关模型（推理型）常把嵌套结构输出成字符串化的 Python repr（单引号列表/
@@ -42,6 +42,7 @@ def _normalize_candidates(candidates, conn, job_id):
        code_refs/relations/rule_context）；转换不了保持原样，交给验证器拒绝。
     2. evidence_refs 的 text_hash 按 segment_id 从权威 manifest 回填（提示词给的
        就是 manifest 值；segment_id 有效性仍由验证器强制）。
+    相似卡评估的结构修复由 _normalize_evaluations 按建批快照处理。
     """
     if not isinstance(candidates, list):
         return candidates
@@ -63,6 +64,36 @@ def _normalize_candidates(candidates, conn, job_id):
                     known = hashes[ref['segment_id']]
                     if known and ref.get('text_hash') != known:
                         ref['text_hash'] = known
+    # 相似卡评估（duplicate_evaluation）：结构转换 + snapshot_hash/版本转写修复。
+    # 权威值来自建批快照（similarity_snapshot/similar_cards），提示词给的就是它们。
+    return _normalize_evaluations(candidates, manifest)
+
+
+def _normalize_evaluations(candidates, manifest):
+    if not isinstance(manifest, dict):
+        return candidates
+    expected_hash = manifest.get('similarity_snapshot')
+    revisions = {c.get('id'): c.get('content_revision')
+                 for c in (manifest.get('similar_cards') or []) if isinstance(c, dict)}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        evaluation = _coerce(candidate.get('duplicate_evaluation'), dict)
+        if not isinstance(evaluation, dict):
+            continue
+        if expected_hash and evaluation.get('snapshot_hash') != expected_hash:
+            evaluation['snapshot_hash'] = expected_hash
+        cards = _coerce(evaluation.get('evaluated_cards'), list)
+        if isinstance(cards, list) and cards:
+            fixed = []
+            for card in cards:
+                if isinstance(card, dict) and card.get('id') in revisions:
+                    known = revisions[card['id']]
+                    if known and card.get('content_revision') != known:
+                        card['content_revision'] = known
+                    fixed.append(card)
+            evaluation['evaluated_cards'] = fixed
+        candidate['duplicate_evaluation'] = evaluation
     return candidates
 
 
@@ -234,14 +265,15 @@ def _one(repo, conn, job_id, options, policy, guard):
         if lost.is_set() or not guard() or not receipts.verified(options) or not _owned(conn,job_id,claim):
             raise ExecutorFailure('authority_changed')
         candidates = json.loads(json.dumps(result['candidates']))
-        candidates = _normalize_candidates(candidates, conn, job_id)
+        candidates = _normalize_candidates(candidates, conn, job_id, manifest)
         for candidate in candidates:
             candidate['candidate_key'] = 'auto-'+digest([manifest['batch_segment_ids'],candidate.get('candidate_key')])[:32]
         submitted = materialize.submit(repo,conn,job_id,claim['batch_id'],claim['lease_token'],request_id,
                                         candidates,result['segment_results'],claim['fencing_token'])
         if submitted.get('error') or submitted.get('failed'):
             # 失败详情落账供诊断（只存验证器返回的错误结构，不再丢弃后无从排查）。
-            detail = json.dumps({k: submitted.get(k) for k in ('error', 'failed') if submitted.get(k)},
+            detail = json.dumps({k: submitted.get(k) for k in ('error', 'errors', 'failed', 'message')
+                                 if submitted.get(k)},
                                 ensure_ascii=False, default=str)
             conn.execute('UPDATE executor_runs SET response_json=NULL,result_json=? WHERE run_id=?',
                          (detail[:65536], run_id));conn.commit()

@@ -118,6 +118,9 @@ def submit(repo, conn, job_id, batch_id, lease_token, request_id, candidates,
         scope = conn.execute("SELECT scope FROM jobs WHERE job_id=?", (job_id,)).fetchone()[0]
         snapshot_row = conn.execute("SELECT similar_json FROM job_batches WHERE batch_id=?", (batch_id,)).fetchone()
         baseline = json.loads(snapshot_row[0]) if snapshot_row else {}
+        # 现算快照是刻意的在途新鲜度门（新增相似卡须重评估），勿改用建批存储值：
+        # 2026-11-04 曾改存储值对比，被 test_related_new_card_requires_explicit_reassessment
+        # 否决——去重安全优先于提交一致性。
         similar = materials.similar_snapshot(conn, baseline.get("query", ""), scope)
         snapshot_hash = materials.digest(similar)
         owned, delivered = set(batch["segment_ids"]), set(batch["delivered"])
