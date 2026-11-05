@@ -103,14 +103,17 @@ def seed_once_card(repo, title):
 
 
 def derived_report(**over):
-    base = {'schema': 'knowbase.retrieval-evaluation.v1', 'verdict': 'PASS',
-            'annotation_status': 'execution_derived', 'derived_sample_count': 60,
+    base = {'schema': 'knowbase.retrieval-evaluation.v2', 'verdict': 'PASS',
+            'annotation_status': 'execution_derived', 'label_provenance': 'execution_derived',
+            'evaluable_sample_count': 60, 'evaluable_positive': 30, 'evaluable_negative': 25,
+            'evaluable_irrelevant': 5, 'derived_unknown': 3,
             'confidence_interval': {'metric': 'Recall@5', 'delta': 0.0, 'CI95': [0.0, 0.2], 'positive_n': 60},
             'dataset_sha256': digest('synthetic dataset'), 'vectors_sha256': digest('synthetic vectors'),
             'retrieval_code': si.code_profile(), 'covered_scopes': ['global'],
             'provider_fp': 'fp', 'space_id': 'space', 'deployment_id': 'synthetic-test-v1',
             'dense_min': .8, 'hybrid_recall_at_5': 1.0,
-            'gates': {k: True for k in ['quality', 'rejection', 'regression', 'latency']}}
+            'end_to_end_p95_ms': 120.0, 'latency_basis': 'end_to_end_hybrid',
+            'gates': {k: True for k in ['quality', 'rejection', 'regression', 'latency', 'samples']}}
     base.update(over)
     return base
 
@@ -207,13 +210,16 @@ def comparison_stub(**over):
 def freeze_kwargs():
     return {'dataset_sha256': digest('d'), 'vectors_sha256': digest('v'), 'provider_fp': 'fp',
             'space_id': 'space', 'covered_scopes': ['global'], 'deployment_id': 'synthetic-test-v1',
-            'dense_min': .5, 'derived_stats': {'derived': 65, 'positive': 60, 'negative': 5, 'irrelevant': 0}}
+            'dense_min': .5,
+            'derived_stats': {'derived': 65, 'positive': 40, 'negative': 25, 'irrelevant': 0, 'unknown': 10},
+            'end_to_end': {'p95_ms': 120.0, 'basis': 'end_to_end_hybrid'}}
 
 
 def test_freeze_gates_and_verdict():
     report = freeze_report(comparison_stub(), **freeze_kwargs())
     assert report['verdict'] == 'PASS' and report['annotation_status'] == 'execution_derived'
-    assert all(report['gates'].values()) and report['derived_sample_count'] == 65
+    assert all(report['gates'].values())
+    assert report['evaluable_sample_count'] == 65 and report['derived_unknown'] == 10
     assert report['confidence_interval']['CI95'] == [0.0, 0.4]
     worse = comparison_stub(metrics={'D': {'Recall@5': 0.5}})
     assert freeze_report(worse, **freeze_kwargs())['gates']['quality'] is False
@@ -221,8 +227,15 @@ def test_freeze_gates_and_verdict():
     assert freeze_report(regressed, **freeze_kwargs())['gates']['regression'] is False
     no_negative = comparison_stub(metrics={'D': {'negative_queries': 0}})
     assert freeze_report(no_negative, **freeze_kwargs())['gates']['rejection'] is False
-    slow = comparison_stub(p95_lexical_compute_ms=5000.0)
-    assert freeze_report(slow, **freeze_kwargs())['gates']['latency'] is False
+    slow = {**freeze_kwargs(), 'end_to_end': {'p95_ms': 5000.0, 'basis': 'end_to_end_hybrid'}}
+    assert freeze_report(comparison_stub(), **slow)['gates']['latency'] is False
+    # V2-03：只交离线词法计算延迟（无真实端到端测量）不能满足 latency 门。
+    offline_only = dict(freeze_kwargs()); offline_only.pop('end_to_end')
+    assert freeze_report(comparison_stub(p95_lexical_compute_ms=5.0), **offline_only)['gates']['latency'] is False
+    # unknown 不计入最低样本：可判定 65 里塞 100 个 unknown 也不放行样本不足的报告。
+    thin = {**freeze_kwargs(), 'derived_stats': {'derived': 30, 'positive': 15, 'negative': 10,
+                                                 'irrelevant': 5, 'unknown': 100}}
+    assert freeze_report(comparison_stub(), **thin)['gates']['samples'] is False
 
 
 def test_freeze_quality_absolute_recall_floor():
@@ -246,11 +259,31 @@ def test_quality_accepts_derived_and_rejects_human_and_thin_reports(memory_repo)
     p = memory_repo.parent / 'good-report.json'; p.write_text(json.dumps(good))
     assert si.quality({**options, 'quality_report': str(p)}, identity) is not None
     human = derived_report(annotation_status='reviewed', human_query_count=60, reviewer='someone')
-    human.pop('derived_sample_count'); human.pop('confidence_interval')
+    human.pop('evaluable_sample_count'); human.pop('confidence_interval')
     p.write_text(json.dumps(human))
     assert si.quality({**options, 'quality_report': str(p)}, identity) is None
-    thin = derived_report(derived_sample_count=59)
+    thin = derived_report(evaluable_sample_count=59)
     p.write_text(json.dumps(thin))
+    assert si.quality({**options, 'quality_report': str(p)}, identity) is None
+    # V2-03：正例或负例单侧不足不放行。
+    thin_pos = derived_report(evaluable_positive=19)
+    p.write_text(json.dumps(thin_pos))
+    assert si.quality({**options, 'quality_report': str(p)}, identity) is None
+    thin_neg = derived_report(evaluable_negative=19)
+    p.write_text(json.dumps(thin_neg))
+    assert si.quality({**options, 'quality_report': str(p)}, identity) is None
+    # V2-03：latency_basis 不是真实混合路径（离线计算）不放行。
+    offline = derived_report(latency_basis='offline_compute_only')
+    p.write_text(json.dumps(offline))
+    assert si.quality({**options, 'quality_report': str(p)}, identity) is None
+    # V2-03：v1 旧报告可读但不具备激活效力。
+    legacy = derived_report(schema='knowbase.retrieval-evaluation.v1',
+                            derived_sample_count=60)
+    legacy.pop('evaluable_sample_count'); legacy.pop('evaluable_positive')
+    legacy.pop('evaluable_negative'); legacy.pop('latency_basis')
+    legacy.pop('end_to_end_p95_ms'); legacy.pop('label_provenance')
+    legacy['gates'].pop('samples')
+    p.write_text(json.dumps(legacy))
     assert si.quality({**options, 'quality_report': str(p)}, identity) is None
     regressed = derived_report(confidence_interval={'CI95': [-0.2, 0.1]})
     p.write_text(json.dumps(regressed))
@@ -284,14 +317,14 @@ def _dense_setup(memory_repo, gateway, tmp_path, monkeypatch):
     configure(gateway)
     built = si.build(memory_repo)
     assert built['state'] == 'ready'
-    for i in range(60):
+    for i in range(40):
         seed_use_evidence(memory_repo, mid, "HAR", outcome="completed", feedback="helpful", task_key=f"pos-{i}")
-    for i in range(5):
+    for i in range(25):
         seed_use_evidence(memory_repo, mid, "HAR", outcome="failed", feedback="not_helpful", task_key=f"neg-{i}")
     conn = index.connect(memory_repo)
     rows, stats = execution_eval.derive_dataset(conn)
     conn.close()
-    assert stats['derived'] == 65 and stats['positive'] == 60 and stats['negative'] == 5
+    assert stats['derived'] == 65 and stats['positive'] == 40 and stats['negative'] == 25
     assert 'human' not in json.dumps(rows)
     return built, rows, stats
 
@@ -306,7 +339,10 @@ def _freeze(memory_repo, tmp_path, built, data, cache, comparison, stats):
                          vectors_sha256=digest(cache_json['documents']),
                          provider_fp=g['identity']['provider_fp'], space_id=g['identity']['space_id'],
                          covered_scopes=['global'], deployment_id='synthetic-test-v1',
-                         dense_min=.5, derived_stats=stats)
+                         dense_min=.5, derived_stats=stats,
+                         # V2-03：激活前用 hybrid_probe 实测混合路径端到端延迟；
+                         # 此处用同一测量函数的返回形状（synthetic gateway 下真实网络）。
+                         end_to_end={'p95_ms': 80.0, 'basis': 'end_to_end_hybrid'})
 
 
 def test_dense_derived_only_report_cannot_activate(memory_repo, gateway, tmp_path, monkeypatch):

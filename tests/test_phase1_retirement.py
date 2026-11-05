@@ -13,7 +13,7 @@ from knowbase.server import job_resubmit_review_impl, job_status_impl
 from test_candidate_materialization import candidate as build_candidate
 from test_candidate_materialization import prepare as prepare_job
 from test_candidate_materialization import submit as submit_candidates
-from test_phase0_self_evolution import BODY, activate, searchable, validate
+from test_phase0_self_evolution import BODY, activate, enable_trusted_transition, searchable, validate
 
 DAY = timedelta(days=1)
 
@@ -25,6 +25,8 @@ BODY2 = ("## 结论\n库存低于阈值时触发补货提醒。\n## 解决的问
 
 
 def standard_card(repo, title, provenance="PRD-4 §2", body=BODY):
+    # V2-01：反馈驱动晋升默认关闭；本文件的机制测试沿用过渡开关。
+    enable_trusted_transition()
     result = writer.create(repo, "standard", title, body, scope="orders", provenance=provenance)
     assert not result.get("error"), result
     assert result["staging"] is True

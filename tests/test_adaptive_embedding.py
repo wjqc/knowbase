@@ -46,14 +46,17 @@ def approve(repo,activate=True):
     gid=conn.execute('SELECT generation_id FROM embedding_generations ORDER BY created_at DESC,rowid DESC LIMIT 1').fetchone()[0]
     g=si.generation(conn,gid);conn.close()
     # This is explicitly a synthetic control artifact, not a claim of human evaluation.
-    # Since Phase 2 the gate accepts only execution-derived provenance.
-    report={'schema':'knowbase.retrieval-evaluation.v1','verdict':'PASS','annotation_status':'execution_derived',
-        'derived_sample_count':60,'confidence_interval':{'metric':'Recall@5','delta':0.0,'CI95':[0.0,0.2],'positive_n':60},
+    # Since Phase 2 the gate accepts only execution-derived provenance; V2-03
+    # additionally requires v2 report shape (evaluable counts + end-to-end latency).
+    report={'schema':'knowbase.retrieval-evaluation.v2','verdict':'PASS','annotation_status':'execution_derived',
+        'label_provenance':'execution_derived',
+        'evaluable_sample_count':60,'evaluable_positive':30,'evaluable_negative':25,'evaluable_irrelevant':5,
+        'confidence_interval':{'metric':'Recall@5','delta':0.0,'CI95':[0.0,0.2],'positive_n':60},
         'dataset_sha256':digest('synthetic dataset'),'vectors_sha256':digest('synthetic vectors'),
         'retrieval_code':si.code_profile(),'covered_scopes':['global'],
         'provider_fp':g['identity']['provider_fp'],'space_id':g['identity']['space_id'],'dense_min':.8,
-        'hybrid_recall_at_5':1.0,
-        'gates':{k:True for k in ['quality','rejection','regression','latency']}}
+        'hybrid_recall_at_5':1.0,'end_to_end_p95_ms':80.0,'latency_basis':'end_to_end_hybrid',
+        'gates':{k:True for k in ['quality','rejection','regression','latency','samples']}}
     p=repo.parent/'synthetic-report.json';p.write_text(json.dumps(report))
     cfg=config.load_config();cfg['embedding']['quality_report']=str(p);config.CONFIG_PATH.write_text(json.dumps(cfg))
     if activate:

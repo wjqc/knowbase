@@ -47,13 +47,10 @@ def code_profile():
 def quality(options, identity):
     """Validate a frozen evaluation report, never a boolean 'approved' config flag.
 
-    Since Phase 2 the only accepted provenance is execution-derived: the
-    report must carry enough derived samples and a paired confidence
-    interval whose lower bound shows no regression. Human annotation counts
-    and named reviewers are no longer enabling conditions; a report that
-    only carries them fails this gate. The hybrid arm must additionally
-    clear an absolute Recall@5 floor, so a weak lexical baseline cannot
-    make a poor hybrid look good by relative comparison alone.
+    V2-03：只接受 knowbase.retrieval-evaluation.v2——可判定样本（unknown 不计）
+    达最低门、正/负例分别 ≥20、CI95 下界 ≥0、真实混合路径端到端 p95 达标。
+    v1 报告（含用离线词法计算延迟凑数的旧 latency 门）不能激活 dense；
+    旧文件仍可读（诊断用），只是不再具备激活效力。
     """
     p=options.get("quality_report")
     if not p:return None
@@ -65,11 +62,15 @@ def quality(options, identity):
         threshold=report.get("dense_min")
         ci=report.get("confidence_interval") or {}
         ci95=ci.get("CI95")
-        if (report.get("schema")!="knowbase.retrieval-evaluation.v1" or report.get("verdict")!="PASS" or
+        if (report.get("schema")!="knowbase.retrieval-evaluation.v2" or report.get("verdict")!="PASS" or
                 report.get("annotation_status")!="execution_derived" or
-                report.get("derived_sample_count",0)<DERIVED_MIN_SAMPLES or
+                report.get("evaluable_sample_count",0)<DERIVED_MIN_SAMPLES or
+                report.get("evaluable_positive",0)<DERIVED_MIN_POSITIVE or
+                report.get("evaluable_negative",0)<DERIVED_MIN_NEGATIVE or
                 not (isinstance(ci95,list) and len(ci95)==2 and ci95[0]>=0) or
                 type(report.get("hybrid_recall_at_5")) not in {int,float} or not math.isfinite(report["hybrid_recall_at_5"]) or report["hybrid_recall_at_5"]<ABSOLUTE_MIN_RECALL_AT_5 or
+                report.get("latency_basis")!="end_to_end_hybrid" or
+                type(report.get("end_to_end_p95_ms")) not in {int,float} or not math.isfinite(report["end_to_end_p95_ms"]) or report["end_to_end_p95_ms"]>END_TO_END_P95_BUDGET_MS or
                 not re.fullmatch(r"[a-f0-9]{64}",str(report.get("dataset_sha256",""))) or
                 not re.fullmatch(r"[a-f0-9]{64}",str(report.get("vectors_sha256",""))) or
                 report.get("retrieval_code")!=code_profile() or
@@ -77,15 +78,19 @@ def quality(options, identity):
                 report.get("provider_fp")!=identity["provider_fp"] or report.get("space_id")!=identity["space_id"] or
                 not options.get("deployment_id") or type(threshold) not in {int,float} or not math.isfinite(threshold) or not -1<=threshold<=1):
             return None
-        if not all(report.get("gates",{}).get(k) is True for k in ["quality","rejection","regression","latency"]):return None
+        if not all(report.get("gates",{}).get(k) is True for k in ["quality","rejection","regression","latency","samples"]):return None
         return {"digest":digest(report),"dense_min":threshold}
     except (OSError,ValueError,TypeError,KeyError):return None
 
 
 # Minimum execution-derived samples for a frozen report to enable dense
-# retrieval. Mirrors the retired 60-query human floor, now counting derived
-# samples (positive + negative + irrelevant) instead of hand labels.
+# retrieval. V2-03: counts evaluable samples only (positive+negative+
+# irrelevant); unknown is reported separately and never pads any minimum.
 DERIVED_MIN_SAMPLES=60
+DERIVED_MIN_POSITIVE=20
+DERIVED_MIN_NEGATIVE=20
+# 真实混合路径端到端 p95 预算（毫秒）；离线词法计算延迟不满足此门。
+END_TO_END_P95_BUDGET_MS=1000
 
 
 # Absolute floor for the hybrid arm's Recall@5. A report whose hybrid arm

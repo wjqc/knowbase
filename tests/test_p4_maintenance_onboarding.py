@@ -31,6 +31,9 @@ BODY = ("## 结论\n库存低于阈值时触发补货提醒。\n## 解决的问�
 
 
 def make_card(repo, title, scope="orders"):
+    # V2-01：反馈驱动晋升/降级默认关闭；机制测试沿用过渡开关。
+    from test_phase0_self_evolution import enable_trusted_transition
+    enable_trusted_transition()
     result = writer.create(repo, "standard", title, BODY, scope=scope, provenance="PRD-4 §2")
     assert not result.get("error"), result
     return result["entity_id"]

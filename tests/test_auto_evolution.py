@@ -9,7 +9,17 @@ from test_knowledge_consumption import seed
 from test_versioned_feedback import use_for_task, feedback
 
 
+def _enable_trusted_transition():
+    """V2-01：反馈驱动晋升/降级默认关闭；机制测试在过渡开关下运行。"""
+    cfg=json.loads(config.CONFIG_PATH.read_text())
+    evolution=cfg.get("evolution") or {}
+    evolution["trusted_promotion_enabled"]=True
+    cfg["evolution"]=evolution
+    config.CONFIG_PATH.write_text(json.dumps(cfg))
+
+
 def rule(repo):
+    _enable_trusted_transition()
     body=("## 结论\n已结算订单不能撤回。\n## 解决的问题\n避免结算状态被修改。\n"
           "## 适用条件\n订单完成结算。\n## 不适用条件\n草稿订单。\n"
           "## 可执行动作\n拒绝撤回请求。\n## 关键证据\n需求 PRD-4。\n"
@@ -40,6 +50,7 @@ def validation(repo,mid,task,*,outcome="helpful",task_result="completed",outcome
 
 
 def test_same_tool_independent_tasks_promote_without_manual_review(memory_repo):
+    _enable_trusted_transition()
     meta,_,_=seed(memory_repo)
     for n in range(3):
         result=feedback(memory_repo,use_for_task(memory_repo,"task-"+str(n)),by="same-tool",

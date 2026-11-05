@@ -186,6 +186,11 @@ def parse_text(text: str, source: str = "memory") -> tuple[dict, str]:
     import yaml as _yaml
 
     path=source
+    # V2-04（F-12）：统一行尾归一。read_text 文本模式会把 CRLF 转成 LF，
+    # 而 bytes.decode 不会——两路解析曾对同一 CRLF 卡算出不同 body/revision，
+    # source_current 恒 False。此处入口归一一次，两路口径一致；磁盘原字节
+    # 不改写（快照审计另存原件）。
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     if not text.startswith("---"):
         raise ValueError(f"{path} 缺少 frontmatter")
     end = text.find("\n---", 3)

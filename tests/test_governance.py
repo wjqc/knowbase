@@ -19,6 +19,12 @@ src=tmp/'source';src.mkdir()
 # init --import-from 只产 source：缺 scope 拒绝；有 scope 生成 manifest，不产生知识卡
 assert main(['init','--import-from',str(src)]) == 1
 assert main(['init','--import-from',str(src),'--scope','demo']) == 0
+# V2-01：反馈驱动晋升/降级默认关闭；本脚本沿用旧行为语义（自报 incorrect 置
+# stale），显式打开过渡开关。默认关闭行为由 test_v2_01 覆盖。
+_cfg_path = Path(os.environ['KNOWBASE_CONFIG'])
+_cfg = json.loads(_cfg_path.read_text()) if _cfg_path.exists() else {}
+_cfg['evolution'] = {**(_cfg.get('evolution') or {}), 'trusted_promotion_enabled': True}
+_cfg_path.write_text(json.dumps(_cfg))
 assert len(list(sources.iter_manifests(config.repo_path()))) == 2
 assert len(list(store.iter_all(config.repo_path(),True))) == 0
 assert '未命中' in search_impl('AlphaUnique',scope='demo',include_inactive=True)

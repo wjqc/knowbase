@@ -46,6 +46,16 @@ DEFAULTS = {
              "commit_name": "", "commit_email": ""},
     "evolution": {"enabled": True, "auto_activate_bizrules": True,
                   "min_helpful_tasks": 3, "min_sessions": 2, "retire_not_helpful_tasks": 2,
+                  # V2-01 治理安全门：反馈（含 read+completed、Agent 自报
+                  # helpful/independent、incorrect/outdated 自报）默认只保留
+                  # 观察，不驱动晋升/降级/置 stale。legacy_promotion_enabled
+                  # 为无 task_result 两工具标签晋升旁路的显式回滚开关；
+                  # trusted_promotion_enabled 为过渡开关，仅供隔离机制测试，
+                  # V2-12 以可信证据事件重写输入后移除。
+                  "legacy_promotion_enabled": False,
+                  "trusted_promotion_enabled": False,
+                  # V2-01：frontmatter 反馈计数仅展示，默认不参与检索排序。
+                  "feedback_ranking_factor_enabled": False,
                   # Phase 1 自进化：stale 满期自动归档与 review 候选超期丢弃的期限（天）。
                   # 归档只看证据账本（stale_since 起点 + 期间无成功复验证据），不看 wall-clock 猜测。
                   "archive_after_stale_days": 90, "review_candidate_ttl_days": 30,

@@ -1116,11 +1116,30 @@ def _parse_args(argv=None):
     p_sync.add_argument("--remote", required=True)
     p_sync.add_argument("--branch", required=True)
     p_sync.add_argument("--lease-token", required=True)
+    p_lifecycle = sub.add_parser("lifecycle", help="V2 生命周期：变更候选/准入/发布/回滚（发布前置验证与准入）")
+    lc_sub = p_lifecycle.add_subparsers(dest="lifecycle_cmd", required=True)
+    p_lc_changes = lc_sub.add_parser("changes", help="列出变更候选（--state 过滤）")
+    p_lc_changes.add_argument("--state", default=None)
+    p_lc_show = lc_sub.add_parser("show", help="查看候选详情（base/claim_map/输出/diff 摘要）")
+    p_lc_show.add_argument("change_id")
+    p_lc_validate = lc_sub.add_parser("validate", help="对候选执行确定性验证计划")
+    p_lc_validate.add_argument("change_id")
+    p_lc_publish = lc_sub.add_parser("publish", help="发布 ready 候选（原子变更集）")
+    p_lc_publish.add_argument("change_id")
+    p_lc_rollback = lc_sub.add_parser("rollback", help="回滚一次发布（新 publication，保留历史与反证）")
+    p_lc_rollback.add_argument("publication_id")
+    p_lc_rollback.add_argument("--reason", required=True)
+    lc_sub.add_parser("admissions", help="列出待准入 staging/复验卡（无需先被检索采用）")
+    p_lc_confirm = lc_sub.add_parser("confirm", help="权威确认（绑定具体卡版本与出处，不认 CLI 自称 human）")
+    p_lc_confirm.add_argument("memory_id")
+    p_lc_confirm.add_argument("--authority-ref", required=True)
+    p_lc_confirm.add_argument("--change-id", default="")
     p_worker = sub.add_parser("worker", help="P3 后台 supervisor：OS 调度入口，SQLite 租约互斥（提炼位保持阻断）")
     worker_sub = p_worker.add_subparsers(dest="worker_cmd", required=True)
     for _name, _help in (("run", "常驻运行：OS 负责启动/保活，租约互斥，按 next_run_at 唤醒"),
                          ("once", "执行一次到期任务（持租约者）"),
                          ("status", "查看租约与各任务下次运行时间"),
+                         ("retry-plan", "只读生成积压恢复计划（不修改任何任务状态）"),
                          ("install", "安装 worker 调度入口并迁移旧 team 定时任务"),
                          ("disable", "停用 worker 调度入口（含旧 team 定时任务）")):
         worker_sub.add_parser(_name, help=_help)
@@ -1444,6 +1463,42 @@ def _dispatch(args):
         except (ValueError, RuntimeError, OSError) as exc:
             print(json.dumps({"error": str(exc)}, ensure_ascii=False))
             return 1
+    if args.cmd == "lifecycle":
+        from .knowledge_lifecycle import admission, changes, publication, validation
+        try:
+            repo = config.repo_path()
+            conn = index.connect(repo)
+            try:
+                if args.lifecycle_cmd == "changes":
+                    result = {"changes": changes.list_changes(conn, args.state)}
+                elif args.lifecycle_cmd == "show":
+                    result = changes.get_change(conn, args.change_id)
+                elif args.lifecycle_cmd == "validate":
+                    result = validation.validate_change(conn, repo, args.change_id)
+                elif args.lifecycle_cmd == "publish":
+                    result = publication.publish(repo, conn, args.change_id)
+                elif args.lifecycle_cmd == "rollback":
+                    result = publication.rollback(repo, conn, args.publication_id,
+                                                  reason=args.reason)
+                elif args.lifecycle_cmd == "admissions":
+                    result = {"pending": admission.pending_admissions(conn, repo)}
+                else:  # confirm
+                    from .mutations import _compute_revision
+                    meta, _body, _path = store.load(repo, args.memory_id)
+                    if not meta:
+                        result = {"error": "NOT_FOUND"}
+                    else:
+                        result = admission.authority_confirm(
+                            conn, repo, args.change_id, args.memory_id,
+                            _compute_revision(meta, _body),
+                            authority_ref=args.authority_ref)
+            finally:
+                conn.close()
+            print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+            return 1 if isinstance(result, dict) and result.get("error") else 0
+        except (ValueError, RuntimeError, OSError) as exc:
+            print(json.dumps({"error": str(exc)}, ensure_ascii=False))
+            return 1
     if args.cmd == "worker":
         from .automation import worker as automation_worker
         try:
@@ -1455,6 +1510,8 @@ def _dispatch(args):
                 result = automation_worker.run_once(repo)
             elif action == "status":
                 result = automation_worker.status(repo)
+            elif action == "retry-plan":
+                result = automation_worker.retry_plan(repo)
             elif action == "install":
                 result = automation_worker.install()
             else:

@@ -51,6 +51,16 @@ PITFALL_BODY = card(
 check("init 第1次", cli.main(["init"]) == 0)
 check("init 第2次(幂等)", cli.main(["init"]) == 0)
 
+# V2-01：反馈驱动晋升/降级默认关闭；本脚本沿用旧行为语义（跨工具标签晋升、
+# outdated 置 stale），显式打开过渡开关。默认关闭行为由 test_v2_01 覆盖。
+import json
+_cfg_path = Path(os.environ["KNOWBASE_CONFIG"])
+_cfg = json.loads(_cfg_path.read_text()) if _cfg_path.exists() else {}
+_cfg["evolution"] = {**(_cfg.get("evolution") or {}),
+                     "legacy_promotion_enabled": True, "trusted_promotion_enabled": True,
+                     "feedback_ranking_factor_enabled": True}
+_cfg_path.write_text(json.dumps(_cfg))
+
 rp = config.repo_path()
 
 # 1. Agent A（claude-code）踩坑入库

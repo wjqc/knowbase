@@ -1,5 +1,22 @@
-"""版本绑定的确定性演进策略；模型提交证据，服务端去重并决定状态。"""
+"""版本绑定的确定性演进策略；模型提交证据，服务端去重并决定状态。
+
+V2-01 安全门：反馈驱动的自动晋升/降级默认关闭。read+completed、Agent
+自报 helpful、自填 verification_source=independent 均只是来源声明，不是
+可信执行验证；在可信验证器（V2-11/12）接入前，decide() 一律返回
+promote=retire=False 并给出 blocked_reason，反馈照常落盘为观察。
+"""
 from . import config
+
+POLICY_REVISION = "lifecycle-v2-gate.1"
+
+
+def trusted_promotion_available() -> bool:
+    """反馈驱动晋升/降级是否具备可信执行证据来源。
+
+    默认 False：V2-01 只封旁路不接新证据。evolution.trusted_promotion_enabled
+    是隔离机制测试的过渡开关；V2-12 治理引擎改为消费核验过的 L3/L4
+    证据事件后，本函数由证据可用性取代配置开关。"""
+    return bool(config.load_config().get("evolution", {}).get("trusted_promotion_enabled", False))
 
 
 def _aggregate(rows):
@@ -71,7 +88,13 @@ def decide(conn, mid, revision, meta, use, task_key, outcome, task_result, *, st
     policy = config.load_config().get("evolution", {})
     counts = evidence(conn, mid, revision, use, task_key, outcome, task_result)
     counts["promote"] = counts["retire"] = False
+    counts["policy_revision"] = POLICY_REVISION
     if not policy.get("enabled", True):
+        counts["blocked_reason"] = "evolution_disabled"
+        return counts
+    if not trusted_promotion_available():
+        # V2-01：无可信执行验证来源，反馈只作观察；证据计数继续返回供展示。
+        counts["blocked_reason"] = "trusted_validation_unavailable"
         return counts
     counts["retire"] = outcome in ("incorrect", "outdated") or \
         counts["negative_tasks"] >= max(2, int(policy.get("retire_not_helpful_tasks", 2)))

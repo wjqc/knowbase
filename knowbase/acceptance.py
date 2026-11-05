@@ -76,7 +76,8 @@ def check_derived_eval(personal_conn, report_path, dataset_path) -> dict:
         report = json.loads(Path(report_path).expanduser().read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return _fail(check, f"eval report unreadable: {type(exc).__name__}")
-    if not isinstance(report, dict) or report.get("schema") != "knowbase.retrieval-evaluation.v1":
+    if not isinstance(report, dict) or report.get("schema") not in (
+            "knowbase.retrieval-evaluation.v1", "knowbase.retrieval-evaluation.v2"):
         return _fail(check, "eval report schema unsupported")
     if report.get("annotation_status") != "execution_derived":
         return _fail(check, "eval report is not execution_derived")

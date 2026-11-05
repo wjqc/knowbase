@@ -148,6 +148,29 @@ def inspect(repo):
                 add("sync", "pass" if row and row[0] == "ok" else "warn", json.dumps(
                     {"status": row[0] if row else "unknown",
                      "error": row[1] if row else ""}, ensure_ascii=False))
+            # V2-02：后台运行健康（只读）。blocked 任务与未消费维护告警单列；
+            # build_loaded 展示最近实际执行各任务的进程构建，可与 source/会话层对照。
+            if "automation_schedule" in tables:
+                blocked = conn.execute(
+                    "SELECT kind,blocked_since,last_error FROM automation_schedule "
+                    "WHERE last_status='blocked' AND blocked_since!=''").fetchall()
+                stale_builds = conn.execute(
+                    "SELECT kind,build_loaded FROM automation_schedule "
+                    "WHERE build_loaded!=''").fetchall()
+                alerts_n = 0
+                recent_alerts = []
+                if "maintenance_alerts" in tables:
+                    alerts_n = conn.execute("SELECT COUNT(*) FROM maintenance_alerts").fetchone()[0]
+                    recent_alerts = conn.execute(
+                        "SELECT kind,subject,created_at FROM maintenance_alerts "
+                        "ORDER BY created_at DESC LIMIT 5").fetchall()
+                add("automation_health",
+                    "warn" if blocked else "pass",
+                    json.dumps({"blocked": [{"kind": k, "since": s, "error": e} for k, s, e in blocked],
+                                "loaded_builds": {k: b for k, b in stale_builds},
+                                "alerts_total": alerts_n,
+                                "recent_alerts": [{"kind": a, "subject": s, "created_at": c}
+                                                  for a, s, c in recent_alerts]}, ensure_ascii=False))
             # P4：项目识别绑定（迁移 v27 的 project_bindings 表）。
             try:
                 from .scope_binding import list_bindings

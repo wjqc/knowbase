@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from knowbase import commit_adapter,index,store
+from knowbase import commit_adapter,config,index,store
 from knowbase.server import context_impl,use_impl
 from test_knowledge_consumption import seed
 
@@ -27,7 +27,17 @@ def feedback(repo,args,by="tool-a",outcome="helpful",request_id="",**changes):
         conn.close()
 
 
+def enable_legacy_promotion():
+    """V2-01：无 task_result 两工具标签晋升默认关闭；机制测试显式回滚开关。"""
+    cfg=json.loads(config.CONFIG_PATH.read_text())
+    evolution=cfg.get("evolution") or {}
+    evolution["legacy_promotion_enabled"]=True
+    cfg["evolution"]=evolution
+    config.CONFIG_PATH.write_text(json.dumps(cfg))
+
+
 def test_current_version_task_results_promote_but_tool_labels_are_not_humans(memory_repo):
+    enable_legacy_promotion()
     meta,_,_=seed(memory_repo)
     first=use_for_task(memory_repo)
     r=feedback(memory_repo,first,by="human-fake")
@@ -74,6 +84,7 @@ def test_old_feedback_and_old_use_do_not_validate_new_content(memory_repo):
 
 
 def test_editing_verified_card_clears_old_validation(memory_repo):
+    enable_legacy_promotion()
     seed(memory_repo)
     feedback(memory_repo,use_for_task(memory_repo),by="tool-a")
     feedback(memory_repo,use_for_task(memory_repo,"task-2"),by="tool-b")
@@ -95,13 +106,16 @@ def test_unbound_legacy_calls_are_observations_without_governance(memory_repo):
     assert feedback(memory_repo,args,use_id="unknown")["error"]=="INCOMPLETE_FEEDBACK_BINDING"
 
 
-def test_unverified_use_cannot_produce_validated_result_and_current_negative_stales(memory_repo):
+def test_unverified_use_cannot_produce_validated_result_and_negative_is_observation(memory_repo):
+    """V2-01：自报 incorrect 不再立即置 stale——无可信反证通道时仅保留观察。"""
     seed(memory_repo);pending=use_for_task(memory_repo,state="unverified")
     assert feedback(memory_repo,pending)["error"]=="VALIDATED_USE_REQUIRED"
     valid=use_for_task(memory_repo,"checked-task")
     r=feedback(memory_repo,valid,outcome="incorrect")
-    assert r["governance_applied"]
-    assert store.load(memory_repo,valid["mid"])[0]["status"]=="stale"
+    assert not r["governance_applied"]
+    assert r["unknown_reason"]=="trusted_validation_unavailable"
+    meta=store.load(memory_repo,valid["mid"])[0]
+    assert meta["status"]=="active" and meta["unhelpful_count"]==1
 
 
 @pytest.mark.parametrize("crash_after_file",[False,True])

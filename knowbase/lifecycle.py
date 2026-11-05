@@ -110,9 +110,14 @@ def auto_archive_sweep(repo, conn, *, today=None):
     days = int(cfg.get("evolution", {}).get("archive_after_stale_days", 90))
     archived = []
     archive_bases = []
+    from .knowledge_lifecycle.applicability import archive_protection
     with RepoLock(repo, cfg.get("lock_timeout", 10)):
         for meta, body, path in store.iter_all(repo):
             if meta.get("status") != "stale":
+                continue
+            # V2-15：低频重要卡不因点击少/年久自动归档——critical/保留理由/
+            # 复验中/隔离冲突阻止 sweep；时间衰减只表示"需复核"不表示"错误"。
+            if archive_protection(meta, unresolved_conflicts=bool(meta.get("contradiction_quarantine"))):
                 continue
             stale_since = _parse_day(meta.get("stale_since")) or _parse_day(meta.get("updated"))
             if stale_since is None or (today - stale_since).days < days:

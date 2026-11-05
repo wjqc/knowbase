@@ -286,9 +286,16 @@ def test_derived_eval_pass_and_drift_fail(memory_repo, tmp_path):
     finally:
         conn.close()
     seed_use_evidence(repo, mid, "派生查询词", feedback="helpful", outcome="completed")
+    # V2-03 样本门：补足 40 正例 + 25 负例（真实派生链路，非伪造计数）。
+    for i in range(39):
+        seed_use_evidence(repo, mid, "派生查询词", feedback="helpful",
+                          outcome="completed", task_key=f"pos-{i}")
+    for i in range(25):
+        seed_use_evidence(repo, mid, "派生查询词", feedback="not_helpful",
+                          outcome="failed", task_key=f"neg-{i}")
     conn = index.connect(repo)
     rows, stats = derive_dataset(conn)
-    assert len(rows) == 1 and rows[0]["labels"]["sample_class"] == "positive"
+    assert stats["positive"] >= 40 and stats["negative"] >= 25
     dataset_path = tmp_path / "dataset.jsonl"
     digest_info = write_dataset(rows, dataset_path)
     comparison = {"metrics": {"B": {"Recall@5": 0.5, "correct_rejection": 0.5},
@@ -301,7 +308,8 @@ def test_derived_eval_pass_and_drift_fail(memory_repo, tmp_path):
     report = freeze_report(comparison, dataset_sha256=digest_info["sha256"],
                            vectors_sha256="v", provider_fp="fp", space_id="space",
                            covered_scopes=["global"], deployment_id="d",
-                           dense_min=0, derived_stats=stats)
+                           dense_min=0, derived_stats=stats,
+                           end_to_end={"p95_ms": 80.0, "basis": "end_to_end_hybrid"})
     assert report["verdict"] == "PASS"
     report_path = tmp_path / "report.json"
     report_path.write_text(json.dumps(report))
@@ -330,6 +338,13 @@ def test_full_acceptance_report_has_no_pending_review_residue(memory_repo, tmp_p
     finally:
         conn.close()
     seed_use_evidence(repo, mid, "验收查询词", feedback="helpful", outcome="completed")
+    # V2-03 样本门：真实派生链路补足正/负例。
+    for i in range(39):
+        seed_use_evidence(repo, mid, "验收查询词", feedback="helpful",
+                          outcome="completed", task_key=f"pos-{i}")
+    for i in range(25):
+        seed_use_evidence(repo, mid, "验收查询词", feedback="not_helpful",
+                          outcome="failed", task_key=f"neg-{i}")
     conn = index.connect(repo)
     rows, stats = derive_dataset(conn)
     dataset_path = tmp_path / "dataset.jsonl"
@@ -344,7 +359,8 @@ def test_full_acceptance_report_has_no_pending_review_residue(memory_repo, tmp_p
     report = freeze_report(comparison, dataset_sha256=digest_info["sha256"],
                            vectors_sha256="v", provider_fp="fp", space_id="space",
                            covered_scopes=["global"], deployment_id="d",
-                           dense_min=0, derived_stats=stats)
+                           dense_min=0, derived_stats=stats,
+                           end_to_end={"p95_ms": 80.0, "basis": "end_to_end_hybrid"})
     report_path = tmp_path / "report.json"
     report_path.write_text(json.dumps(report))
 

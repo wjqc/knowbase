@@ -326,7 +326,20 @@ class Engine:
         self.branch=self.cfg.get('branch','main');self.url=self.cfg.get('source_url','')
         validate_source(self.url,self.branch,allow_file=self.cfg.get('allow_file_source'),allow_insecure=self.cfg.get('allow_insecure_source'))
 
-    def status(self):return read(self.state_path)
+    def status(self):
+        state=read(self.state_path)
+        # V2-02：三层身份分开——登记（active.json 声明）与实测（安装树字节）
+        # 不一致时显式标记 drift，不以登记冒充安装事实。
+        try:
+            active=read(self.root/'active.json')
+            measured=module_hash(Path(self.git_package_path())/'knowbase')
+            state['active_registered_build']=active.get('build_id')
+            state['installed_measured_build']=measured
+            if active.get('installed_build_id') and active['installed_build_id']!=measured:
+                state['install_drift']=True
+        except Exception:
+            state['install_identity']='unavailable'
+        return state
 
     def check(self):
         with Lock(self.directory/'.lock'),tempfile.TemporaryDirectory(prefix='knowbase-update-check-') as td:
@@ -650,10 +663,15 @@ class Engine:
                     try:
                         stage='installation';self.install(wheel);journal['phase']='migrating';atomic(self.journal,journal)
                         stage='post_install_validation';self.probe(Path(self.git_package_path()),self.config_path)
+                        # V2-02：登记写实测安装摘要，杜绝 active.json 与安装字节漂移；
+                        # 实测与源构建不一致即安装失败，走既有回滚，不宣称已更新。
+                        installed_id=module_hash(Path(self.git_package_path())/'knowbase')
+                        if installed_id!=info['build_id']:raise UpdateError('installed_build_mismatch_after_install')
                         if not ledger_unchanged(self.repo/'memory.db',journal['ledger']) or cards(self.repo)!=journal['cards']:
                             raise UpdateError('real_user_data_changed')
                         atomic(self.root/'active.json',{'configured_runtime':str(self.python),'source_commit':target,
-                            **info,'manifest':str(self.root/'manifest.json'),'version_policy':'single in-place runtime'})
+                            **info,'installed_build_id':installed_id,'installed_measured_at':time.time(),
+                            'manifest':str(self.root/'manifest.json'),'version_policy':'single in-place runtime'})
                         atomic(self.root/'manifest.json',{'source_commit':target,**info,'backup':str(backup),'runtime':str(self.python),
                             'state':'automatic_upgrade_verified','verified_at':time.time(),'native_host_instructions':'new-session-if-changed'})
                         self.refresh_entries(candidate)

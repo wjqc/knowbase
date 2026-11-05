@@ -44,12 +44,23 @@ def delivery(repo,parent_id,text,tiers=None,dropped_once=0):
         if conn:conn.close()
 
 
+def shadow_observe(conn, query_hash, diagnostics):
+    """V2-03 影子观测：只记录"若启用混合会怎样/为何仍是 L2"的诊断，
+    不产生 delivery、usage 或反馈，也不参与任何发布决策。"""
+    detail = {'query_hash': query_hash, 'mode': 'shadow',
+              'no_delivery': True, 'no_governance': True,
+              **{k: v for k, v in (diagnostics or {}).items()
+                 if k in ('level', 'reason', 'semantic_status', 'channels',
+                          'vector_coverage', 'generation_id')}}
+    observe(conn, uuid.uuid4().hex, 'shadow_eval', detail)
+
+
 def report(repo):
     from collections import Counter
     result={'schema':'knowbase.retrieval-report.v1','levels':{},'degradation_reasons':{},
             'executed_queries':0,'remote_network_calls':0,'injected_tokens_estimated':0,
             'token_estimator':'chars-div2-v1','currency_cost_actual':None,'net_token_savings':None,
-            'effective_adoption_rate':None,'note':'命中、递送、采纳及完成后helpful分别统计；无对照不报告净节省。'}
+            'effective_adoption_rate':None,'shadow':{},'note':'命中、递送、采纳及完成后helpful分别统计；无对照不报告净节省。'}
     path=index.db_path(repo)
     if not path.exists():return {**result,'error':'database_missing'}
     conn=sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True);conn.execute('PRAGMA query_only=ON')
@@ -58,8 +69,13 @@ def report(repo):
         tables={r[0] for r in conn.execute('SELECT name FROM sqlite_master')}
         tier_triples=[]
         if 'retrieval_observations' in tables:
+            shadow_reasons={}
             for origin,level,reason,raw in conn.execute('SELECT origin,level,reason,detail_json FROM retrieval_observations'):
                 d=json.loads(raw)
+                if origin=='shadow_eval':
+                    # V2-03：影子观测单列，不进 executed_queries/levels，不产生递送。
+                    shadow_reasons[reason or d.get('reason') or (d.get('semantic_status') or 'observed')]=shadow_reasons.get(reason or d.get('reason') or (d.get('semantic_status') or 'observed'),0)+1
+                    continue
                 if origin=='hook_delivery':
                     result['injected_tokens_estimated']+=d.get('injected_tokens_estimated',0)
                     for tier,ids in (d.get('injection_tiers') or {}).items():
@@ -75,6 +91,9 @@ def report(repo):
                 if reason:reasons[reason]+=1
                 result['remote_network_calls']+=d.get('remote_calls',0)
             result.update(levels=dict(levels),degradation_reasons=dict(reasons),executed_queries=sum(levels.values()))
+            if shadow_reasons:
+                result['shadow']={'observations':sum(shadow_reasons.values()),'reasons':dict(shadow_reasons),
+                                  'delivered':0,'note':'shadow observations never inject or govern'}
         if tier_triples and 'knowledge_uses' in tables:
             delivered={};adopted={}
             for search_id,tier,ids in tier_triples:
@@ -88,6 +107,13 @@ def report(repo):
                 'rate':adopted[t]/delivered[t] if delivered[t] and t in adopted else None} for t in delivered}
         if 'knowledge_uses' in tables:
             result['use_receipts']=dict(conn.execute('SELECT state,COUNT(*) FROM knowledge_uses GROUP BY state'))
+            # V2-01 观测口径：采用率分母按 task-run/card-revision/delivery 定义；
+            # 无 delivery 关联的回执单列，不混入有效采用分母。
+            if 'use_retrieval_links' in tables:
+                linked=conn.execute('SELECT COUNT(DISTINCT use_id) FROM use_retrieval_links').fetchone()[0]
+                total=conn.execute('SELECT COUNT(*) FROM knowledge_uses').fetchone()[0]
+                result['use_receipts_delivery_linked']=linked
+                result['use_receipts_unlinked']=max(0,total-linked)
         if 'task_outcomes' in tables:
             result['task_results']=dict(conn.execute('SELECT result,COUNT(*) FROM task_outcomes GROUP BY result'))
         if {'knowledge_uses','task_outcomes','feedback_events'} <= tables:

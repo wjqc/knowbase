@@ -261,6 +261,10 @@ def _freshness_factor(m: dict) -> float:
 
 
 def _feedback_factor(m: dict) -> float:
+    # V2-01：frontmatter 反馈计数仅展示，默认不参与排序（可被自报反馈
+    # 抬分）。evolution.feedback_ranking_factor_enabled 为显式回滚开关。
+    if not config.load_config().get("evolution", {}).get("feedback_ranking_factor_enabled", False):
+        return 1.0
     h, u = int(m.get("helpful_count", 0)), int(m.get("unhelpful_count", 0))
     if u and not h:
         return 0.3  # 只收过负反馈 → 直接沉底

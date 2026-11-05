@@ -173,17 +173,28 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
         after=copy.deepcopy(meta)
         events=[]
         auto_activation=False
+        governance_applied=False
+        # V2-01 资格判定：verification_source 是调用方声明，不认证任何执行
+        # 验证。可信晋升/降级在 trusted 验证器接入前一律关闭；本回执保留
+        # 全部观察（计数/日志/任务结果账本），治理字段不变。
+        from .evolution import trusted_promotion_available
+        trusted=trusted_promotion_available()
+        if bound and not trusted:
+            events.append("V2-01 安全门：无可信执行验证来源（trusted_validation_unavailable），"
+                          "反馈仅保留观察，不改变治理状态。")
         if bound:
             after["updated"]=date.today().isoformat()
             key="helpful_count" if outcome=="helpful" else "unhelpful_count"
             after[key]=int(after.get(key,0))+1
-            if outcome in ("outdated","incorrect") and after.get("status")=="active":
+            if trusted and outcome in ("outdated","incorrect") and after.get("status")=="active":
                 after["status"]="stale"
                 # Phase 1 归档时钟起点：stale 起始日，之后自动归档据此计时。
                 after["stale_since"]=date.today().isoformat()
+                governance_applied=True
                 events.append(f"status: active → stale（{outcome}，版本绑定）")
             from .evolution import decide
             decision=decide(conn,mid,current,meta,use,task_key,outcome,task_result,staged=staged)
+            governance_applied=governance_applied or bool(decision["promote"] or decision["retire"])
             if decision["retire"] and after.get("status")=="active":
                 after["status"]="stale"
                 after["stale_since"]=date.today().isoformat()
@@ -204,7 +215,10 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
                 if auto_activation:
                     events.append(f"自动激活：staging → {store.TYPE_DIR.get(meta.get('type'), meta.get('type'))}（当前版本验证证据达标）")
             # 兼容既有无任务结果字段的工具反馈；新显式验证统一使用独立任务策略。
-            if (not task_result and not staged and policy.get("enabled",True) and outcome=="helpful"
+            # V2-01：两工具标签不是独立证据，默认关闭（evolution.legacy_promotion_enabled
+            # 为显式回滚开关）。工具标签仍照常落盘为观察。
+            if (not task_result and not staged and policy.get("enabled",True)
+                    and policy.get("legacy_promotion_enabled",False) and outcome=="helpful"
                     and after.get("confidence")=="once" and after.get("status")=="active"
                     and not decision["blocked"]):
                 rows=conn.execute("SELECT agent FROM feedback_events WHERE memory_id=? AND content_revision=? "
@@ -213,14 +227,22 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
                 if total>=PROMOTE_MIN_HELPFUL and len(tools)>=PROMOTE_MIN_TOOLS:
                     after["confidence"]="verified";after["last_verified"]=date.today().isoformat()
                     after["verified_content_revision"]=current
+                    governance_applied=True
                     events.append(f"confidence: once → verified（本版本helpful×{total}，{len(tools)}个工具标签；不代表人数）")
         else:
             events.append("未绑定使用回执/内容版本/任务结果：仅保留观察，不改变治理状态或验证计数。")
         receipt="FB-"+uuid.uuid4().hex
         binding="version_task" if bound else "legacy_unbound"
+        observed={"outcome":outcome,"task_result":task_result or None,
+                  "verification_source":verification_source,
+                  "evidence_basis":("trusted_validation" if trusted else
+                                    ("version_bound_agent_report" if bound else "legacy_unbound_observation")),
+                  "policy_revision":decision.get("policy_revision") if bound else None}
         result={"entity_id":mid,"receipt_id":receipt,"content_revision":current,
                 "governance_revision":_compute_governance_revision(after),"binding":binding,
-                "events":events,"governance_applied":bound}
+                "events":events,"governance_applied":governance_applied,"observed":observed}
+        if bound and not trusted:
+            result["unknown_reason"]="trusted_validation_unavailable"
         if auto_activation:
             result["auto_activation"]=True
         stamp=datetime.now(timezone.utc).isoformat(timespec="seconds")

@@ -27,17 +27,33 @@ class NormalizedEvent:
 
 def normalize_event(raw: dict, *, default_session_id: str = "",
                     default_scope: str = "") -> NormalizedEvent:
-    """将原始 transcript 行归一化。
+    """将原始 transcript 行归一化（复合 tool 块取首个配对事件；完整保留用 normalize_events）。
 
     支持格式：
     - Claude Code: {"type": "tool_use", "name": "...", "input": {...}}
     - ZCode: {"role": "user", "content": "..."}
     - 通用: {"session_id": "...", "role": "...", "text": "..."}
     """
+    events = normalize_events(raw, default_session_id=default_session_id,
+                              default_scope=default_scope)
+    return events[0] if events else NormalizedEvent(
+        session_id=default_session_id or "unknown", message_id=raw.get("id", ""),
+        role="system", text="", project_scope=default_scope)
+
+
+def normalize_events(raw: dict, *, default_session_id: str = "",
+                     default_scope: str = "") -> list[NormalizedEvent]:
+    """V2-09：一行原始事件可产出多个归一化事件。
+
+    assistant 复合 content 含多个 tool_use/tool_result 时逐项产出，各自
+    保留 tool_call_id——旧的单事件归一化会把同消息里的多个调用压缩成一个
+    （tool_call_id 被最后一个覆盖），工具配对从此失真。thinking/analysis
+    通道照旧产出空 system 事件（由调用方丢弃）。
+    """
     if (raw.get("type") in ("thinking", "reasoning", "analysis")
             or raw.get("channel") == "analysis"):
-        return NormalizedEvent(session_id=default_session_id or "unknown", message_id=raw.get("id", ""),
-                               role="system", text="", project_scope=default_scope)
+        return [NormalizedEvent(session_id=default_session_id or "unknown", message_id=raw.get("id", ""),
+                                role="system", text="", project_scope=default_scope)]
     session_id = (raw.get("session_id") or raw.get("sessionId")
                   or default_session_id or "unknown")
     message_id = raw.get("message_id") or raw.get("id") or ""
@@ -95,7 +111,7 @@ def normalize_event(raw: dict, *, default_session_id: str = "",
     else:
         text = json.dumps(raw, ensure_ascii=False)
 
-    return NormalizedEvent(
+    base = NormalizedEvent(
         session_id=session_id,
         message_id=message_id,
         role=role,
@@ -106,6 +122,36 @@ def normalize_event(raw: dict, *, default_session_id: str = "",
         timestamp=timestamp,
         project_scope=project_scope,
     )
+    if role in ("user", "assistant") and isinstance(raw.get("content"), list):
+        # V2-09 复合块逐项产出：每个 tool_use/tool_result 独立事件（保留各自
+        # tool_call_id），配对不失真；旧逻辑把多个调用压成一个、id 被覆盖。
+        extra: list[NormalizedEvent] = []
+        for item in raw["content"]:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "tool_use":
+                extra.append(NormalizedEvent(
+                    session_id=session_id,
+                    message_id=f"{message_id}#{item.get('id', '')}",
+                    role="tool", text=json.dumps(item.get("input", {}), ensure_ascii=False),
+                    tool_call_id=item.get("id", ""), tool_name=item.get("name", ""),
+                    timestamp=timestamp, project_scope=project_scope))
+            elif item.get("type") == "tool_result":
+                content = item.get("content") or ""
+                if isinstance(content, list):
+                    content = "\n".join(
+                        p.get("text", "") if isinstance(p, dict) else str(p)
+                        for p in content)
+                extra.append(NormalizedEvent(
+                    session_id=session_id,
+                    message_id=f"{message_id}#{item.get('tool_use_id', '')}",
+                    role="tool", text=str(content),
+                    tool_call_id=item.get("tool_use_id", ""),
+                    tool_result=str(content),
+                    timestamp=timestamp, project_scope=project_scope))
+        if extra:
+            return [base] + extra
+    return [base]
 
 
 def parse_transcript_file(path: str, *, default_session_id: str = "",
@@ -121,7 +167,7 @@ def parse_transcript_file(path: str, *, default_session_id: str = "",
                 try:
                     raw = json.loads(line)
                     if isinstance(raw, dict):
-                        events.append(normalize_event(
+                        events.extend(normalize_events(
                             raw, default_session_id=default_session_id,
                             default_scope=default_scope,
                         ))
@@ -210,7 +256,7 @@ def _parse_jsonl(content: str, default_session_id: str, default_scope: str) -> l
         try:
             raw = json.loads(line)
             if isinstance(raw, dict):
-                events.append(normalize_event(
+                events.extend(normalize_events(
                     raw, default_session_id=default_session_id,
                     default_scope=default_scope,
                 ))
@@ -228,7 +274,7 @@ def _parse_json_array(content: str, default_session_id: str, default_scope: str)
         events = []
         for item in data:
             if isinstance(item, dict):
-                events.append(normalize_event(
+                events.extend(normalize_events(
                     item, default_session_id=default_session_id,
                     default_scope=default_scope,
                 ))
@@ -255,7 +301,7 @@ def _parse_csv(content: str, default_session_id: str, default_scope: str) -> lis
                 "project_scope": row.get("scope") or row.get("project_scope") or default_scope,
             }
             if raw["role"] or raw["text"]:
-                events.append(normalize_event(
+                events.extend(normalize_events(
                     raw, default_session_id=default_session_id,
                     default_scope=default_scope,
                 ))

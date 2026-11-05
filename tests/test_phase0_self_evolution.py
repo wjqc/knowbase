@@ -1,13 +1,26 @@
 """Phase 0 自进化回归测试：staging 统一自动激活出口 + 已生效卡修订即降权 + stale 自动复活。
 
-全部场景零人工命令：测试中不调用任何 cmd_promote / cmd_verify / cmd_revise /
-cmd_archive，激活、修订、复活均由 Agent 任务流（context → read → bound feedback）驱动。
+V2-01 起，反馈驱动的晋升/降级默认关闭（无可信执行验证来源不自动治理）。
+本文件的机制测试统一在 evolution.trusted_promotion_enabled=true 过渡开关
+（模拟可信验证器已接入）下运行；默认关闭行为由 test_v2_01_governance_gate
+单独覆盖。全部场景零人工命令：测试中不调用任何 cmd_promote / cmd_verify /
+cmd_revise / cmd_archive，激活、修订、复活均由 Agent 任务流（context →
+read → bound feedback）驱动。
 """
 import json
 
 from knowbase import config, index, store, versioned_feedback, writer
 from knowbase.server import context_impl, read_impl
 from knowbase.mutations import _compute_revision
+
+
+def enable_trusted_transition():
+    """打开 V2-01 过渡开关：等价于可信验证器已接入的机制前提。"""
+    cfg = json.loads(config.CONFIG_PATH.read_text())
+    evolution = cfg.get("evolution") or {}
+    evolution["trusted_promotion_enabled"] = True
+    cfg["evolution"] = evolution
+    config.CONFIG_PATH.write_text(json.dumps(cfg))
 
 BODY = ("## 结论\n已结算订单不能撤回。\n## 解决的问题\n避免结算状态被修改。\n"
         "## 适用条件\n订单完成结算。\n## 不适用条件\n草稿订单。\n"
@@ -16,6 +29,7 @@ BODY = ("## 结论\n已结算订单不能撤回。\n## 解决的问题\n避免�
 
 
 def standard_card(repo, *, provenance="PRD-4 §2"):
+    enable_trusted_transition()
     result = writer.create(repo, "standard", "结算订单撤回标准", BODY,
                            scope="orders", provenance=provenance)
     assert not result.get("error"), result

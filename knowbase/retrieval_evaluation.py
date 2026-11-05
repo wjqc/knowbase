@@ -115,35 +115,71 @@ def _metrics(rows,rankings):
 
 
 def paired_interval(rows, left, right):
+    """V2-03：按任务 cluster 重抽样。行携带 cluster/task_id 时按簇重采样，
+    避免同任务多条改写把样本量与置信度虚增；无簇键回退逐 query bootstrap
+    并在 method 中声明（正式验收仍要求簇键）。"""
+    clusters={}
     deltas=[]
     for row,a,b in zip(rows,left,right):
         relevant=set(row['labels']['relevant_ids'])
-        if relevant:deltas.append((len(set(a[:5])&relevant)-len(set(b[:5])&relevant))/len(relevant))
+        if not relevant:continue
+        delta=(len(set(a[:5])&relevant)-len(set(b[:5])&relevant))/len(relevant)
+        deltas.append(delta)
+        # 只有显式簇键（cluster/task_id）才分簇；缺失全部并入同一桶，
+        # 簇数<2 时回退 query bootstrap 并在 method 声明，不伪装成独立簇。
+        clusters.setdefault(row.get('cluster') or row.get('task_id') or '',[]).append(delta)
     if not deltas:return None
     rng=random.Random(20261023)
-    boot=sorted(sum(rng.choice(deltas) for _ in deltas)/len(deltas) for _ in range(1000))
-    return {'metric':'Recall@5','delta':sum(deltas)/len(deltas),'CI95':[boot[24],boot[974]],'positive_n':len(deltas),'method':'paired_query_bootstrap; task-cluster bootstrap still required for formal acceptance'}
+    keys=list(clusters)
+    if len(keys)>=2:
+        boot=[]
+        for _ in range(1000):
+            picked=[clusters[rng.choice(keys)] for _ in keys]
+            flat=[d for group in picked for d in group]
+            boot.append(sum(flat)/len(flat))
+        boot.sort()
+        method=f'task_cluster_bootstrap(clusters={len(keys)}); queries_in_clusters={len(deltas)}'
+    else:
+        boot=sorted(sum(rng.choice(deltas) for _ in deltas)/len(deltas) for _ in range(1000))
+        method='paired_query_bootstrap(no_cluster_keys); task-cluster bootstrap required for formal acceptance'
+    return {'metric':'Recall@5','delta':sum(deltas)/len(deltas),'CI95':[boot[24],boot[974]],
+            'positive_n':len(deltas),'clusters':len(keys) if len(keys)>=2 else None,'method':method}
+
+# V2-03 激活预算（毫秒）：真实混合路径端到端 p95 上限。离线词法计算延迟
+# 不能替代网络/宿主耗时；缺真实测量则 latency 门为 False，保持 L2/影子。
+END_TO_END_P95_BUDGET_MS = 1000
+MIN_EVALUABLE_SAMPLES = 60
+MIN_POSITIVE_SAMPLES = 20
+MIN_NEGATIVE_SAMPLES = 20
+
 
 def freeze_report(comparison, *, dataset_sha256, vectors_sha256, provider_fp, space_id,
-                  covered_scopes, deployment_id, dense_min, derived_stats):
-    """Freeze a completed offline comparison into a knowbase.retrieval-evaluation.v1 report.
+                  covered_scopes, deployment_id, dense_min, derived_stats,
+                  end_to_end=None, heldout_digest="", task_clusters=None):
+    """Freeze a completed comparison into a knowbase.retrieval-evaluation.v2 report.
 
-    Gates are mechanical, derived from the comparison arms; no human sign-off
-    is consulted anywhere:
-    - quality: hybrid (D) Recall@5 >= lexical (B) Recall@5 AND >=
-      si.ABSOLUTE_MIN_RECALL_AT_5 (absolute floor, so a weak lexical
-      baseline cannot make a poor hybrid pass on the relative win alone)
-    - rejection: negative queries exist and D correct_rejection >= B correct_rejection
-    - regression: paired D-B Recall@5 CI95 lower bound >= 0
-    - latency: p95 lexical compute <= LATENCY_P95_MS_MAX (1000 ms proposal)
-    verdict is PASS iff all four gates hold. The report's annotation_status
-    is 'execution_derived'; the dataset digest links each sample to its
-    task-evidence binding in the derived dataset file.
+    V2-03 门（全部机械判定，无人工签核）：
+    - quality: hybrid (D) Recall@5 >= lexical (B) Recall@5 AND >= 绝对下限
+    - rejection: 真负例存在且 D correct_rejection >= B
+    - regression: 配对 D-B Recall@5 CI95 下界 >= 0（簇键时按任务簇重抽样）
+    - latency: 真实混合路径 end_to_end_p95_ms <= 预算；只交 p95_lexical_compute_ms
+      （离线计算）不能满足此门——end_to_end 为空即 FAIL，保持词法/影子
+    - samples: 可判定样本（positive+negative+irrelevant，unknown 不计）
+      >= 60 且 positive >= 20、negative >= 20；unknown 单列另报
+    verdict is PASS iff all five gates hold. v1 报告仍可读，但不能通过
+    semantic_index.quality() 的激活校验。
     """
     metrics = comparison.get('metrics', {}) or {}
     b, d = metrics.get('B', {}) or {}, metrics.get('D', {}) or {}
     paired = (comparison.get('paired_intervals') or {}).get('D-B') or {}
     ci = paired.get('CI95')
+    positive = int(derived_stats.get('positive', 0))
+    negative = int(derived_stats.get('negative', 0))
+    irrelevant = int(derived_stats.get('irrelevant', 0))
+    unknown = int(derived_stats.get('unknown', 0))
+    evaluable = positive + negative + irrelevant
+    e2e_p95 = (end_to_end or {}).get('p95_ms')
+    e2e_basis = (end_to_end or {}).get('basis', '')
     gates = {
         'quality': (d.get('Recall@5') is not None and b.get('Recall@5') is not None
                     and d['Recall@5'] >= b['Recall@5']
@@ -153,26 +189,101 @@ def freeze_report(comparison, *, dataset_sha256, vectors_sha256, provider_fp, sp
                       and b.get('correct_rejection') is not None
                       and d['correct_rejection'] >= b['correct_rejection']),
         'regression': (isinstance(ci, list) and len(ci) == 2 and ci[0] >= 0),
-        'latency': (comparison.get('p95_lexical_compute_ms') is not None
-                    and comparison['p95_lexical_compute_ms'] <= 1000),
+        'latency': (e2e_p95 is not None and e2e_basis == 'end_to_end_hybrid'
+                    and e2e_p95 <= END_TO_END_P95_BUDGET_MS),
+        'samples': (evaluable >= MIN_EVALUABLE_SAMPLES
+                    and positive >= MIN_POSITIVE_SAMPLES
+                    and negative >= MIN_NEGATIVE_SAMPLES),
     }
-    return {'schema': 'knowbase.retrieval-evaluation.v1',
+    return {'schema': 'knowbase.retrieval-evaluation.v2',
+            'purpose': 'task',
             'verdict': 'PASS' if all(gates.values()) else 'FAIL',
             'annotation_status': 'execution_derived',
-            'derived_sample_count': derived_stats.get('derived', 0),
-            'derived_positive': derived_stats.get('positive', 0),
-            'derived_negative': derived_stats.get('negative', 0),
-            'derived_irrelevant': derived_stats.get('irrelevant', 0),
-            'derived_unknown': derived_stats.get('unknown', 0),
+            'label_provenance': 'execution_derived',
+            'evaluable_sample_count': evaluable,
+            'evaluable_positive': positive,
+            'evaluable_negative': negative,
+            'evaluable_irrelevant': irrelevant,
+            'derived_unknown': unknown,
+            'unknown_note': 'unknown 不计入任何最低样本数，也不作负例；另报覆盖率。',
             'excluded_for_privacy': derived_stats.get('excluded_for_privacy', 0),
+            'task_clusters': task_clusters if task_clusters is not None else paired.get('clusters'),
+            'heldout_digest': heldout_digest,
             'confidence_interval': {'metric': 'Recall@5', 'delta': paired.get('delta'),
                                     'CI95': ci, 'positive_n': paired.get('positive_n'),
                                     'method': paired.get('method')},
             'hybrid_recall_at_5': d.get('Recall@5'),
+            'end_to_end_p95_ms': e2e_p95,
+            'latency_basis': e2e_basis or 'offline_compute_only',
+            'p95_lexical_compute_ms': comparison.get('p95_lexical_compute_ms'),
             'dataset_sha256': dataset_sha256, 'vectors_sha256': vectors_sha256,
             'retrieval_code': si.code_profile(), 'covered_scopes': covered_scopes,
             'provider_fp': provider_fp, 'space_id': space_id,
             'deployment_id': deployment_id, 'dense_min': dense_min, 'gates': gates}
+
+
+def measure_end_to_end_p95(repo, queries, *, scope=None, budget_ms=END_TO_END_P95_BUDGET_MS,
+                           hybrid_probe=False):
+    """真实端到端延迟测量（V2-03 latency 门的取证来源）。
+
+    默认走正式 index.search(origin='mcp_search')（含查询 hygiene、词法、
+    激活时的真实远端向量与融合）。hybrid_probe=True 时用"词法 + 真实远端
+    query embed + 余弦打分"逐查询实测（不需要 dense 已激活），供冻结报告
+    在激活前取得混合路径真实网络耗时。两种模式都只读：不写 delivery、
+    usage 或反馈。basis 只在真实远端参与时为 end_to_end_hybrid；否则如实
+    标 lexical_only/provider_unavailable，不能满足 latency 门。
+    """
+    conn = sqlite3.connect(index.db_path(repo).resolve().as_uri() + '?mode=ro', uri=True)
+    conn.execute('PRAGMA query_only=ON')
+    try:
+        times = []
+        levels = set()
+        vectors = {}
+        dimension = None
+        if hybrid_probe:
+            from . import retrieval_state
+            options = si.settings()
+            p = retrieval_state.provider()
+            row = conn.execute(
+                "SELECT generation_id FROM embedding_generations WHERE provider_fp=? "
+                "AND state IN ('ready','active') ORDER BY validated_at DESC LIMIT 1",
+                (p.fingerprint,)).fetchone()
+            g = si.generation(conn, row[0]) if row else None
+            if g:
+                items = si.manifest(conn, options)
+                dimension = g['identity']['dimension']
+                vectors = {item['id']: si.vector(conn, g['id'], item, dimension)
+                           for item in items}
+                p.probe(g['identity'])
+        for q in queries[:200]:
+            diagnostics = {}
+            started = time.monotonic()
+            if hybrid_probe and g and vectors and None not in vectors.values():
+                from .embedding_provider import normalize
+                prepared = query_hygiene.prepare(q)
+                text = q if not prepared.get('query') else prepared['query']
+                values, _observed = p.embed([text], query=True)
+                qv = normalize(values[0], dimension)
+                for item_id, value in vectors.items():
+                    cosine(qv, value)
+            else:
+                index.search(conn, q, scope=scope, limit=5, origin='mcp_search',
+                             diagnostics=diagnostics)
+                levels.add(diagnostics.get('level'))
+            times.append((time.monotonic() - started) * 1000)
+        if not times:
+            return {'p95_ms': None, 'basis': 'no_queries', 'n': 0}
+        times.sort()
+        p95 = times[math.ceil(.95 * len(times)) - 1]
+        if hybrid_probe:
+            basis = 'end_to_end_hybrid' if vectors else 'provider_unavailable'
+        else:
+            basis = 'end_to_end_hybrid' if levels & {'L3'} else 'lexical_only'
+        return {'p95_ms': round(p95, 2), 'basis': basis, 'n': len(times),
+                'budget_ms': budget_ms, 'mode': 'hybrid_probe' if hybrid_probe else 'production_search',
+                'note': 'real network included; read-only, no delivery/usage writes'}
+    finally:
+        conn.close()
 
 
 def run(repo,source,cache_path,baseline_source, *, dense_min,gate_dense_min):

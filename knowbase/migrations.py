@@ -469,6 +469,169 @@ MIGRATIONS: list[tuple[int, str]] = [
       day TEXT PRIMARY KEY, calls INTEGER NOT NULL DEFAULT 0,
       input_chars INTEGER NOT NULL DEFAULT 0);
     """),
+    # v30: V2-02 运行健康。区分 attempt/effective success、blocked 起点与
+    # 实际加载构建；maintenance_alerts 是结构化维护事件（状态改变/超 SLA
+    # 时才写，不自动外发）。旧字段缺失语义见 worker._reschedule。
+    (30, """
+    ALTER TABLE automation_schedule ADD COLUMN last_attempt_at TEXT NOT NULL DEFAULT '';
+    ALTER TABLE automation_schedule ADD COLUMN last_effective_success_at TEXT NOT NULL DEFAULT '';
+    ALTER TABLE automation_schedule ADD COLUMN blocked_since TEXT NOT NULL DEFAULT '';
+    ALTER TABLE automation_schedule ADD COLUMN build_loaded TEXT NOT NULL DEFAULT '';
+    ALTER TABLE automation_schedule ADD COLUMN result_counts TEXT NOT NULL DEFAULT '{}';
+    CREATE TABLE maintenance_alerts(
+      alert_id TEXT PRIMARY KEY,
+      created_at TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      detail TEXT NOT NULL DEFAULT '');
+    CREATE INDEX idx_maintenance_alerts_subject ON maintenance_alerts(kind, subject, created_at);
+    """),
+    # v31: V2-04 生命周期版本资产。内容权威在知识 Git 的 lifecycle/revisions/
+    # 与 lifecycle/publications/；本组表是本地物化与运行账本（迁移/重建可
+    # 从 manifest+快照恢复）。写入后 knowledge_revisions 内容不可 UPDATE。
+    (31, """
+    CREATE TABLE knowledge_revisions(
+      memory_id TEXT NOT NULL,
+      revision_algo TEXT NOT NULL,
+      content_revision TEXT NOT NULL,
+      snapshot_hash TEXT NOT NULL UNIQUE,
+      snapshot_path TEXT NOT NULL,
+      parent_revisions_json TEXT NOT NULL DEFAULT '[]',
+      change_id TEXT NOT NULL DEFAULT '',
+      applicability_json TEXT NOT NULL DEFAULT '{}',
+      claims_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(memory_id, revision_algo, content_revision));
+    CREATE INDEX idx_knowledge_revisions_change ON knowledge_revisions(change_id);
+    CREATE TABLE publication_batches(
+      publication_id TEXT PRIMARY KEY,
+      change_id TEXT UNIQUE NOT NULL,
+      base_heads_json TEXT NOT NULL,
+      manifest_hash TEXT NOT NULL,
+      manifest_path TEXT NOT NULL,
+      state TEXT NOT NULL,
+      before_after_hashes_json TEXT NOT NULL DEFAULT '{}',
+      git_state TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL);
+    CREATE TABLE published_heads(
+      memory_id TEXT PRIMARY KEY,
+      content_revision TEXT NOT NULL,
+      revision_algo TEXT NOT NULL,
+      publication_id TEXT NOT NULL DEFAULT '',
+      visibility TEXT NOT NULL DEFAULT 'active',
+      redirect_ids_json TEXT NOT NULL DEFAULT '[]',
+      projection_watermark TEXT NOT NULL DEFAULT '');
+    CREATE INDEX idx_published_heads_publication ON published_heads(publication_id);
+    CREATE TABLE task_runs(
+      run_id TEXT PRIMARY KEY,
+      project_key TEXT NOT NULL DEFAULT '',
+      logical_task_key TEXT NOT NULL DEFAULT '',
+      origin_run_key TEXT NOT NULL DEFAULT '',
+      task_revision TEXT NOT NULL DEFAULT '',
+      host_profile TEXT NOT NULL DEFAULT '',
+      session_id TEXT NOT NULL DEFAULT '',
+      identity_basis TEXT NOT NULL DEFAULT '',
+      environment_fingerprint TEXT NOT NULL DEFAULT '',
+      artifact_set_hash TEXT NOT NULL DEFAULT '',
+      completion TEXT NOT NULL DEFAULT '',
+      gap_flags_json TEXT NOT NULL DEFAULT '[]');
+    CREATE UNIQUE INDEX idx_task_runs_origin ON task_runs(project_key, origin_run_key)
+      WHERE origin_run_key!='' AND identity_basis='native';
+    CREATE INDEX idx_task_runs_logical ON task_runs(logical_task_key);
+    CREATE TABLE evidence_events(
+      event_id TEXT PRIMARY KEY,
+      payload_hash TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      subject_revision TEXT NOT NULL DEFAULT '',
+      run_id TEXT NOT NULL DEFAULT '',
+      logical_task_key TEXT NOT NULL DEFAULT '',
+      independence_group TEXT NOT NULL DEFAULT '',
+      issuer_id TEXT NOT NULL DEFAULT '',
+      trust_basis TEXT NOT NULL DEFAULT '',
+      level TEXT NOT NULL DEFAULT '',
+      polarity TEXT NOT NULL DEFAULT '',
+      supersedes_event_id TEXT NOT NULL DEFAULT '',
+      revokes_event_id TEXT NOT NULL DEFAULT '',
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      import_state TEXT NOT NULL DEFAULT '',
+      occurred_at TEXT NOT NULL);
+    CREATE INDEX idx_evidence_subject ON evidence_events(subject_revision, level);
+    CREATE INDEX idx_evidence_logical ON evidence_events(logical_task_key);
+    CREATE INDEX idx_evidence_revokes ON evidence_events(revokes_event_id);
+    """),
+    # v32: V2-09 宿主原生态观测。native_key 跨重启稳定（宿主事件原生键），
+    # 同 key 不同 payload 记冲突由应用层判定；工具调用/结果按 tool_call_id
+    # 配对，缺失保留 gap 不猜。事件本体存脱敏 JSON，不含凭据/原始大正文。
+    (32, """
+    CREATE TABLE native_events(
+      host_profile TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      native_key TEXT NOT NULL,
+      event_kind TEXT NOT NULL,
+      tool_call_id TEXT NOT NULL DEFAULT '',
+      tool_name TEXT NOT NULL DEFAULT '',
+      payload_hash TEXT NOT NULL,
+      artifact_hash TEXT NOT NULL DEFAULT '',
+      event_json TEXT NOT NULL DEFAULT '{}',
+      occurred_at TEXT NOT NULL,
+      PRIMARY KEY(host_profile, session_id, native_key));
+    CREATE INDEX idx_native_events_tool ON native_events(host_profile, session_id, tool_call_id);
+    """),
+    # v33: V2-06/08 变更候选、候选输出 spool（本地私有，不进知识 Git）与
+    # 准入报告。候选沿用幂等键；proposal_hash 冻结提案内容，同 id 异 hash
+    # 是冲突。outputs 存目标正文/补丁，snapshot_hash 冻结其内容。
+    (33, """
+    CREATE TABLE lifecycle_changes(
+      change_id TEXT PRIMARY KEY,
+      relation TEXT NOT NULL,
+      risk TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      proposer TEXT NOT NULL DEFAULT '',
+      source_material_refs_json TEXT NOT NULL DEFAULT '[]',
+      recall_snapshot_hash TEXT NOT NULL DEFAULT '',
+      base_heads_json TEXT NOT NULL,
+      target_plan_json TEXT NOT NULL DEFAULT '{}',
+      claim_map_json TEXT NOT NULL DEFAULT '[]',
+      source_dispositions_json TEXT NOT NULL DEFAULT '[]',
+      validation_plan_hash TEXT NOT NULL DEFAULT '',
+      diff_hash TEXT NOT NULL DEFAULT '',
+      proposal_hash TEXT NOT NULL,
+      policy_revision TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'proposed',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL);
+    CREATE INDEX idx_lifecycle_changes_state ON lifecycle_changes(state, created_at);
+    CREATE TABLE lifecycle_change_outputs(
+      change_id TEXT NOT NULL,
+      memory_id TEXT NOT NULL,
+      disposition TEXT NOT NULL,
+      snapshot_hash TEXT NOT NULL,
+      meta_json TEXT NOT NULL,
+      body TEXT NOT NULL,
+      PRIMARY KEY(change_id, memory_id));
+    CREATE TABLE admission_reports(
+      report_id TEXT PRIMARY KEY,
+      memory_id TEXT NOT NULL,
+      content_revision TEXT NOT NULL,
+      change_id TEXT NOT NULL DEFAULT '',
+      card_type TEXT NOT NULL DEFAULT '',
+      risk TEXT NOT NULL DEFAULT '',
+      result TEXT NOT NULL,
+      checks_json TEXT NOT NULL DEFAULT '[]',
+      claim_coverage_json TEXT NOT NULL DEFAULT '{}',
+      authority_ref TEXT NOT NULL DEFAULT '',
+      validator_id TEXT NOT NULL DEFAULT '',
+      artifact_hash TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+        UNIQUE(memory_id, content_revision, change_id, report_id));
+    """),
+    # v34: V2-12/13 证据列补充：claim 级定位与签发/撤销元数据（导入事件
+    # 的来源键）。旧行默认空。
+    (34, """
+    ALTER TABLE evidence_events ADD COLUMN claim_id TEXT NOT NULL DEFAULT '';
+    ALTER TABLE evidence_events ADD COLUMN key_id TEXT NOT NULL DEFAULT '';
+    ALTER TABLE evidence_events ADD COLUMN scope TEXT NOT NULL DEFAULT '';
+    """),
 ]
 
 

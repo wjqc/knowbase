@@ -10,6 +10,7 @@ MCP/Hook 只追加任务或发本地唤醒信号，不各自开执行池。
 import time
 import uuid
 import re
+import json
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
@@ -158,7 +159,14 @@ def due_tasks(conn, now: str = "") -> list[dict]:
 
 
 def _reschedule(conn, kind: str, *, status: str, error: str, lease) -> bool:
-    """Persist outcomes/backoff only while this exact supervisor lease is still valid."""
+    """Persist outcomes/backoff only while this exact supervisor lease is still valid.
+
+    V2-02：区分 last_attempt_at（每次尝试）与 last_effective_success_at（真实
+    产出的成功，skipped/blocked/error 不推进）；blocked_since 记录连续 blocked
+    起点用于告警；build_loaded 记录实际执行本任务的进程构建指纹；result_counts
+    为累计结果分布。旧库缺列时按默认空值读取（迁移 v30 起存在）。
+    """
+    from ..build_identity import build_id
     interval = TASK_INTERVALS.get(kind, 60)
     if kind == "team_sync":
         interval = max(900, int(app_config.load_config().get("team", {}).get("interval_seconds", 900)))
@@ -166,19 +174,80 @@ def _reschedule(conn, kind: str, *, status: str, error: str, lease) -> bool:
     try:
         if not _owns_lease(conn, *lease):
             conn.rollback(); return False
-        previous = conn.execute("SELECT failure_count FROM automation_schedule WHERE task_key=?", (kind,)).fetchone()
+        now = _now()
+        previous = conn.execute(
+            "SELECT failure_count,last_status,blocked_since,result_counts FROM automation_schedule "
+            "WHERE task_key=?", (kind,)).fetchone()
         failures = ((previous[0] if previous else 0) + 1) if status == "error" else 0
         if failures:
             interval = min(3600, interval * (2 ** min(failures, 5)))
         nxt = (datetime.now(timezone.utc) + timedelta(seconds=interval)).isoformat(timespec="seconds")
+        blocked_since = previous[2] if previous else ""
+        was_blocked = (previous[1] if previous else "") == "blocked"
+        if status == "blocked":
+            blocked_since = blocked_since or now
+        else:
+            blocked_since = ""
+        try:
+            counts = json.loads(previous[3]) if previous and previous[3] else {}
+        except ValueError:
+            counts = {}
+        counts[status] = int(counts.get(status, 0)) + 1
         conn.execute(
             "UPDATE automation_schedule SET next_run_at=?,last_success_at=CASE WHEN ?='success' THEN ? "
-            "ELSE last_success_at END,last_error=?,failure_count=?,last_status=?,updated_at=? WHERE task_key=?",
-            (nxt, status, _now(), error[:200] if status in {"error", "blocked"} else "",
-             failures, status, _now(), kind))
+            "ELSE last_success_at END,last_error=?,failure_count=?,last_status=?,updated_at=?,"
+            "last_attempt_at=?,last_effective_success_at=CASE WHEN ?='success' THEN ? "
+            "ELSE last_effective_success_at END,blocked_since=?,build_loaded=?,result_counts=? "
+            "WHERE task_key=?",
+            (nxt, status, now, error[:200] if status in {"error", "blocked"} else "",
+             failures, status, now, now, status, now, blocked_since, build_id(),
+             json.dumps(counts, ensure_ascii=False), kind))
+        _maybe_alert(conn, kind, status, error, failures, blocked_since, was_blocked)
         conn.commit(); return True
     except Exception:
         conn.rollback(); raise
+
+
+def _maybe_alert(conn, kind, status, error, failures, blocked_since, was_blocked):
+    """结构化维护事件：只在状态改变或超阈值时写，同一状态不重复刷屏。
+
+    - blocked 连续两轮：task_blocked；
+    - blocked 持续超过 1 小时：task_blocked_persistent（一次性）；
+    - error 连续 ≥3 次：task_failing。
+    事件只入 maintenance_alerts 表，由 doctor/status 呈现，不自动外发。
+    """
+    now = _now()
+    subject = kind
+    def emit(alert_kind, detail):
+        conn.execute("INSERT OR REPLACE INTO maintenance_alerts VALUES(?,?,?,?,?)",
+                     (f"MA-{uuid.uuid4().hex[:20]}", now, alert_kind, subject, detail[:500]))
+    if status == "blocked" and was_blocked:
+        # 连续两轮 blocked（上一轮也是 blocked）才出事件：单次 blocked 可能是
+        # 瞬时窗口（如升级排空），不制造噪声。同一 blocked 窗口只发一次。
+        marker = f"since={blocked_since or now}"
+        seen = conn.execute("SELECT 1 FROM maintenance_alerts WHERE kind='task_blocked' "
+                            "AND subject=? AND detail LIKE ?", (subject, '%' + marker + '%')).fetchone()
+        if not seen:
+            emit("task_blocked", f"blocked {marker}; reason={error or 'unknown'}")
+    if blocked_since:
+        try:
+            hours = (datetime.now(timezone.utc)
+                     - datetime.fromisoformat(blocked_since)).total_seconds() / 3600
+        except ValueError:
+            hours = 0
+        if hours >= 1:
+            marker = f"persist:{subject}:{blocked_since}"
+            seen = conn.execute("SELECT 1 FROM maintenance_alerts WHERE kind='task_blocked_persistent' "
+                                "AND detail LIKE ?", ('%' + marker + '%',)).fetchone()
+            if not seen:
+                emit("task_blocked_persistent",
+                     f"blocked since {blocked_since} (>1h); marker={marker}")
+    if failures >= 3:
+        marker = f"failures={failures}"
+        seen = conn.execute("SELECT 1 FROM maintenance_alerts WHERE kind='task_failing' "
+                            "AND subject=? AND detail LIKE ?", (subject, '%' + marker + '%')).fetchone()
+        if not seen:
+            emit("task_failing", f"{marker}; last_error={error or 'unknown'}")
 
 
 def _outcome(result):
@@ -394,22 +463,96 @@ def run_forever(repo, *, tick_seconds: float = 5.0) -> dict:
 
 
 def status(repo) -> dict:
+    """V2-02 运行健康：source/installed/loaded 三层身份分开呈现，不互相冒充。
+
+    - build.source：当前进程加载的源码构建（本函数运行所在进程）；
+    - build.sessions：各宿主最新 serve 会话的构建 → current/stale（需重连）；
+    - schedule[].oldest_pending：该任务关联的最老非终态作业年龄（积压可解释）；
+    - alerts：maintenance_alerts 最近结构化维护事件。
+    """
     repo = Path(repo)
+    from ..build_identity import build_id
+    from ..sessions import sessions_by_agent
     conn = _connect(repo)
     try:
         ensure_schedule(conn)
         rows = conn.execute(
-            "SELECT task_key,kind,next_run_at,last_success_at,last_error,last_status,failure_count FROM automation_schedule"
-            " ORDER BY kind").fetchall()
+            "SELECT task_key,kind,next_run_at,last_success_at,last_error,last_status,failure_count,"
+            "last_attempt_at,last_effective_success_at,blocked_since,build_loaded,result_counts "
+            "FROM automation_schedule ORDER BY kind").fetchall()
         gaps = conn.execute("SELECT COUNT(*) FROM capture_gaps").fetchone()[0]
+        oldest = _oldest_pending_by_state(conn)
+        alerts = conn.execute(
+            "SELECT alert_id,created_at,kind,subject,detail FROM maintenance_alerts "
+            "ORDER BY created_at DESC LIMIT 20").fetchall()
         return {
             "lease": lease_status(conn),
             "schedule": [{"task_key": r[0], "kind": r[1], "next_run_at": r[2],
                           "last_success_at": r[3], "last_error": r[4], "last_status": r[5],
-                          "failure_count": r[6]} for r in rows],
+                          "failure_count": r[6], "last_attempt_at": r[7],
+                          "last_effective_success_at": r[8], "blocked_since": r[9],
+                          "build_loaded": r[10],
+                          "result_counts": json.loads(r[11] or "{}"),
+                          "oldest_pending": oldest.get(r[1])} for r in rows],
             "capture_gaps": gaps,
             "distillation": __import__('knowbase.automation.distillation',fromlist=['ready_executor']).ready_executor(app_config.load_config())[1] or 'ready',
+            "build": {"loaded": build_id(),
+                      "sessions": sessions_by_agent(build_id())},
+            "alerts": [{"alert_id": a[0], "created_at": a[1], "kind": a[2],
+                        "subject": a[3], "detail": a[4]} for a in alerts],
         }
+    finally:
+        conn.close()
+
+
+def _oldest_pending_by_state(conn) -> dict[str, str]:
+    """按任务 kind 取最老非终态作业的创建时间（只读；无积压返回空 dict）。"""
+    try:
+        rows = conn.execute(
+            "SELECT kind,MIN(created_at) FROM jobs WHERE state NOT IN "
+            "('succeeded','no_candidate','needs_review','failed') GROUP BY kind").fetchall()
+    except sqlite3.Error:
+        return {}
+    return {r[0]: r[1] for r in rows if r[0] and r[1]}
+
+
+def retry_plan(repo) -> dict:
+    """V2-02 只读积压恢复计划：分类历史任务的可恢复性，不修改任何状态。
+
+    分类依据（不改数据、不触发模型）：
+    - requeue_ready：retry_wait/awaiting_agent 且租约已释放、材料 spool 仍在；
+    - lease_stuck：lease_until 仍在未来（等 expire_leases 或人工核对）；
+    - needs_review：needs_review 终态（人工出口，不自动重开）；
+    - failed_permanent：failed 终态（重试需 jobs.retry 显式授权）；
+    - blocked_config：blocked（material_manifest_required 等配置类原因）。
+    执行任何一类都需后续授权；本函数只产出清单。
+    """
+    repo = Path(repo)
+    conn = _connect(repo)
+    plan = {"generated_at": _now(), "readonly": True, "classes": {}}
+    try:
+        now = datetime.now(timezone.utc)
+        rows = conn.execute(
+            "SELECT job_id,kind,state,error,lease_until,attempt,created_at FROM jobs "
+            "WHERE state NOT IN ('succeeded','no_candidate') ORDER BY created_at").fetchall()
+        for job_id, kind, state, error, lease_until, attempt, created_at in rows:
+            if state == "needs_review":
+                cls = "needs_review"
+            elif state == "failed":
+                cls = "failed_permanent"
+            elif state == "blocked":
+                cls = "blocked_config"
+            elif lease_until and lease_until > _now():
+                cls = "lease_stuck"
+            elif state in ("retry_wait", "awaiting_agent", "queued", "preparing", "awaiting"):
+                cls = "requeue_ready"
+            else:
+                cls = "unknown_state"
+            entry = {"job_id": job_id, "kind": kind, "state": state,
+                     "error": error or "", "attempt": attempt, "created_at": created_at}
+            plan["classes"].setdefault(cls, []).append(entry)
+        plan["summary"] = {cls: len(items) for cls, items in plan["classes"].items()}
+        return plan
     finally:
         conn.close()
 
