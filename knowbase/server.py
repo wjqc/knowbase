@@ -1,4 +1,9 @@
-"""薪火 MCP 服务端：6 个工具，stdio 传输。
+"""薪火 MCP 服务端：stdio 传输。
+
+工具（2026-11-05 计 17 个，分四组；数量以注册表为准，新增工具时同步更新此处）：
+记忆读写 memory_save/update/read/search/feedback/context/use；
+统计 memory_stats/metrics；提炼作业 memory_capture/job_claim/material/renew/
+submit/status/resubmit_review；导入 memory_import。
 
 所有写工具在 repo 级跨进程锁内完成「分配 id → 写盘 → git → 重建索引」整个事务。
 confidence/status 是服务端状态机的输出，任何工具的入参都不包含它们。
@@ -54,6 +59,30 @@ def _repo():
 
 def _cfg():
     return config.load_config()
+
+
+def _observe_mcp_call(rp, session_id, tool_name, event_id="", payload=None,
+                      native_task_key=""):
+    """W1-1：MCP 记忆调用进 V2 观测台账（native_events）。
+
+    只记工具名与结构化参数，不记正文；失败不影响主调用。
+    无 session_id 时不记（不伪造会话身份）。
+    """
+    if not session_id:
+        return
+    try:
+        from .knowledge_lifecycle import observe as _observe_lifecycle
+        conn = index.connect(rp)
+        try:
+            _observe_lifecycle.observe_mcp_call(
+                conn, host_profile=config.agent_name(), session_id=session_id,
+                project_key=_observe_lifecycle.project_key_for_repo(rp),
+                tool_name=tool_name, event_id=event_id, payload=payload or {},
+                native_task_key=native_task_key)
+        finally:
+            conn.close()
+    except Exception:
+        pass
 
 
 from .writer import _post_save, _push_after_write, _relation_side_effects
@@ -173,6 +202,9 @@ def read_impl(id: str, session_id: str = "", event_id: str = "",
         index.record_usage(conn,"read",id)
     finally:
         conn.close()
+    _observe_mcp_call(rp, session_id, "memory_read", event_id=event_id,
+                      payload={"tool": "memory_read", "memory_id": id,
+                               "context_event_id": context_event_id})
 
     head = (f"[{meta['id']}] {meta.get('title','')}"
             f" ｜ {meta.get('confidence')}·{meta.get('status')}"
@@ -205,7 +237,9 @@ def read_impl(id: str, session_id: str = "", event_id: str = "",
 
 
 def search_impl(query: str, type: str | None = None, scope: str | None = None,
-                tag: str | None = None, limit: int = 5, include_inactive: bool = False):
+                tag: str | None = None, limit: int = 5, include_inactive: bool = False,
+                session_id: str = ""):
+    """检索经验记忆。传 session_id 可将本次检索记入任务观测（用于证据归因）。"""
     rp, err = _repo()
     if err:
         return err
@@ -228,6 +262,9 @@ def search_impl(query: str, type: str | None = None, scope: str | None = None,
     results = index.search(conn, query, mtype=type, scope=scope, tag=tag, limit=limit,
                            include_inactive=include_inactive, origin="mcp_search", diagnostics=diagnostics)
     index.record_search(conn, query, scope, results, retrieval=diagnostics)
+    _observe_mcp_call(rp, session_id, "memory_search", payload={
+        "tool": "memory_search", "query": query[:512], "scope": scope,
+        "hits": [r["id"] for r in results]})
     conn.close()
     if diagnostics.get("reason") == "query_too_large":
         return "错误：query_too_large；请用topics拆分为具体短查询。"
@@ -351,6 +388,16 @@ def context_impl(session_id: str, event_id: str, scope: str = "", stage: str = "
         stage=stage, task_id=task_id, task_revision=task_revision, current_goal=current_goal,
         topics=topics, evidence_refs=evidence_refs, observed_cursor=observed_cursor,
         request_id=request_id, host_profile=host_profile)
+    _topics = []
+    for t in (topics or []):
+        if isinstance(t, dict):
+            _topics.append({"topic_id": str(t.get("topic_id", ""))[:128],
+                            "queries": [str(q)[:128] for q in (t.get("queries") or [])][:3]})
+    _observe_mcp_call(rp, session_id, "memory_context", event_id=event_id,
+                      payload={"tool": "memory_context", "stage": stage,
+                               "scope": scope, "task_id": task_id,
+                               "topics": _topics[:5]},
+                      native_task_key=task_id)
     policy=_cfg().get("evolution",{})
     if (not result.get("error") and scope and policy.get("enabled",True)
             and policy.get("auto_activate_bizrules",True)):
@@ -375,9 +422,14 @@ def use_impl(session_id: str, event_id: str, context_event_id: str, id: str,
     rp,err=_repo()
     if err:
         return err
-    return json.dumps(consumption.record(rp,session_id=session_id,event_id=event_id,
+    result = json.dumps(consumption.record(rp,session_id=session_id,event_id=event_id,
         context_event_id=context_event_id,memory_id=id,content_revision=content_revision,
         state=state,host_profile=host_profile),ensure_ascii=False)
+    _observe_mcp_call(rp, session_id, "memory_use", event_id=event_id,
+                      payload={"tool": "memory_use", "memory_id": id,
+                               "content_revision": content_revision, "state": state,
+                               "context_event_id": context_event_id})
+    return result
 
 
 def stats_impl():
@@ -910,7 +962,7 @@ from .telemetry import observe as _observe
 mcp.tool(name="memory_save", description="保存一条经验记忆。standard/preference/bizrule 由 Agent 保存时自动进 staging，独立任务验证证据达标后自动激活")(_observe(save_impl,"memory_save"))
 mcp.tool(name="memory_update", description="修改已有记忆的内容/标签/关系。confidence 与 status 由服务端状态机管理，不接受指定")(_observe(update_impl,"memory_update"))
 mcp.tool(name="memory_read", description="按id读全文，成功读取才计hit。新卡或staging读回可只传id。若关联任务，session_id/event_id/context_event_id一起传，host_profile沿用检索；event_id为本次阅读新事件，context_event_id绑定实际任务上下文。允许同scope新卡/待审卡阅读，阅读不等于候选采纳或helpful")(_observe(read_impl,"memory_read"))
-mcp.tool(name="memory_search", description="检索经验记忆：任务开始涉及具体项目/系统/报错时先调用。检索词建议 ≥3 字的具体名词或报错关键词")(_observe(search_impl,"memory_search"))
+mcp.tool(name="memory_search", description="检索经验记忆：任务开始涉及具体项目/系统/报错时先调用。检索词建议 ≥3 字的具体名词或报错关键词。传 session_id 可将本次检索记入任务观测（用于证据归因）。")(_observe(search_impl,"memory_search"))
 mcp.tool(name="memory_feedback", description="验证任务结果后回填helpful/not_helpful/outdated/incorrect；携带expected_content_revision、memory_use返回的use_id、稳定task_outcome_id。按卡版本+任务结果去重。旧调用仅保留未绑定观察，不改变治理状态")(_observe(feedback_impl,"memory_feedback"))
 mcp.tool(name="memory_context", description="执行中知识检索：拆解长方案后、进入子任务、新错误和重要决策前调用；提供当前主题与查询，阶段结束检查技术经验及业务规则待办")(_observe(context_impl,"memory_context"))
 mcp.tool(name="memory_use", description="记录已递送候选的实际使用状态：referenced参考/adopted采纳/irrelevant无关/unverified待验证。沿用memory_context的会话、event_id和卡片版本；不自动生成helpful。返回use_id供任务结果反馈使用")(_observe(use_impl,"memory_use"))

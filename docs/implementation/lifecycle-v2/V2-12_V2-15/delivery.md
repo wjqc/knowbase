@@ -12,7 +12,8 @@
   （同输入同输出）。
 - `apply_decision()`：兼容镜像落地（confidence/quality_state/quarantine→
   stale+原因）；治理字段不动 content revision。
-- `recompute_all()`：worker/导入后重算入口。
+- `recompute_all()`：可调用的重算函数（worker/导入后重算入口，待 W1-4 接线；
+  当前仓库内无任何 worker handler 或导入流程调用它）。
 
 ## V2-13（`trust.py` + `evidence.py` + 迁移 v34）
 
@@ -23,8 +24,8 @@
 - `evidence.py`：`export_package`（本地 trusted L3 → 签名信封包，白名单字段、
   无正文/命令输出）；`import_package`：信封校验→信任与验签→传输幂等（同 ID
   异 hash → conflict 双方隔离）→业务去重（同语义证据一次）→撤销物化（先撤销
-  后原事件 → tombstone，原事件后到仍无效）；未信事件保留 external_unverified
-  零治理影响。
+  后原事件 → tombstone，原事件后到仍无效）；未信事件仅计数并记 event_id
+  （不入库，零治理影响）。
 - 迁移 v34：evidence_events 补 claim_id/key_id/scope 列。
 
 ## V2-14（`reconcile.py`）

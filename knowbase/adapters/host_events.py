@@ -286,6 +286,26 @@ def handle(data: dict, *, event: str, style: str) -> dict:
         scope_notice = not recent_scope_errors or datetime.fromisoformat(recent_scope_errors[0]).timestamp() < cutoff
     finally:
         conn.close()
+    # W1-1：工具事件进 V2 观测台账（native_events），与 context_events 并行。
+    # 放在 scope 分支之前：scope 未解析的工具调用同样是真实观测。
+    # 观测失败不阻断 Hook（遥测同款 best-effort 语义）；self_call 已在上方跳过，
+    # 故此处不与 MCP 路径重复记（memory_* 调用由 server impl 记录）。
+    if event in ("tool-before", "tool-after", "tool-failure"):
+        try:
+            from ..knowledge_lifecycle import observe as _observe_lifecycle
+            _obs_conn = index.connect(repo)
+            try:
+                _observe_lifecycle.observe_hook_tool_event(
+                    _obs_conn, host_profile=host, session_id=session,
+                    project_key=_observe_lifecycle.project_key_for_repo(repo, cfg),
+                    event=event, tool_name=tool,
+                    tool_call_id=(data.get("tool_use_id") or data.get("tool_call_id")
+                                  or data.get("toolCallId") or materials.digest(data)),
+                    payload=observation)
+            finally:
+                _obs_conn.close()
+        except Exception:
+            pass
     if not scope:
         # context 内核统一记录无法解析，而不是退化成全库。
         result = context.execute(repo, session_id=session,

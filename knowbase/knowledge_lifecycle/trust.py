@@ -2,7 +2,7 @@
 
 签名覆盖：schema + event_id + 信封哈希（envelope_hash 已含 issuer/team/
 scope/subject/payload 与 key_id）。验签失败/密钥不匹配/未登记签发者 →
-事件不进治理（保留为 external_unverified 观察）。
+事件不进治理（导入方仅计数并记 event_id，不入库）。
 
 设备密钥由一次性登记（本机私有配置 + 独立 Git 信任分支）；key_id 轮换保留
 旧公钥。部署时锁定已验证发布版本（依赖引导走 updates bootstrap 门）。

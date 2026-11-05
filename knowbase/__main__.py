@@ -1129,6 +1129,14 @@ def _parse_args(argv=None):
     p_lc_rollback = lc_sub.add_parser("rollback", help="回滚一次发布（新 publication，保留历史与反证）")
     p_lc_rollback.add_argument("publication_id")
     p_lc_rollback.add_argument("--reason", required=True)
+    p_lc_propose = lc_sub.add_parser("propose", help="为一张卡立 NEW 变更候选（只立案，不发布）")
+    p_lc_propose.add_argument("memory_id")
+    p_lc_propose.add_argument("--proposer", default="")
+    p_lc_propose_admitted = lc_sub.add_parser(
+        "propose-admitted", help="扫描待准入 staging 卡并立案 NEW 候选；--publish 继续验证并发布")
+    p_lc_propose_admitted.add_argument("--publish", action="store_true")
+    p_lc_propose_admitted.add_argument("--proposer", default="")
+    p_lc_propose_admitted.add_argument("--limit", type=int, default=50)
     lc_sub.add_parser("admissions", help="列出待准入 staging/复验卡（无需先被检索采用）")
     p_lc_confirm = lc_sub.add_parser("confirm", help="权威确认（绑定具体卡版本与出处，不认 CLI 自称 human）")
     p_lc_confirm.add_argument("memory_id")
@@ -1482,6 +1490,13 @@ def _dispatch(args):
                                                   reason=args.reason)
                 elif args.lifecycle_cmd == "admissions":
                     result = {"pending": admission.pending_admissions(conn, repo)}
+                elif args.lifecycle_cmd == "propose":
+                    result = changes.propose_new_card(conn, repo, args.memory_id,
+                                                      proposer=args.proposer or "")
+                elif args.lifecycle_cmd == "propose-admitted":
+                    result = changes.propose_admitted(
+                        conn, repo, proposer=args.proposer or "",
+                        publish=args.publish, limit=args.limit)
                 else:  # confirm
                     from .mutations import _compute_revision
                     meta, _body, _path = store.load(repo, args.memory_id)

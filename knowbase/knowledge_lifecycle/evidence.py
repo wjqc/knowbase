@@ -73,8 +73,9 @@ def write_package(package: dict, path: Path) -> None:
 def import_package(conn, package: dict, *, registry: dict) -> dict:
     """接收端：验签/信任/去重/撤销物化。返回分类统计与逐事件处置。
 
-    未验签/未登记/越 scope 的事件保留 external_unverified 观察，零治理影响；
-    ACK 语义只确认接收，不自动 verified（治理由 governance 重算）。"""
+    未验签/未登记/越 scope 的事件不入库，仅在返回统计中计数并记 event_id
+    与原因（details），零治理影响；ACK 语义只确认接收，不自动 verified
+    （治理由 governance 重算）。"""
     if package.get("schema") != PACKAGE_SCHEMA:
         return {"error": "package_schema_unsupported"}
     stats = {"imported": 0, "idempotent": 0, "conflicts": 0, "rejected": 0,
@@ -100,6 +101,10 @@ def import_package(conn, package: dict, *, registry: dict) -> dict:
             state = "external_unverified"
             stats["unverified"] += 1
             reason = verdict if verdict != "trusted" else "signature_invalid"
+            # 仅记入返回统计，不入库：调用方据此可审计，未信事件零治理影响。
+            stats["details"].append({"event_id": event_id,
+                                      "result": "external_unverified",
+                                      "reason": reason})
         else:
             payload = envelope.get("payload") or {}
             event_type = envelope.get("event_type", "")

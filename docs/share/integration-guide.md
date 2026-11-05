@@ -311,7 +311,7 @@ memory_search / memory_read / memory_save / memory_context
 memory_use / memory_feedback / memory_job_material / memory_metrics
 ```
 
-当前版本共注册 16 个工具（完整清单见 8.1）。若缺少 `memory_use` 或 `memory_metrics`，先核对实际 Python 路径与版本，再重连，不能用修改源码代替服务升级。
+当前版本共注册 17 个工具（完整清单见 8.1）。若缺少 `memory_use` 或 `memory_metrics`，先核对实际 Python 路径与版本，再重连，不能用修改源码代替服务升级。
 
 #### 5.2.2 保存一张示例卡
 

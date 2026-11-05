@@ -4,7 +4,9 @@
 - 输入只认 evidence_events 中未撤销、trust_basis=registered-adapter 的
   L3/L4 事件；L0/L1/L2 永远零治理票。
 - 独立性按 logical_task_key 去重：同任务 100 次重放仍 1 个支持任务；
-  同输入/同运行共享 independence_group 不扩票。
+  同输入/同运行共享 independence_group 不扩票；unknown: 前缀的任务键
+  （宿主无原生任务键）不参与独立性计数（W0-2 修正：此前 decide() 未过滤，
+  unknown 最多贡献 1 任务 + 1 组）。
 - 反证门：同版本存在未裁决的 trusted fail（同 claim/条件）→ 不晋升，
   且可信反证触发隔离（quarantined 兼容映射 = stale + 隔离原因）。
 - 撤销重算：evidence.revoked 目标事件剔除后重算；撤销不自动复活。
@@ -54,6 +56,19 @@ def effective_evidence(conn, memory_id: str, revision: str) -> list[dict]:
     return out
 
 
+def _counts_toward_independence(event: dict) -> bool:
+    """unknown 身份不参与独立性计数（contracts.logical_task_key 的约定）。
+
+    任务键与独立组任一带 unknown: 前缀即不计；本地派生事件的组等于任务键，
+    故两者都要查。反证门不受此限（见 decide）：可信 fail 的治理效力来自
+    验证器登记与签名信任，不是任务身份。
+    """
+    key = event.get("logical_task_key") or ""
+    group = event.get("independence_group") or ""
+    return bool(key) and not key.startswith("unknown:") \
+        and not group.startswith("unknown:")
+
+
 def decide(conn, memory_id: str, revision: str) -> dict:
     """确定性决策（纯函数式，只读）。相同输入集合 digest 输出一致。"""
     events = effective_evidence(conn, memory_id, revision)
@@ -62,9 +77,10 @@ def decide(conn, memory_id: str, revision: str) -> dict:
          "e": sorted((e["event_id"], e["polarity"], e["logical_task_key"]) for e in events)})
     input_set_digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()
     pass_tasks = {e["logical_task_key"] for e in events
-                  if e["polarity"] == "positive" and e["logical_task_key"]}
+                  if e["polarity"] == "positive" and _counts_toward_independence(e)}
     pass_groups = {e["independence_group"] for e in events
-                   if e["polarity"] == "positive" and e["independence_group"]}
+                   if e["polarity"] == "positive" and e["independence_group"]
+                   and _counts_toward_independence(e)}
     unresolved_negative = [e for e in events if e["polarity"] == "negative"]
     if unresolved_negative:
         decision = "quarantine"

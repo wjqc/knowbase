@@ -117,6 +117,33 @@ def evolution_recall(conn, query: str, scope: str, *,
                 "status": info[4], "tags": json.loads(info[5] or "[]"),
                 "score": 0.25, "channels": {"relation_adjacency"}, "staging": bool(info[6])}
             adjacency_added += 1
+    # W1-8：重定向跟随。MERGE/SPLIT 后旧卡（redirect 处置，仍 active）指向的新卡
+    # 补入候选；archived 旧卡不在本函数召回域内（由 index.search 的 archived 路覆盖）。
+    from .. import index as _index
+    redirect_added = 0
+    followed = _index.follow_redirects(
+        conn, list(candidates)[:10], scope=scope,
+        include_archived=include_archived)
+    for item in followed:
+        tid = item["target_id"]
+        if tid in candidates:
+            candidates[tid]["channels"].add("redirect")
+            candidates[tid]["redirected_from"] = item["source_id"]
+            redirect_added += 1
+            continue
+        info = conn.execute(
+            "SELECT id,title,scope,confidence,status,tags,staging FROM meta WHERE id=?",
+            (tid,)).fetchone()
+        if not info or info[2] not in (scope, "global"):
+            continue
+        if info[4] == "archived" and not include_archived:
+            continue
+        candidates[tid] = {
+            "id": info[0], "title": info[1], "scope": info[2], "confidence": info[3],
+            "status": info[4], "tags": json.loads(info[5] or "[]"),
+            "score": 0.25, "channels": {"redirect"}, "staging": bool(info[6]),
+            "redirected_from": item["source_id"]}
+        redirect_added += 1
     # 排序 + 版本绑定 + 截断诊断
     ordered = sorted(candidates.values(), key=lambda c: (-c.get("score", 0), c["id"]))
     truncated = max(0, len(ordered) - limit)
@@ -132,6 +159,7 @@ def evolution_recall(conn, query: str, scope: str, *,
             "status": entry.get("status", ""), "confidence": entry.get("confidence", ""),
             "staging": bool(entry.get("staging", False)),
             "channels": sorted(entry.get("channels", [])),
+            "redirected_from": entry.get("redirected_from", ""),
             "score": round(float(entry.get("score", 0.0)), 6), "rank": rank})
     ids = [c["id"] for c in final]
     snapshot = {
@@ -146,6 +174,7 @@ def evolution_recall(conn, query: str, scope: str, *,
         "candidate_ids": ids,
         "route_limit": ROUTE_LIMIT, "fused_limit": limit,
         "truncated": truncated, "adjacency_added": adjacency_added,
+        "redirect_added": redirect_added,
         "degraded": degraded,
         "note": "staging/stale included; archived excluded unless governance purpose",
     }

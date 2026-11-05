@@ -97,6 +97,24 @@ def publish(repo, conn, change_id: str, *, expected_policy=contracts.CHANGE_POLI
                                    reason="base head moved before publish")
                 return {"error": "REVISION_CONFLICT", "base_head": head["memory_id"],
                         "expected": head["content_revision"], "current": current}
+        # a2. NEW 提案的源是 staging 文件：立案后源内容若被改过，冻结输出已过期。
+        #     与 a 的 base-head 重读同一性质（发布前重验输入未动），否则正式镜像
+        #     会写回旧内容、随后的 staging 清理会丢掉新编辑。仅 NEW 需要此检查：
+        #     其他关系的输入由 base heads 守卫，staging 文件不是其来源。
+        if change["relation"] == "NEW":
+            for out in outputs:
+                staging_path = Path(repo) / "staging" / f"{out['memory_id']}.md"
+                if not staging_path.exists():
+                    continue
+                cur_meta, cur_body = store.parse(staging_path)
+                cur_hash = contracts.snapshot_hash(
+                    contracts.canonical_json({"meta": cur_meta, "body": cur_body})
+                    .encode("utf-8"))
+                if cur_hash != out["snapshot_hash"]:
+                    _changes.set_state(conn, change_id, "needs_rebase",
+                                       reason="staging source changed after proposal")
+                    return {"error": "SOURCE_MOVED", "memory_id": out["memory_id"],
+                            "detail": "staging source changed after proposal; re-propose"}
         if change["policy_revision"] != expected_policy:
             return {"error": "POLICY_CONFLICT",
                     "candidate": change["policy_revision"], "expected": expected_policy}
@@ -229,6 +247,13 @@ def _materialize(repo: Path, conn, manifest: dict, outputs: list[dict]) -> None:
             target = store.mem_path(repo, meta.get("type", "pitfall"), mid, staging=False)
             target.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write(target, store.render(meta, out["body"]))
+            # NEW 提案的源是 staging 文件：正式镜像落盘后删除 staging 源，
+            # 否则 iter_all(include_staging=True) 会两次产出同一张卡、
+            # pending_admissions 会重复列出已发布卡。a2 已在发布前校验源未动，
+            # 此处删的是与冻结输出一致的源文件，不丢编辑。
+            staging_path = Path(repo) / "staging" / f"{mid}.md"
+            if staging_path.exists() and staging_path.resolve() != target.resolve():
+                staging_path.unlink()
             index.upsert(conn, *store.load(repo, mid), commit=False)
         else:  # alias / retired / redirect：旧卡处置镜像
             old_meta, old_body, old_path = store.load(repo, mid)

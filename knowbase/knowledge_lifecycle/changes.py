@@ -160,6 +160,114 @@ def propose_change(conn, repo, *, relation, risk, scope, base_heads, outputs,
             "state": manifest["state"], "base_revision_frozen": True}
 
 
+def _staging_change_id(memory_id: str, content_revision: str) -> str:
+    """staging 卡 NEW 提案的确定性 change_id。
+
+    同卡同版本重复提案幂等（propose_change 按 change_id + proposal_hash 去重）；
+    内容变化 → 新 revision → 新 change_id，旧提案不被复用（旧提案发布时由
+    publication 的 staging 源校验拦截，见 SOURCE_MOVED）。
+    """
+    return f"CHG-NEW-{memory_id}-{content_revision[:12]}"
+
+
+def propose_new_card(conn, repo, memory_id: str, *, proposer: str = "") -> dict:
+    """为一张卡立 NEW 变更候选（只立案，不发布）。
+
+    供 staging 卡首次发布（W1-6）与手动 `lifecycle propose` 使用。
+    base_heads=[]、claim_map=[]（NEW 无旧 claim）、source_dispositions=[]。
+    风险按 admission.classify_risk（类型 × NEW）分级。
+    """
+    from .. import store as _store
+    from ..mutations import _compute_revision
+    from . import admission as _admission
+    meta, body, _path = _store.load(repo, memory_id)
+    if not meta:
+        return {"error": "NOT_FOUND", "memory_id": memory_id}
+    revision = _compute_revision(meta, body)
+    return propose_change(
+        conn, repo, relation="NEW",
+        risk=_admission.classify_risk(meta.get("type", ""), "NEW"),
+        scope=meta.get("scope", ""), base_heads=[],
+        outputs=[{"memory_id": memory_id, "disposition": "active",
+                  "meta": dict(meta), "body": body}],
+        source_dispositions=[], claim_map=[],
+        proposer=proposer or "lifecycle-proposer",
+        change_id=_staging_change_id(memory_id, revision))
+
+
+def propose_admitted(conn, repo, *, proposer: str = "", publish: bool = False,
+                     limit: int = 50) -> dict:
+    """扫描待准入 staging 卡：立案 NEW 候选 + 准入评估；publish=True 时继续验证并发布。
+
+    链路（每卡）：propose_new_card → evaluate_admission（change_id 绑定）→
+    [publish 时] validate_change → publication.publish。
+    权威门：standard/global preference 无 authority_ref 时准入 fail，候选停在
+    proposed 等待 `lifecycle confirm`，不静默发布。stale 卡跳过（复验路径待 W4-4）。
+    本函数不做模型调用；worker/CLI 层可直接调用（worker 定时任务接线待定）。
+    """
+    from . import admission as _admission
+    from . import publication as _publication
+    from . import validation as _validation
+    pending = _admission.pending_admissions(conn, repo, limit=limit)
+    report: dict = {"proposed": [], "already": [], "skipped": [], "published": [],
+                    "failed": []}
+    for item in pending:
+        mid = item["memory_id"]
+        if not item["staging"]:
+            report["skipped"].append(
+                {"memory_id": mid, "reason": "stale_needs_revalidation_path"})
+            continue
+        revision = item["content_revision"]
+        row = conn.execute(
+            "SELECT authority_ref FROM admission_reports WHERE memory_id=? AND "
+            "content_revision=? AND result='pass' AND authority_ref!='' "
+            "ORDER BY created_at DESC LIMIT 1", (mid, revision)).fetchone()
+        authority_ref = row[0] if row else ""
+        proposal = propose_new_card(conn, repo, mid, proposer=proposer)
+        if proposal.get("error"):
+            report["failed"].append({"memory_id": mid, "stage": "propose",
+                                     "error": proposal.get("error")})
+            continue
+        change_id = proposal["change_id"]
+        if proposal.get("idempotent") and proposal.get("state") == "published":
+            report["already"].append({"memory_id": mid, "change_id": change_id,
+                                      "state": "published"})
+            continue
+        admission = _admission.evaluate_admission(
+            conn, repo, mid, revision, authority_ref=authority_ref,
+            change_id=change_id)
+        if admission.get("error"):
+            report["failed"].append({"memory_id": mid, "change_id": change_id,
+                                     "stage": "admission",
+                                     "error": admission["error"]})
+            continue
+        if admission["result"] != "pass":
+            report["skipped"].append({"memory_id": mid, "change_id": change_id,
+                                      "reason": "admission_not_passed",
+                                      "admission_result": admission["result"],
+                                      "checks": admission.get("checks")})
+            continue
+        if not publish:
+            report["proposed"].append({"memory_id": mid, "change_id": change_id,
+                                       "admission": "pass"})
+            continue
+        check = _validation.validate_change(conn, repo, change_id)
+        if check.get("result") != "pass":
+            report["failed"].append({"memory_id": mid, "change_id": change_id,
+                                     "stage": "validate",
+                                     "result": check.get("result"),
+                                     "checks": check.get("checks")})
+            continue
+        result = _publication.publish(repo, conn, change_id)
+        if result.get("error"):
+            report["failed"].append({"memory_id": mid, "change_id": change_id,
+                                     "stage": "publish", "error": result.get("error")})
+            continue
+        report["published"].append({"memory_id": mid, "change_id": change_id,
+                                    "publication_id": result.get("publication_id")})
+    return report
+
+
 def get_change(conn, change_id: str) -> dict:
     row = conn.execute(
         "SELECT change_id,relation,risk,scope,proposer,base_heads_json,"

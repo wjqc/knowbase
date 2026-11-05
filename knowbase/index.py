@@ -510,6 +510,9 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
             continue
         eligible.append(m)
     allowed_ids = {m["id"] for m in eligible}
+    # W1-8：lex 过滤前保留一份，供 archived 旧卡的重定向召回（MERGE 旧卡为
+    # archived，不在 eligible 内；只跟随其目标，不复活旧卡本身）。
+    lex_all = dict(lex or {})
     lex = {mid: score for mid, score in (lex or {}).items() if mid in allowed_ids}
     dense = {}
     if origin in {"mcp_search","mcp_context"}:
@@ -527,7 +530,13 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
             return results
     fused = _rrf_scores(lex,dense)
     if not fused:
-        return []
+        # 无直接命中时仍可跟随 archived 旧卡的重定向（MERGE 旧卡内容只在 archived 卡里）。
+        extra = _redirect_extra_results(conn, [], lex_all, scope=scope, mtype=mtype)
+        diagnostics["total_ms"]=round((time.monotonic()-started)*1000,2)
+        if extra:
+            diagnostics["redirect_followed"] = len(extra)
+            diagnostics["channels"] = ["redirect"]
+        return extra
 
     # 批量获取 snippet（替代逐条 SELECT snippet(...) 查询），分块避免超 SQLite 变量上限
     fused_ids = list(fused.keys())
@@ -562,7 +571,143 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
         results = [r for r in results if automatic_match(conn, query, r["id"])]
     diagnostics["total_ms"]=round((time.monotonic()-started)*1000,2)
     diagnostics["channels"]=[name for name,values in (("lexical",lex),("dense",dense)) if values]
-    return results[:max(0, min(limit, 100))]
+    truncated = results[:max(0, min(limit, 100))]
+    # W1-8：重定向跟随（结果卡 + 命中查询的 archived 旧卡 → 新卡），附在截断后，
+    # 不挤占直接命中的名额。
+    extra = _redirect_extra_results(conn, truncated, lex_all, scope=scope, mtype=mtype)
+    if extra:
+        diagnostics["redirect_followed"] = len(extra)
+        diagnostics["channels"].append("redirect")
+    return truncated + extra
+
+
+def redirect_targets(conn: sqlite3.Connection, memory_id: str) -> list[str]:
+    """一张卡的重定向目标（W1-8）。
+
+    来源（任一命中即取）：published_heads.redirect_ids_json（发布层登记）；
+    旧卡 frontmatter 的 redirect_ids（_materialize 镜像写入，发布层缺失时兜底）。
+    只读，不跟随（跟随在 follow_redirects）。
+    """
+    try:
+        row = conn.execute(
+            "SELECT redirect_ids_json FROM published_heads WHERE memory_id=?",
+            (memory_id,)).fetchone()
+    except sqlite3.OperationalError:
+        # 最小库 / 旧库无 published_heads 表（迁移 v30 才建）：无发布层记录，走 frontmatter 兜底。
+        row = None
+    ids: list[str] = []
+    if row and row[0]:
+        try:
+            ids = [str(x) for x in json.loads(row[0]) if x]
+        except ValueError:
+            ids = []
+    if not ids:
+        meta_row = conn.execute("SELECT path FROM meta WHERE id=?", (memory_id,)).fetchone()
+        if meta_row and meta_row[0]:
+            try:
+                meta, _body = store.parse(Path(meta_row[0]))
+                ids = [str(x) for x in (meta.get("redirect_ids") or []) if x]
+            except (OSError, ValueError):
+                ids = []
+    return ids
+
+
+def follow_redirects(conn: sqlite3.Connection, candidate_ids, *, scope=None,
+                     include_archived: bool = False, max_depth: int = 3) -> list[dict]:
+    """跟随 redirect_ids，返回 [{target_id, source_id, depth}]（BFS 顺序，去重）。
+
+    链式跟随（上限 max_depth），visited 集合防环；目标卡须存在且 scope 在域内
+    （scope/global），archived 目标默认不补入（与关系邻接同口径）。
+    来源卡本身的状态不限（archived 旧卡也可作源——MERGE 旧卡即 archived）。
+    """
+    processed: set[str] = set()  # 已展开过出边的源（防重复展开）
+    emitted: set[str] = set()    # 已输出过的目标（去重）
+    out: list[dict] = []
+    # frontier 元素：(mid, source_id, depth, path)。path 用于防环：目标若已在
+    # 本链路径上即跳过；但目标仅因同为原始候选而已被展开（processed）时不跳过——
+    # 那正是「旧卡与新卡同时命中，旧卡指向新卡」的待标注情形。
+    frontier = [(str(mid), None, 0, (str(mid),)) for mid in (candidate_ids or [])]
+    depth = 0
+    while frontier and depth < max_depth:
+        depth += 1
+        next_frontier = []
+        for mid, source, _d, path in frontier:
+            if mid in processed:
+                continue
+            processed.add(mid)
+            for target in redirect_targets(conn, mid):
+                if target == mid or target in emitted or target in path:
+                    continue
+                row = conn.execute(
+                    "SELECT scope,status FROM meta WHERE id=?", (target,)).fetchone()
+                if not row:
+                    continue
+                if scope and row[0] not in (scope, "global"):
+                    continue
+                if row[1] == "archived" and not include_archived:
+                    continue
+                emitted.add(target)
+                out.append({"target_id": target, "source_id": mid, "depth": depth})
+                next_frontier.append((target, mid, depth, path + (target,)))
+        frontier = next_frontier
+    return out
+
+
+def _redirect_extra_results(conn, results, lex_all, *, scope=None, mtype=None,
+                            max_extra=10) -> list[dict]:
+    """W1-8：为检索结果补重定向目标（search 的收尾步骤）。
+
+    源：结果卡本身 + 命中查询但因 archived 被排除的旧卡（lex_all 中不在结果里
+    的 archived id）。目标须为 active 正式卡（follow_redirects 已过滤 scope
+    与 archived；此处再拦 staging/非 active/mtype 不符）；已在结果里的目标只
+    补 channels/redirected_from，不重复。
+    """
+    result_ids = {r["id"] for r in results}
+    sources = [r["id"] for r in results]
+    archived_ids = []
+    for mid in (lex_all or {}):
+        if mid in result_ids:
+            continue
+        row = conn.execute("SELECT status,scope FROM meta WHERE id=?", (mid,)).fetchone()
+        if row and row[0] == "archived" and (not scope or row[1] in (scope, "global")):
+            archived_ids.append(mid)
+    sources += archived_ids[:20]
+    if not sources:
+        return []
+    followed = follow_redirects(conn, sources, scope=scope)
+    score_by_id = {r["id"]: r.get("score", 0.0) for r in results}
+    extra: list[dict] = []
+    for item in followed:
+        target = item["target_id"]
+        if target in result_ids:
+            for r in results:
+                if r["id"] == target and "redirect" not in r["channels"]:
+                    r["channels"] = [*r["channels"], "redirect"]
+                    r["redirected_from"] = item["source_id"]
+            continue
+        if len(extra) >= max_extra:
+            break
+        row = conn.execute("SELECT * FROM meta WHERE id=?", (target,)).fetchone()
+        if not row:
+            continue
+        m = _row_meta(row)
+        if m.get("staging") or m.get("status") != "active":
+            continue
+        if mtype and m.get("type") != mtype:
+            continue
+        head = conn.execute("SELECT content_revision FROM entity_heads WHERE entity_id=?",
+                            (target,)).fetchone()
+        m["content_revision"] = head[0] if head else ""
+        src_score = score_by_id.get(item["source_id"])
+        if src_score is None:
+            src_score = (lex_all or {}).get(item["source_id"], 0.0)
+        snippet_row = conn.execute(
+            "SELECT snippet(mem_fts, 3, '「', '」', '…', 12) FROM mem_fts WHERE id=?",
+            (target,)).fetchone()
+        extra.append({**m, "score": round(src_score * 0.9, 6),
+                      "snippet": snippet_row[0] if snippet_row else "",
+                      "channels": ["redirect"], "redirected_from": item["source_id"]})
+    return extra
 
 
 # ---------- 统计与日志 ----------

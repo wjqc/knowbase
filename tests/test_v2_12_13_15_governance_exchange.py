@@ -121,6 +121,32 @@ def test_governance_trusted_negative_quarantines(memory_repo):
     conn.close()
 
 
+def test_governance_unknown_task_keys_do_not_count(memory_repo):
+    """W0-2：unknown: 前缀的任务键不参与独立性计数。"""
+    seed_validator(config_path := memory_repo.parent / "knowbase.json")
+    mid = seed_card(memory_repo, "未知任务卡")
+    conn = index.connect(memory_repo)
+    apply_all(conn)
+    rev = head_of(conn, mid)
+    # 两个真实任务 → validated。
+    for run_key, task in (("r1", "t1"), ("r2", "t2")):
+        trusted_l3(conn, memory_repo, mid, rev, run_key=run_key, task_key=task)
+    d2 = governance.decide(conn, mid, rev)
+    assert d2["decision"] == "validated" and d2["independent_tasks"] == 2
+    # 两个 unknown 任务（无原生任务键）→ 仍 validated，计数不变。
+    for run_key in ("u1", "u2"):
+        trusted_l3(conn, memory_repo, mid, rev, run_key=run_key, task_key="",
+                   check=f"unknown-{run_key}")
+    d_unknown = governance.decide(conn, mid, rev)
+    assert d_unknown["decision"] == "validated"
+    assert d_unknown["independent_tasks"] == 2
+    # 第三个真实任务 → verified，unknown 始终不计。
+    trusted_l3(conn, memory_repo, mid, rev, run_key="r3", task_key="t3")
+    d3 = governance.decide(conn, mid, rev)
+    assert d3["decision"] == "verified" and d3["independent_tasks"] == 3
+    conn.close()
+
+
 def test_exchange_sign_dedup_revoke_and_untrusted(memory_repo):
     """S5 核心机制：签名交换、传输/业务去重、撤销先到、伪签发零治理。"""
     seed_validator(memory_repo.parent / "knowbase.json")
@@ -199,6 +225,24 @@ def test_exchange_sign_dedup_revoke_and_untrusted(memory_repo):
         e["issuer_installation_id"] = "INST-nobody"
     stray_result = evidence.import_package(peer_conn, stray, registry=registry)
     assert stray_result["unverified"] == 2
+    # W0-2：全新未信事件 → 仅计数并记 details，peer 库无此行。
+    trusted_l3(conn, memory_repo, mid, rev, run_key="r9", task_key="t9")
+    fresh = evidence.export_package(
+        conn, team_id="team-a", issuer_installation_id="INST-a",
+        project_key="repo:orders", private_pem=evil_keys["private_pem"],
+        key_id="key-unregistered")
+    known_ids = {e["event_id"] for e in package["events"]}
+    fresh_ids = [e["event_id"] for e in fresh["events"]]
+    new_ids = [e for e in fresh_ids if e not in known_ids]
+    assert len(new_ids) == 1
+    fresh_result = evidence.import_package(peer_conn, fresh, registry=registry)
+    assert fresh_result["unverified"] == len(fresh_ids)
+    assert fresh_result["imported"] == 0
+    assert {d["event_id"] for d in fresh_result["details"]
+            if d["result"] == "external_unverified"} == set(fresh_ids)
+    assert peer_conn.execute(
+        "SELECT COUNT(*) FROM evidence_events WHERE event_id=?",
+        (new_ids[0],)).fetchone()[0] == 0
     # 撤销先到：撤 event-1，再重导原包 → 目标事件不复活。
     target_id = package["events"][0]["event_id"]
     revoke_env = {

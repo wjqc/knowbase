@@ -516,15 +516,32 @@ def _oldest_pending_by_state(conn) -> dict[str, str]:
     return {r[0]: r[1] for r in rows if r[0] and r[1]}
 
 
+# retry_plan 的 blocked 归类口径：只有这些 error 才算「配置类原因」。
+# 唯一已知的写入点是 distillation.prepare_due（material_manifest_required）；
+# 新的 blocked error 出现时必须先在这里登记，否则任务归入 unknown_state。
+CONFIG_BLOCKED_ERRORS = frozenset({"material_manifest_required"})
+
+
 def retry_plan(repo) -> dict:
     """V2-02 只读积压恢复计划：分类历史任务的可恢复性，不修改任何状态。
 
-    分类依据（不改数据、不触发模型）：
-    - requeue_ready：retry_wait/awaiting_agent 且租约已释放、材料 spool 仍在；
-    - lease_stuck：lease_until 仍在未来（等 expire_leases 或人工核对）；
+    分类依据（不改数据、不触发模型）。判定顺序即优先级，先命中者胜：
     - needs_review：needs_review 终态（人工出口，不自动重开）；
-    - failed_permanent：failed 终态（重试需 jobs.retry 显式授权）；
-    - blocked_config：blocked（material_manifest_required 等配置类原因）。
+    - failed_permanent：failed 终态。名字里的 permanent 只表示「终态」，
+      不是不可恢复：jobs.retry 可显式授权重试；run_due 对 TRANSIENT_ERRORS
+      的 failed 任务在执行器重新验证通过后可自动改回 awaiting_agent；
+    - blocked_config：blocked 且 error 属于配置类原因
+      （CONFIG_BLOCKED_ERRORS，目前仅 material_manifest_required）。
+      blocked 但 error 不在该集合的任务归入 unknown_state；
+    - lease_stuck：state 为 claimed（唯一持有租约的状态）且 lease_until 仍在未来
+      （等 expire_leases 或人工核对）。非 claimed 任务即使 lease_until 在未来
+      也不归入此类；
+    - requeue_ready：retry_wait/awaiting_agent/queued/preparing/awaiting，
+      且租约已释放（lease_until 为空或已过期）、材料 spool 仍在
+      （job_spool 有对应行）。三者缺一即不归入此类；
+    - unknown_state：以上皆不命中——含 spool 缺失的待重入任务、非配置类 blocked、
+      租约异常（非 claimed 但 lease_until 在未来、claimed 但租约已过期）、
+      以及其他未识别状态。
     执行任何一类都需后续授权；本函数只产出清单。
     """
     repo = Path(repo)
@@ -532,19 +549,25 @@ def retry_plan(repo) -> dict:
     plan = {"generated_at": _now(), "readonly": True, "classes": {}}
     try:
         now = datetime.now(timezone.utc)
+        now_str = _now()
         rows = conn.execute(
             "SELECT job_id,kind,state,error,lease_until,attempt,created_at FROM jobs "
             "WHERE state NOT IN ('succeeded','no_candidate') ORDER BY created_at").fetchall()
+        spool_jobs = {r[0] for r in conn.execute(
+            "SELECT job_id FROM job_spool").fetchall()}
         for job_id, kind, state, error, lease_until, attempt, created_at in rows:
             if state == "needs_review":
                 cls = "needs_review"
             elif state == "failed":
                 cls = "failed_permanent"
             elif state == "blocked":
-                cls = "blocked_config"
-            elif lease_until and lease_until > _now():
+                cls = ("blocked_config" if (error or "") in CONFIG_BLOCKED_ERRORS
+                       else "unknown_state")
+            elif state == "claimed" and lease_until and lease_until > now_str:
                 cls = "lease_stuck"
-            elif state in ("retry_wait", "awaiting_agent", "queued", "preparing", "awaiting"):
+            elif (state in ("retry_wait", "awaiting_agent", "queued", "preparing", "awaiting")
+                    and (not lease_until or lease_until <= now_str)
+                    and job_id in spool_jobs):
                 cls = "requeue_ready"
             else:
                 cls = "unknown_state"

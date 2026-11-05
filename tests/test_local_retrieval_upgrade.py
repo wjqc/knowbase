@@ -108,7 +108,9 @@ def test_real_stdio_mcp_search_keeps_signature_and_reports_local_mode(memory_rep
             async with ClientSession(read,write) as client:
                 await client.initialize()
                 schema=next(t.inputSchema for t in (await client.list_tools()).tools if t.name=='memory_search')
-                assert set(schema['properties'])=={'query','type','scope','tag','limit','include_inactive'}
+                # W1-1：search_impl 新增可选 session_id（与 read/context/use 同款模式），
+                # 用于把检索记入任务观测；不传时行为不变。
+                assert set(schema['properties'])=={'query','type','scope','tag','limit','include_inactive','session_id'}
                 result=await client.call_tool('memory_search',{'query':'HAR','scope':'global'})
                 assert not result.isError
                 assert mid in result.content[0].text and 'L2 本地词法检索' in result.content[0].text

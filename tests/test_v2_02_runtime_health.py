@@ -115,19 +115,29 @@ def test_retry_plan_is_readonly_and_classifies(memory_repo):
     conn, lease = _prepare(memory_repo)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     future = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(timespec="seconds")
+    past = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(timespec="seconds")
     seeds = [
         ("J-requeue", "capture", "retry_wait", "", None),
         ("J-stuck", "capture", "claimed", "", future),
         ("J-review", "capture", "needs_review", "", None),
         ("J-failed", "capture", "failed", "timeout", None),
         ("J-blocked", "capture", "blocked", "material_manifest_required", None),
+        # 修正口径的覆盖：spool 缺失 / 非配置类 blocked / 租约未释放 / 租约过期未回收。
+        ("J-nospool", "capture", "retry_wait", "", None),
+        ("J-blocked-other", "capture", "blocked", "something_else", None),
+        ("J-stuck-retrywait", "capture", "retry_wait", "", future),
+        ("J-claimed-expired", "capture", "claimed", "", past),
     ]
     for job_id, kind, state, error, lease_until in seeds:
         conn.execute(
-            "INSERT INTO jobs(job_id,kind,scope,input_hash,idempotency_key,state,attempt,"
-            "max_attempts,lease_until,fencing_token,created_at,updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            (job_id, kind, "orders", "x", job_id, state, 1, 3, lease_until, 0, now, now))
+            "INSERT INTO jobs(job_id,kind,scope,input_hash,idempotency_key,state,error,"
+            "attempt,max_attempts,lease_until,fencing_token,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (job_id, kind, "orders", "x", job_id, state, error, 1, 3, lease_until, 0, now, now))
+    # 只有 J-requeue 有材料 spool；J-nospool 故意不建 spool。
+    conn.execute(
+        "INSERT INTO job_spool(spool_id,job_id,input_json,checksum,created_at) "
+        "VALUES(?,?,?,?,?)", ("SP-J-requeue", "J-requeue", "{}", "x", now))
     conn.commit()
     before = conn.execute("SELECT job_id,state,error FROM jobs ORDER BY job_id").fetchall()
     worker.release_lease(conn, *lease)
@@ -141,7 +151,10 @@ def test_retry_plan_is_readonly_and_classifies(memory_repo):
     assert classes["needs_review"] == {"J-review"}
     assert classes["failed_permanent"] == {"J-failed"}
     assert classes["blocked_config"] == {"J-blocked"}
+    assert classes["unknown_state"] == {
+        "J-nospool", "J-blocked-other", "J-stuck-retrywait", "J-claimed-expired"}
     assert plan["summary"]["requeue_ready"] == 1
+    assert plan["summary"]["unknown_state"] == 4
     # 只读：任何 job 状态/错误未变。
     conn = index.connect(memory_repo)
     after = conn.execute("SELECT job_id,state,error FROM jobs ORDER BY job_id").fetchall()
