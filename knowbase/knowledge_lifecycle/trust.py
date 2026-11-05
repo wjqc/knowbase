@@ -37,6 +37,21 @@ def generate_keypair() -> dict:
     return {"private_pem": private_pem, "public_pem": public_pem}
 
 
+def public_from_private(private_pem: str) -> str:
+    """从私钥 PEM 派生公钥 PEM（CLI/worker 不落明文私钥之外的中间态）。"""
+    Ed25519PrivateKey, _pub, serialization = _ed25519()
+    key = Ed25519PrivateKey.from_private_bytes(_load_pem_private(private_pem))
+    return key.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+
+
+def key_id_for_public(public_pem: str) -> str:
+    """key_id = key- + 公钥 PEM SHA256 前 12 位（登记表 key_epochs 的键）。"""
+    import hashlib
+    return "key-" + hashlib.sha256(str(public_pem).encode("utf-8")).hexdigest()[:12]
+
+
 def sign_envelope(envelope: dict, private_pem: str, key_id: str) -> dict:
     """对信封签名：覆盖 schema、event_id 与完整信封哈希（去 signature 字段）。
 

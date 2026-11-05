@@ -1112,3 +1112,10 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - 代码修复：text.py 模型回显硬校验改选择式 response_model（与 embedding provider 同语义：网关只回别名时声明期望回显）；executor FIELDS 白名单放行 response_model。回归 test_autonomous_local_completion 新增归一化三边界（声明放行/未声明 mismatch/一致无需声明）。
 - 上线：executor configure → 隔离探针 8/8 全绿（结构化输出/规则例外/注入拒绝/读回，探针卡 B-7acac3972c70）→ enable（scopes 沿用 knowbase/cmi/cmi-sales-assistant，selected_executor 从 codex 切至 intranet-deepseek，codex 保留配置可回切）。当日字符预算已被 codex 耗尽（500000/512000），次日重置后自动开工。
 - 配置模板（同事机器可复制，仅 secret_ref 路径各机自建）：~/.knowbase/intranet-executor.json（0600，无明文密钥）。
+
+## 2026-11-05 生命周期 W1 接线批（W1-2/3/4/5/7 + 治理条件写入 + 测试隔离根因修复）
+- 决策（用户确认）：pytest 验证器默认注册（登记即 registered-adapter 信任，仅显式 CLI 调用生效）；worker 任务 correlate/recompute 默认开、propose/publish 双级门默认关（staging 激活人工关卡保留）。
+- 实现：observation.pending_runs（有递送无证据，无递送不列防空转）；worker 三任务 lifecycle_correlate(300s)/lifecycle_recompute(3600s)/lifecycle_propose(900s)；validators.py pytest-text 解析器 + CLI lifecycle verify/recompute/keygen/evidence-export/evidence-import（import→materialize_and_recompute 显式链接，registry 缺失指向 ENROLLMENT.md）；trust 增 public_from_private/key_id_for_public（key_id=公钥 SHA256 前 12 位，与 team-keys 模板一致）；governance.apply_decision 去 or True 改投影条件写入（调度无全库 git churn）。
+- 测试隔离根因（8→1）：宿主 CLAUDE/ZCODE_PROJECT_DIR 经 _infer_scope（11-04 自动绑定新增 ZCODE 入口）泄漏进 pytest，hook_noise stop 捕获 SCOPE_UNRESOLVED 早退、unified_search scope=global 断言失败；沙箱不泄漏故过、本机泄漏故挂——"失败集合随宿主漂移"的实体。修法 conftest autouse delenv（不再依赖 -u 纪律）。沙箱记录的 5 个基线失败在本机单跑/全量均不复现（同族环境漂移）；test_program_updates_integration 本机既有失败（更新器子进程，干净 e8ab132 同错）另行立项。
+- 回归：新增 5 文件 16 项全过；受影响既有 52 项全过；全量 1180 passed/1 failed/1 skipped（一次性 uv 离线 editable venv，故意保留泄漏变量验证隔离生效）。
+- 边界：verified 晋升仍需任务身份设计（unknown 键诚实保留，L3 反证门 quarantine 路径已通并有测试）；export 无增量水位；wide_recall 重定向在 server 相似卡/materials 两处直调同样未跟随（待语义决策）；运行时未部署（待审后 wheel+kill worker+MCP 重连）。交付明细见 docs/implementation/lifecycle-v2/W1-02_W1-07/delivery.md，缺口勘误（W4-5 已至 v34、config 已恢复）见 reports/knowbase-lifecycle-capability-gaps.md。

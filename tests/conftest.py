@@ -61,6 +61,18 @@ def windows_probe(monkeypatch):
     return build
 
 
+@pytest.fixture(autouse=True)
+def _no_host_project_dir(monkeypatch):
+    """屏蔽宿主项目目录泄漏（_infer_scope 的 CLAUDE/ZCODE_PROJECT_DIR 入口）。
+
+    宿主在 pytest 进程里注入的项目目录会改变 scope 解析路径（自动绑定/git
+    派生），造成随宿主漂移的假失败（如 hook_noise 的 SCOPE_UNRESOLVED 早退、
+    unified_search 断言 scope=global 失败）。测试需要项目目录时应自行 setenv。
+    """
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.delenv("ZCODE_PROJECT_DIR", raising=False)
+
+
 @pytest.fixture()
 def memory_repo(tmp_path, monkeypatch):
     from knowbase import config

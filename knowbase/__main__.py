@@ -1142,6 +1142,22 @@ def _parse_args(argv=None):
     p_lc_confirm.add_argument("memory_id")
     p_lc_confirm.add_argument("--authority-ref", required=True)
     p_lc_confirm.add_argument("--change-id", default="")
+    p_lc_verify = lc_sub.add_parser("verify", help="验证器核对真实执行报告 → L3 证据（W1-3；报告来自真实 pytest 运行）")
+    p_lc_verify.add_argument("--memory-id", required=True)
+    p_lc_verify.add_argument("--report-file", required=True)
+    p_lc_verify.add_argument("--format", default="pytest-text", choices=["pytest-text"],
+                             help="报告格式，同时是已登记 validator_id")
+    p_lc_verify.add_argument("--run-id", default="", help="关联任务运行（缺省卡级验证，不参与独立性计数）")
+    p_lc_verify.add_argument("--claim-map", default="", help="JSON 文件：pytest nodeid → 卡 claim_id")
+    p_lc_recompute = lc_sub.add_parser("recompute", help="全库治理重算投影（W1-4 手动触发；同 worker 幂等）")
+    p_lc_keygen = lc_sub.add_parser("keygen", help="生成设备证据密钥对到 ~/.knowbase/team-keys/（W1-5；已存在则读回）")
+    p_lc_ev_export = lc_sub.add_parser("evidence-export", help="导出本地可信 L3 事件为签名证据包（W1-5）")
+    p_lc_ev_export.add_argument("--output", required=True)
+    p_lc_ev_export.add_argument("--limit", type=int, default=1000)
+    p_lc_ev_export.add_argument("--private-key", default="~/.knowbase/team-keys/device-ed25519-private.pem")
+    p_lc_ev_import = lc_sub.add_parser("evidence-import", help="验签导入签名证据包并重算治理（W1-5；未信事件零治理影响）")
+    p_lc_ev_import.add_argument("package")
+    p_lc_ev_import.add_argument("--registry", default="~/.knowbase/team-keys/trust-registry.json")
     p_worker = sub.add_parser("worker", help="P3 后台 supervisor：OS 调度入口，SQLite 租约互斥（提炼位保持阻断）")
     worker_sub = p_worker.add_subparsers(dest="worker_cmd", required=True)
     for _name, _help in (("run", "常驻运行：OS 负责启动/保活，租约互斥，按 next_run_at 唤醒"),
@@ -1497,6 +1513,102 @@ def _dispatch(args):
                     result = changes.propose_admitted(
                         conn, repo, proposer=args.proposer or "",
                         publish=args.publish, limit=args.limit)
+                elif args.lifecycle_cmd == "verify":
+                    from .knowledge_lifecycle import attribution
+                    from .knowledge_lifecycle import validators as lc_validators
+                    from .mutations import _compute_revision
+                    meta, _body, _ = store.load(repo, args.memory_id)
+                    if not meta:
+                        result = {"error": "NOT_FOUND"}
+                    else:
+                        claim_map = {}
+                        if args.claim_map:
+                            claim_map = json.loads(Path(args.claim_map)
+                                                   .expanduser().read_text(encoding="utf-8"))
+                        report = lc_validators.parse_pytest_text(
+                            Path(args.report_file).expanduser()
+                            .read_text(encoding="utf-8"), claim_map=claim_map)
+                        report["target"] = {"memory_id": args.memory_id,
+                                            "content_revision": _compute_revision(meta, _body)}
+                        result = attribution.verify_execution(
+                            conn, repo, run_id=args.run_id or "",
+                            validator_id=args.format, report=report)
+                elif args.lifecycle_cmd == "recompute":
+                    from .knowledge_lifecycle import reconcile
+                    result = reconcile.materialize_and_recompute(repo, conn)
+                elif args.lifecycle_cmd == "keygen":
+                    from .knowledge_lifecycle import trust as lc_trust
+                    keys_dir = Path.home() / ".knowbase" / "team-keys"
+                    keys_dir.mkdir(parents=True, exist_ok=True)
+                    try:
+                        keys_dir.chmod(0o700)
+                    except OSError:
+                        pass
+                    priv_path = keys_dir / "device-ed25519-private.pem"
+                    pub_path = keys_dir / "device-ed25519-public.pem"
+                    if priv_path.is_file() and pub_path.is_file():
+                        pair = {"private_pem": priv_path.read_text(encoding="utf-8"),
+                                "public_pem": pub_path.read_text(encoding="utf-8")}
+                        generated = False
+                    else:
+                        pair = lc_trust.generate_keypair()
+                        priv_path.write_text(pair["private_pem"], encoding="utf-8")
+                        priv_path.chmod(0o600)
+                        pub_path.write_text(pair["public_pem"], encoding="utf-8")
+                        generated = True
+                    result = {"generated": generated,
+                              "private_key": str(priv_path),
+                              "public_pem": pair["public_pem"],
+                              "key_id": lc_trust.key_id_for_public(pair["public_pem"]),
+                              "registry_hint": ("登记流程见 ~/.knowbase/team-keys/ENROLLMENT.md："
+                                                 "公钥与 key_id 交维护者写入 trust-registry.json")}
+                elif args.lifecycle_cmd == "evidence-export":
+                    from .value import identity
+                    from .knowledge_lifecycle import evidence as lc_evidence
+                    from .knowledge_lifecycle import observe as lc_observe
+                    from .knowledge_lifecycle import trust as lc_trust
+                    priv_path = Path(args.private_key).expanduser()
+                    if not priv_path.is_file():
+                        result = {"error": "PRIVATE_KEY_NOT_FOUND",
+                                  "detail": "先运行 knowbase lifecycle keygen"}
+                    else:
+                        private_pem = priv_path.read_text(encoding="utf-8")
+                        public_pem = lc_trust.public_from_private(private_pem)
+                        package = lc_evidence.export_package(
+                            conn, team_id=str(config.load_config().get("value", {})
+                                               .get("evidence_team_id") or "default"),
+                            issuer_installation_id=identity.install(conn),
+                            project_key=lc_observe.project_key_for_repo(repo),
+                            private_pem=private_pem,
+                            key_id=lc_trust.key_id_for_public(public_pem),
+                            limit=args.limit)
+                        conn.commit()
+                        out_path = Path(args.output).expanduser()
+                        lc_evidence.write_package(package, out_path)
+                        result = {"output": str(out_path),
+                                  "events": len(package.get("events") or []),
+                                  "team_id": package.get("team_id"),
+                                  "key_id": lc_trust.key_id_for_public(public_pem)}
+                elif args.lifecycle_cmd == "evidence-import":
+                    from .knowledge_lifecycle import evidence as lc_evidence
+                    from .knowledge_lifecycle import reconcile as lc_reconcile
+                    registry_path = Path(args.registry).expanduser()
+                    if not registry_path.is_file():
+                        result = {"error": "REGISTRY_NOT_FOUND",
+                                  "detail": f"{registry_path} 不存在；登记流程见 "
+                                            "~/.knowbase/team-keys/ENROLLMENT.md"}
+                    else:
+                        package = json.loads(Path(args.package).expanduser()
+                                             .read_text(encoding="utf-8"))
+                        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+                        stats = lc_evidence.import_package(conn, package, registry=registry)
+                        if stats.get("error"):
+                            result = {"import": stats}
+                        else:
+                            recompute = lc_reconcile.materialize_and_recompute(repo, conn)
+                            result = {"import": stats,
+                                      "recomputed": recompute.get("recomputed", 0),
+                                      "divergent_heads": len(recompute.get("divergent_heads") or [])}
                 else:  # confirm
                     from .mutations import _compute_revision
                     meta, _body, _path = store.load(repo, args.memory_id)

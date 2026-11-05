@@ -32,6 +32,9 @@ TASK_DEFS = (
     ("conflict_recheck", 86400, "冲突复验"),
     ("vector_maintenance", 30, "可选向量维护"),
     ("distillation", 60, "自动提炼（授权与探针条件满足时运行）"),
+    ("lifecycle_correlate", 300, "待归因 run 自动归因（W1-2，默认开）"),
+    ("lifecycle_recompute", 3600, "治理重算投影（W1-4，默认开，条件写入）"),
+    ("lifecycle_propose", 900, "staging 卡自动提案（W1-7，默认关）"),
 )
 TASK_INTERVALS = {kind: interval for kind, interval, _ in TASK_DEFS}
 WORKER_LABEL = "com.knowbase.worker"
@@ -374,6 +377,58 @@ def _h_distillation(repo, conn, cfg) -> dict:
     return run_due(repo,cfg,guard=cfg.get('_lease_valid',lambda:False))
 
 
+def _lifecycle_gate(cfg, key: str) -> bool:
+    return bool((cfg.get("knowledge_lifecycle") or {}).get("worker", {}).get(key))
+
+
+def _h_lifecycle_correlate(repo, conn, cfg) -> dict:
+    """W1-2：待归因 run → correlate 产 L0/L1/L2 证据（幂等，逐 run 容错）。"""
+    if not _lifecycle_gate(cfg, "correlate"):
+        return {"skipped": "lifecycle_correlate_disabled"}
+    from ..knowledge_lifecycle import attribution, observation
+    pending = observation.pending_runs(conn, limit=20)
+    out = {"correlated": 0, "L0": 0, "L1": 0, "L2": 0, "errors": []}
+    for item in pending:
+        try:
+            result = attribution.correlate(conn, repo, item["run_id"])
+        except Exception as exc:  # 单 run 失败不阻断其余（handler 契约：不外抛）
+            out["errors"].append(f"{item['run_id']}:{type(exc).__name__}")
+            conn.rollback()
+            continue
+        if result.get("error"):
+            out["errors"].append(f"{item['run_id']}:{result['error']}")
+            continue
+        out["correlated"] += 1
+        out["L0"] += len(result.get("L0") or [])
+        out["L1"] += len(result.get("L1") or [])
+        out["L2"] += len(result.get("L2") or [])
+    return out
+
+
+def _h_lifecycle_recompute(repo, conn, cfg) -> dict:
+    """W1-4：全库治理重算投影（apply_decision 条件写入，无变化零写盘）。"""
+    if not _lifecycle_gate(cfg, "recompute"):
+        return {"skipped": "lifecycle_recompute_disabled"}
+    from ..knowledge_lifecycle import reconcile
+    result = reconcile.materialize_and_recompute(repo, conn)
+    by_decision: dict = {}
+    for d in result.get("decisions") or []:
+        by_decision[d.get("decision", "?")] = by_decision.get(d.get("decision", "?"), 0) + 1
+    return {"recomputed": result.get("recomputed", 0),
+            "decisions": by_decision,
+            "divergent_heads": len(result.get("divergent_heads") or [])}
+
+
+def _h_lifecycle_propose(repo, conn, cfg) -> dict:
+    """W1-7：staging 卡自动提案；publish 二级门默认关（人工关卡保留）。"""
+    if not _lifecycle_gate(cfg, "propose"):
+        return {"skipped": "lifecycle_propose_disabled"}
+    from ..knowledge_lifecycle import changes
+    return changes.propose_admitted(
+        conn, repo, proposer="worker:lifecycle",
+        publish=_lifecycle_gate(cfg, "publish"), limit=20)
+
+
 _HANDLERS = {
     "lease_recovery": _h_lease_recovery,
     "knowledge_sync": _h_knowledge_sync,
@@ -383,6 +438,9 @@ _HANDLERS = {
     "conflict_recheck": _h_conflict_recheck,
     "vector_maintenance": _h_vector_maintenance,
     "distillation": _h_distillation,
+    "lifecycle_correlate": _h_lifecycle_correlate,
+    "lifecycle_recompute": _h_lifecycle_recompute,
+    "lifecycle_propose": _h_lifecycle_propose,
 }
 
 

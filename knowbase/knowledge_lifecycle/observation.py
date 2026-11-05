@@ -137,3 +137,22 @@ def run_summary(conn, run_id: str) -> dict:
             "session_id": row[6], "identity_basis": row[7],
             "environment_fingerprint": row[8], "artifact_set_hash": row[9],
             "completion": row[10], "gap_flags": json.loads(row[11])}
+
+
+def pending_runs(conn, limit: int = 50) -> list[dict]:
+    """待归因 run（W1-2）：有卡递送但尚无任何证据事件的 run。
+
+    - 只看 (host,session) 存在 retrieval_deliveries 的 run：无递送的会话对
+      归因无产出，排除以免每轮空转重扫（correlate 对它们恒零事件）。
+    - 已归因判定 = evidence_events 中存在该 run_id 的行（correlate 对每张
+      递送卡至少落一条 L0 knowledge.exposed，天然消除 pending）。
+    - 按 rowid 倒序（最新会话优先），limit 截断。
+    """
+    rows = conn.execute(
+        "SELECT r.run_id, r.host_profile, r.session_id, r.logical_task_key "
+        "FROM task_runs r WHERE EXISTS (SELECT 1 FROM retrieval_deliveries d "
+        "WHERE d.host_profile=r.host_profile AND d.session_id=r.session_id) "
+        "AND NOT EXISTS (SELECT 1 FROM evidence_events e WHERE e.run_id=r.run_id) "
+        "ORDER BY r.rowid DESC LIMIT ?", (int(limit),)).fetchall()
+    return [{"run_id": r[0], "host_profile": r[1], "session_id": r[2],
+             "logical_task_key": r[3]} for r in rows]

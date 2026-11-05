@@ -97,6 +97,15 @@ DEFAULTS = {
         "host_profile": "", "member_label": "unknown",
         "device_label": "unknown",
     },
+    # V2 生命周期接线（W1-2/3/4/7）：validators 登记即 registered-adapter
+    # 信任（verify 只在本地显式调用时解析报告，不自动执行命令）；
+    # worker 三门：correlate/recompute 默认开（幂等，投影条件写入），
+    # propose/publish 默认关（staging 首次激活的人工关卡节奏由团队显式放开）。
+    "knowledge_lifecycle": {
+        "validators": [{"validator_id": "pytest-text", "kind": "pytest"}],
+        "worker": {"correlate": True, "recompute": True,
+                   "propose": False, "publish": False},
+    },
     # P1 执行器探针：显式配置的执行器列表（空表示仅做本机发现）。
     # 每项为 command 或 intranet_text 配置；探针不输出其中任何密钥引用值。
     "automation": {"executors": [], "enabled": False, "allowed_scopes": [],

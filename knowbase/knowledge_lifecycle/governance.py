@@ -137,10 +137,16 @@ def apply_decision(repo, conn, memory_id: str) -> dict:
         meta["quarantine_reason"] = decision["reason"][:200]
         meta["stale_since"] = datetime.now(timezone.utc).date().isoformat()
         changed = True
+    # 投影字段与现值比较后才写盘：调度场景（recompute_all 每轮全库重算）
+    # 无变化不产生文件写入，避免全库卡片逐小时 git churn。
+    if (meta.get("quality_state") != quality_state
+            or meta.get("evidence_set_digest") != decision["input_set_digest"][:32]
+            or meta.get("policy_revision") != POLICY_REVISION):
+        changed = True
     meta["quality_state"] = quality_state
     meta["evidence_set_digest"] = decision["input_set_digest"][:32]
     meta["policy_revision"] = POLICY_REVISION
-    if changed or True:  # quality_state/digest 投影每次重算都刷新
+    if changed:
         from ..commit_adapter import _atomic_write
         _atomic_write(path, store.render(meta, body))
         index.upsert(conn, *store.load(repo, memory_id), commit=False)

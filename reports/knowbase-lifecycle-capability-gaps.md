@@ -60,12 +60,14 @@ W1-8 只接了 `index.search` 与 `evolution_recall`；`wide_recall`（evolution
 - **W4-3**：简化（simplification）——需真实验收通过后才可动，未开始。
 - **W4-4**：stale 修订的 revalidation 路径未实现（stale 卡目前只标记 `revalidation_pending`、不可见，凭新版本证据重新晋升的回路没有入口；W1-6 的 propose_admitted 会跳过 stale 并记原因，但回路本身不存在）。
 - **W4-5**：V2-17 生产迁移——真实 memory.db 已被 Hook 间接触发 `migrations.apply_all` 推到 v31，v32–v34 未应用；**不回滚、迁移需用户授权**。
+  【勘误 2026-11-05 16:20 复核：真实库（~/knowbase/memory.db）schema_migrations 已至 **v34**——v32–v34 已随后续部署的 7e6f8cc 运行时应用，本项迁移已完成，余下只读核验迁移结果即可。】
 - **V2-17 遗留**：源码树即生产（Hooks 每次触发都 import 当前源码）——开发期的一次 apply_all 就能推进真实库版本；需隔离开发与生产迁移路径，否则同类事故会重演。
 
 ## 配置与环境缺口
 
 - **默认配置下 staging 首次激活仍依赖人工操作**：V2-01 门关闭时 decide() 的晋升出口是关的；本批未动默认配置（改默认需用户决策，涉及自进化定义的核心——人工关卡去除的节奏）。
 - **配置曾被外部清空**：2026-11-05 11:34:37 `~/.knowbase/config.json` 的 automation/embedding/retrieval 三节被外部清空（含 secret_ref 执行器凭据），未恢复；distillation 被阻塞的原因是 `distillation_blocked_no_executor`。沙箱无法复核用户机配置状态。
+  【勘误 2026-11-05 16:26 实测：配置已于当日 16:05 由并行会话恢复（automation 全节 + intranet-deepseek 执行器 + team 提交身份均在；max_input_chars=128k 仍为默认值，64 条 material_budget 积压根因未变）。】
 - **测试隔离泄漏**：全量套件在基线即有偶发失败（本批最终全量跑：1159 passed / 2 skipped / 5 failed，5 项失败全部在干净基线 worktree 上单跑复现，确认为基线既有；失败集合随运行环境/顺序漂移，如 hook_noise 在本批三轮全量中均未失败）。测试隔离是回归可信度的底座，需修，否则「全量通过」本身不可信。
 - **沙箱 /tmp 容量**：全量跑的 pytest 临时目录曾占满 512M tmpfs 导致套件崩塌；本次改用 `TMPDIR=~/workspace/.tmp-pytest` 绕过。沙箱长期跑法应固定 TMPDIR 到大磁盘。
 
@@ -86,3 +88,17 @@ W1-8 只接了 `index.search` 与 `evolution_recall`；`wide_recall`（evolution
 5. **W2 八关系 + L4**：内容演进闭环的核心能力，工作量最大，放后面。
 6. **W4-4 stale 回路 + W4-2 分拆重试**：积压出路。
 7. **W3 真实验证**：贯穿始终，每批接线后都应在真实库上跑一次 freeze_report 五门。
+
+## 2026-11-05 第二批闭合（W1 接线批，基线 e8ab132）
+
+| 缺口 | 状态 |
+|---|---|
+| W1-2 correlate 无触发 | 已接线：`observation.pending_runs` + worker 任务 `lifecycle_correlate`（默认开，config 可关） |
+| W1-3 无 validator | 已接线：`knowledge_lifecycle/validators.py`（pytest-text 解析器）+ DEFAULTS 默认注册 + CLI `lifecycle verify` |
+| W4-4 前置：apply_decision 每轮全量重写 | 已修复：投影字段条件写入，无变化零写盘（调度无 git churn） |
+| W1-4 治理重算无触发 | 已接线：worker 任务 `lifecycle_recompute`（默认开）+ CLI `lifecycle recompute`；import 后经 `materialize_and_recompute` 显式链接 |
+| W1-5 证据包无 CLI | 已接线：`lifecycle keygen / evidence-export / evidence-import`（信任语义：未信/伪签零治理；worker 自动导出仍属 exchange 统一决策） |
+| W1-7 admission→publish 无调度 | 已接线：worker 任务 `lifecycle_propose`（默认关，publish 二级门默认关——人工关卡节奏保留） |
+| 测试隔离泄漏 | 已修复根因之一：宿主 `CLAUDE/ZCODE_PROJECT_DIR` 经 `_infer_scope` 泄漏造成随宿主漂移的假失败；conftest autouse 屏蔽后本机 8→1（余 1 项 test_program_updates_integration 为本机更新器子进程既有故障，与本批无关，另行立项） |
+
+仍未闭合（本批后）：W2 八关系、L4、wide_recall 重定向语义（新增确认：`server.py` 相似卡与 `materials.py` 素材召回两处直调同样不跟随，需一并收口）、exchange_v2/V2-13 统一、W4-2/W4-4、W3、**verified 晋升依赖任务身份设计**（本批诚实保留 unknown 键，反证门 quarantine 路径已可用）。沙箱记录的 5 个基线失败在本机不复现（全量单跑均过），属环境性漂移的同族问题。
