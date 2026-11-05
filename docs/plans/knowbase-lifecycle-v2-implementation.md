@@ -21,7 +21,7 @@
 | 阶段 | 目标 | 任务 |
 |---|---|---|
 | W0 收口 | 修复已核实的文档/代码不一致，补齐未确定项的核查 | W0-1～W0-5 |
-| W1 接线 | 把已实现的 V2 机制接入生产路径，打通自动闭环 | W1-1～W1-8 |
+| W1 接线 | 把已实现的 V2 机制接入生产路径，打通自动闭环 | W1-1～W1-9 |
 | W2 内容演进闭环 | 八关系自动识别与自动生成，补齐循环 A 的缺失层 | W2-1～W2-4 |
 | W3 真实验证 | 把全部 external_pending 逐项转为真实验收 | W3-1～W3-5 |
 | W4 治理与清理 | L4、积压根因、简化清单、生产迁移 | W4-1～W4-5 |
@@ -285,6 +285,41 @@ W3-5 依赖 W1 + W2-2；W4-3 依赖 W3-5（V2-16/17 真实验收后才能删代�
 - **验收**：MERGE 后搜索旧卡标题/关键词能到达新卡（或明确标注已重定向）；测试覆盖。
 - **依赖**：W0-4。
 
+### W1-9 Hook 时实时成卡（Path B 第一批，P0-1 + P0-2）
+
+- **状态：已完成（2026-11-05，Path B 第一批实施，用户 19:45 拍板 B 先、A 后）**——新模块
+  `knowbase/automation/hook_capture.py`（Hook 提示词 + 确定性规范化 + 待处理选择 +
+  `run_hook_capture`）；`_one` 参数化复用提炼管线（提示词/键前缀/缓存标记/提交前规范化钩子）；
+  worker 新任务 `hook_capture`（10 秒节律）；`capture_increment` 与 `capture_impl`
+  入队时置 `hook_capture` 标记；附带修复 `_apply_candidate` 的 None 可选字段泄漏
+  （`relations` 补 None 后传入 `writer.update`，`_compute_revision` 在 `sorted(None)` 上
+  抛 TypeError，提炼更新同病）。9 项新测试全过。详见
+  `reports/knowbase-hook-path-b-batch1-implementation.md`。
+
+- **目标**：检查点后短时完成知识识别与成卡（含复用判断），不再等 60 秒提炼链路。
+- **位置**：
+  - 新模块 `knowbase/automation/hook_capture.py`；
+  - `knowbase/automation/distillation.py` `_one`（参数化复用）；
+  - `knowbase/automation/execution.py` / `executor.py` / `text.py`（提示词 plumbing）；
+  - `knowbase/automation/worker.py` `TASK_DEFS` + `_h_hook_capture`；
+  - `knowbase/adapters/host_events.py` `capture_increment`、`knowbase/server.py`
+    `capture_impl`（入队标记）；
+  - `knowbase/extraction/materialize.py` `_apply_candidate`（None 字段修复）。
+- **事实**（E2）：审计已确认 Hook 只入队不成卡（`reports/knowbase-hook-capture-audit.md`）；
+  自动执行器被明文禁止 update/link_existing（`executor.py:322-323`），原因是跨进程
+  无法可靠持有双版本号；`writer.update` 会把 verified 卡改版降权回 once。
+- **任务**：
+  1. 检查点入队时置 `hook_capture` 标记；worker `hook_capture` 任务 10 秒节律取标记任务。
+  2. 复用 `_one` 全流程，只换 Hook 提示词（四种 action 均可）与提交前确定性规范化。
+  3. 复用判断三层防线：模型判重复/补充/全新 + `duplicate_evaluation` 门；期望版本号提交前
+     现读回填；create 标题相似度 ≥0.82 改走 link_existing/review。
+  4. 预算与提炼共用 `automation_budget`；超预算进 `retry_wait` 至次日零点，不静默丢弃。
+  5. update 的 verified 目标改走 review（自动路径不替 verified 卡改版降权）；
+     link_existing 不改目标卡本身，可正常链接 verified 卡。
+- **验收**：会话结束时卡已在（不走提炼）；重复内容不产生新卡；补充更新旧卡；
+  超预算进 `retry_wait`；quarantine 与 verified 规则未被触动（测试覆盖）。
+- **依赖**：无。**前置于 W3-3（真实宿主会话实测）。**
+
 ---
 
 ## W2 阶段：内容演进闭环
@@ -514,6 +549,7 @@ W3-5 依赖 W1 + W2-2；W4-3 依赖 W3-5（V2-16/17 真实验收后才能删代�
 | W1-6 | 待开始 | | |
 | W1-7 | 待开始 | | |
 | W1-8 | 待 W0-4 | | |
+| W1-9 | 已完成 | | Path B 第一批，2026-11-05；详见实施报告 |
 | W2-1 | 待授权 | | 需内网模型与脱敏样本授权 |
 | W2-2 | 待 W2-1 | | |
 | W2-3 | 待 W2-1 | | |

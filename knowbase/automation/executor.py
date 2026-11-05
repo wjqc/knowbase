@@ -361,12 +361,12 @@ class CommandExecutorRunner:
         self.noninteractive_argv = list(argv)
         self.timeout = float(cfg.get("timeout_seconds") or 120)
 
-    def run_text(self, request, full_text: str, segments: list | None = None) -> dict:
+    def run_text(self, request, full_text: str, segments: list | None = None, *, instructions=None) -> dict:
         payload = {
             "job_id": request.job_id,
             "scope": request.scope,
             "protocol_version": request.protocol_version,
-            "instructions": self.PROMPT_INSTRUCTIONS,
+            "instructions": instructions or self.PROMPT_INSTRUCTIONS,
             "materials": full_text,
             "segments": segments or [],
         }

@@ -205,7 +205,15 @@ def _pause(conn, job_id, claim, reason, *, retry=True):
               expected_owner=claim['lease_token'], expected_fencing=claim['fencing_token'])
 
 
-def _one(repo, conn, job_id, options, policy, guard):
+def _one(repo, conn, job_id, options, policy, guard, *, instructions=None,
+         key_prefix="auto-", input_marker=None, post_normalize=None):
+    """领取一批材料并走完“调用模型 → 提交 → 结算”。默认参数即既有提炼路径。
+
+    Hook 实时成卡（Path B）复用同一函数，只换四处：instructions（Hook 提示词，
+    允许 update/link_existing）、key_prefix（候选键前缀 hook-）、input_marker
+    （执行器响应缓存隔离，避免 Hook 响应被提炼路径复用）、post_normalize
+    （提交前确定性修复：版本号现读回填、标题查重改道）。其余流程——领取、
+    建批、分页、预算、提交、结算——与提炼共用，不另起并行管线。"""
     host = 'knowbase-background-'+uuid.uuid4().hex
     claim = jobs.claim(conn, job_id, host, kinds=jobs.PUBLIC_CLAIM_KINDS)
     if claim.get('error'): return {'job_id': job_id, 'skipped': 'claim_unavailable'}
@@ -243,10 +251,13 @@ def _one(repo, conn, job_id, options, policy, guard):
         if len(full_text) > int(policy.get('max_input_chars',128000)):
             raise ExecutorFailure('material_budget_exceeded')
         config_hash = receipts.fingerprint(options)
-        input_hash = digest([job_id, manifest['input_version'], list(segments.values()), related, config_hash])
+        digest_inputs = [job_id, manifest['input_version'], list(segments.values()), related, config_hash]
+        if input_marker:
+            digest_inputs = [input_marker, *digest_inputs]
+        input_hash = digest(digest_inputs)
         cached = conn.execute("SELECT response_json FROM executor_runs WHERE input_hash=? AND config_hash=? "
                               "AND response_json IS NOT NULL ORDER BY created_at DESC LIMIT 1", (input_hash,config_hash)).fetchone()
-        run_id = 'RUN-'+uuid.uuid4().hex; request_id = 'auto:'+claim['batch_id']
+        run_id = 'RUN-'+uuid.uuid4().hex; request_id = key_prefix.strip('-')+':'+claim['batch_id']
         conn.execute('INSERT INTO executor_runs(run_id,job_id,batch_id,executor_id,config_hash,input_hash,request_id,'
             'fencing_token,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
             (run_id,job_id,claim['batch_id'],str(options.get('executor_id','configured')),config_hash,input_hash,
@@ -257,8 +268,14 @@ def _one(repo, conn, job_id, options, policy, guard):
             if not _reserve(conn,policy,len(full_text)): raise ExecutorFailure('daily_budget_exhausted')
             conn.execute("UPDATE executor_runs SET state='calling',invoked=1,updated_at=? WHERE run_id=?",(now(),run_id));conn.commit()
             from .execution import execute_text
-            result = execute_text(options, DistillationRequest(job_id,claim['scope'],host),
-                                  full_text,list(segments.values()),policy)
+            # 默认（提炼）路径保持原调用签名不变：既有 execute_text 桩/调用方
+            # 只接受 5 个位置参数，无条件加 instructions 关键字会打破它们。
+            if instructions is None:
+                result = execute_text(options, DistillationRequest(job_id,claim['scope'],host),
+                                      full_text,list(segments.values()),policy)
+            else:
+                result = execute_text(options, DistillationRequest(job_id,claim['scope'],host),
+                                      full_text,list(segments.values()),policy,instructions=instructions)
         if not isinstance(result,dict) or not isinstance(result.get('candidates'),list) or not isinstance(result.get('segment_results'),list):
             raise ExecutorFailure('structured_output')
         from ..credentials import contains_credentials
@@ -287,8 +304,10 @@ def _one(repo, conn, job_id, options, policy, guard):
             raise ExecutorFailure('authority_changed')
         candidates = json.loads(json.dumps(result['candidates']))
         candidates = _normalize_candidates(candidates, conn, job_id, manifest)
+        if post_normalize is not None:
+            candidates = post_normalize(repo, candidates, claim['scope'])
         for candidate in candidates:
-            candidate['candidate_key'] = 'auto-'+digest([manifest['batch_segment_ids'],candidate.get('candidate_key')])[:32]
+            candidate['candidate_key'] = key_prefix+digest([manifest['batch_segment_ids'],candidate.get('candidate_key')])[:32]
         submitted = materialize.submit(repo,conn,job_id,claim['batch_id'],claim['lease_token'],request_id,
                                         candidates,result['segment_results'],claim['fencing_token'])
         if submitted.get('error') or submitted.get('failed'):

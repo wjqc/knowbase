@@ -221,8 +221,12 @@ def _apply_candidate(repo, conn, job_id, candidate, row):
                   "staging": path.parent.name == "staging", "local_state": "existing", "sync_state": "unknown"}
         outcome = "linked_existing"
     else:
+        # None 值表示“未提供”，不是“清空”：_normalize_candidates 会给缺失的
+        # relations/code_refs/rule_context 补 None；原样传入 writer.update 会把
+        # meta 写成 None，随后 _compute_revision 在 sorted(None) 上抛 TypeError
+        # （Hook 补充更新与提炼更新共用此口径，模型不输出这些可选字段即触发）。
         arguments = {key: candidate[key] for key in ("tags", "provenance", "source_refs", "code_refs", "rule_context", "relations")
-                     if key in candidate}
+                     if key in candidate and candidate[key] is not None}
         body = validator.build_card_body(candidate)
         if action == "update":
             result = writer.update(repo, candidate["target_id"], request_id=stable_key, push=False,

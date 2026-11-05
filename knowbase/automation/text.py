@@ -17,9 +17,10 @@ class IntranetTextRunner:
         self.transport = OpenAICompatProvider({**options, 'api_root': options.get('endpoint'),
                                                'secret_ref': options.get('secret_ref')})
 
-    def run_text(self, request, full_text, segments=None):
+    def run_text(self, request, full_text, segments=None, *, instructions=None):
         payload = {'job_id': request.job_id, 'scope': request.scope, 'materials': full_text,
-                   'segments': segments or [], 'instructions': CommandExecutorRunner.PROMPT_INSTRUCTIONS}
+                   'segments': segments or [],
+                   'instructions': instructions or CommandExecutorRunner.PROMPT_INSTRUCTIONS}
         # 推理型模型的 reasoning tokens 计入 completion 并先于正文消耗预算：
         # 上限须容纳"思考+结构化候选输出"（vLLM 网关实测），超时对齐命令执行器 300s。
         seconds = max(.05, min(300, float(self.options.get('timeout_seconds', 120))))

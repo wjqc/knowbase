@@ -32,6 +32,7 @@ TASK_DEFS = (
     ("conflict_recheck", 86400, "冲突复验"),
     ("vector_maintenance", 30, "可选向量维护"),
     ("distillation", 60, "自动提炼（授权与探针条件满足时运行）"),
+    ("hook_capture", 10, "Hook 实时成卡（Path B 第一批，检查点后短时处理）"),
     ("lifecycle_correlate", 300, "待归因 run 自动归因（W1-2，默认开）"),
     ("lifecycle_recompute", 3600, "治理重算投影（W1-4，默认开，条件写入）"),
     ("lifecycle_propose", 900, "staging 卡自动提案（W1-7，默认关）"),
@@ -377,6 +378,16 @@ def _h_distillation(repo, conn, cfg) -> dict:
     return run_due(repo,cfg,guard=cfg.get('_lease_valid',lambda:False))
 
 
+def _h_hook_capture(repo, conn, cfg) -> dict:
+    """Path B 第一批：Hook 实时成卡。检查点入队的带标记 capture 任务由本任务
+    在 10 秒节律内短时处理（领取 → Hook 提示词模型调用 → 提交 → 结算，复用
+    提炼管线）；无执行器配置时 blocked，不做探针（探针归提炼的 run_due）。"""
+    if not cfg.get('automation',{}).get('executors'):
+        return {"blocked": "hook_capture_blocked_no_executor"}
+    from .hook_capture import run_hook_capture
+    return run_hook_capture(repo,cfg,guard=cfg.get('_lease_valid',lambda:False))
+
+
 def _lifecycle_gate(cfg, key: str) -> bool:
     return bool((cfg.get("knowledge_lifecycle") or {}).get("worker", {}).get(key))
 
@@ -438,6 +449,7 @@ _HANDLERS = {
     "conflict_recheck": _h_conflict_recheck,
     "vector_maintenance": _h_vector_maintenance,
     "distillation": _h_distillation,
+    "hook_capture": _h_hook_capture,
     "lifecycle_correlate": _h_lifecycle_correlate,
     "lifecycle_recompute": _h_lifecycle_recompute,
     "lifecycle_propose": _h_lifecycle_propose,

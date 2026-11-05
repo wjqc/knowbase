@@ -15,7 +15,10 @@ def make_runner(options):
     return CommandExecutorRunner(options)
 
 
-def execute_text(options, request, text, segments, policy):
+def execute_text(options, request, text, segments, policy, *, instructions=None):
+    """执行一次文本推理。instructions 为 None 时用各 runner 的默认提炼提示词；
+    Hook 实时成卡（Path B）传入 HOOK_CAPTURE_INSTRUCTIONS，复用同一执行通道，
+    不另起模型调用路径。"""
     with tempfile.TemporaryDirectory(prefix='knowbase-inference-') as directory:
         root = Path(directory); root.chmod(0o700)
         cp = root/'config.json'; repo = root/'memory'
@@ -27,7 +30,7 @@ def execute_text(options, request, text, segments, policy):
         runner.execution_env = {**os.environ,'KNOWBASE_CONFIG':str(cp),'KNOWBASE_REPO_PATH':str(repo),
                                 'KNOWBASE_AGENT_NAME':'knowbase-background-distiller'}
         try:
-            return runner.run_text(request,text,segments)
+            return runner.run_text(request,text,segments,instructions=instructions)
         except ExecutorFailure:
             raise
         except Exception:

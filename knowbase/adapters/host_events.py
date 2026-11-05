@@ -192,7 +192,11 @@ def capture_increment(repo, session_id, transcript_path, scope, host, *, automat
             _save_capture_checkpoint(conn, host, session_id, scope, coverage, events, source_kind)
             return {"job_ids": [], "capture_status": "no_delta"}
         payload.update(host_profile=host, capture_range={"source_kind": source_kind, "start": cursor, "end": len(events)},
-                       coverage_scope="observed_host_events" if source_kind == "observations" else "provided_transcript")
+                       coverage_scope="observed_host_events" if source_kind == "observations" else "provided_transcript",
+                       # Path B 第一批：检查点入队的 capture 任务带标记，worker 的
+                       # hook_capture 任务（10 秒节律）短时处理成卡；未带标记的历史
+                       # 任务与 legacy 路径任务仍走 60 秒提炼。
+                       hook_capture=True)
         queued = jobs.enqueue(conn, jobs.KIND_CAPTURE, scope, payload,
                               idempotency_key=f"capture:{host}:{session_id}:{scope}:{cursor}:{payload['input_version']}")
         if queued.get("error"):
