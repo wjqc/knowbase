@@ -33,6 +33,24 @@ def _coerce(value, want):
     return value
 
 
+def _normalize_code_refs(value):
+    """code_refs 元素级修复：字符串化对象→解析；纯路径字符串等无效元素→丢弃。
+
+    code_refs 是可选增强（验证器只在"存在但格式错"时报错），模型常把元素输出成
+    路径字符串——为它废掉整条候选不值。空列表合法。
+    """
+    refs = _coerce(value, list)
+    if not isinstance(refs, list):
+        return refs
+    fixed = []
+    for ref in refs:
+        item = _coerce(ref, dict) if isinstance(ref, str) else ref
+        if (isinstance(item, dict) and isinstance(item.get('path'), str)
+                and isinstance(item.get('repo', ''), str)):
+            fixed.append(item)
+    return fixed
+
+
 def _normalize_candidates(candidates, conn, job_id, manifest=None):
     """执行器输出的保守规范化（仅自动化路径，不影响 Agent 提交协议的严格性）。
 
@@ -46,17 +64,20 @@ def _normalize_candidates(candidates, conn, job_id, manifest=None):
     """
     if not isinstance(candidates, list):
         return candidates
-    hashes = {m.get('segment_id'): m.get('text_hash')
-              for m in materials.manifest_for_job(conn, job_id)}
+    try:
+        hashes = {m.get('segment_id'): m.get('text_hash')
+                  for m in materials.manifest_for_job(conn, job_id)}
+    except (AttributeError, ValueError, sqlite3.Error):
+        hashes = {}
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
         candidate['body'] = _coerce(candidate.get('body'), dict)
         candidate['segment_ids'] = _coerce(candidate.get('segment_ids'), list)
         candidate['evidence_refs'] = _coerce(candidate.get('evidence_refs'), list)
-        candidate['code_refs'] = _coerce(candidate.get('code_refs'), list)
         candidate['relations'] = _coerce(candidate.get('relations'), list)
         candidate['rule_context'] = _coerce(candidate.get('rule_context'), dict)
+        candidate['code_refs'] = _normalize_code_refs(candidate.get('code_refs'))
         refs = candidate.get('evidence_refs')
         if isinstance(refs, list):
             for ref in refs:

@@ -345,7 +345,6 @@ class CommandExecutorRunner:
         "action 用 review 并在 duplicate_evaluation.rationale 写明与哪张卡重复/如何补充，由人工合并；"
         "独立知识才用 create。每条候选附duplicate_evaluation={"
         "snapshot_hash:similarity_snapshot,evaluated_cards:[{id,content_revision}],rationale:判断依据}。"
-        "code_refs 只引用材料中明确出现的仓库路径，材料里没有就不填 code_refs。"
     )
 
     def __init__(self, cfg: dict):

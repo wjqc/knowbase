@@ -245,3 +245,16 @@ def test_distillation_candidate_normalization(monkeypatch):
     # 转换不了的垃圾保持原样，交给验证器拒绝（不静默丢弃也不放行）
     junk = distillation._normalize_candidates([{'segment_ids': 'not-a-list('}], None, 'J-x')
     assert junk[0]['segment_ids'] == 'not-a-list('
+
+
+def test_code_refs_element_normalization():
+    """code_refs 元素级：纯路径字符串（模型高频错误形态）丢弃，字符串化对象解析，合法对象保留。"""
+    from knowbase.automation.distillation import _normalize_code_refs
+    mixed = ["src/foo.py",                          # 纯路径字符串 → 丢弃
+             "{'repo': 'knowbase', 'path': 'a.py'}",  # 字符串化对象 → 解析保留
+             {"repo": "cmi", "path": "b.py"},        # 合法对象 → 保留
+             42]                                     # 垃圾 → 丢弃
+    out = _normalize_code_refs(mixed)
+    assert out == [{"repo": "knowbase", "path": "a.py"}, {"repo": "cmi", "path": "b.py"}]
+    assert _normalize_code_refs("['x.py', 'y.py']") == []      # 整体字符串化的路径列表 → 全丢
+    assert _normalize_code_refs([]) == []                        # 空合法
