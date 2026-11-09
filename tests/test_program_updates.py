@@ -178,7 +178,7 @@ def test_busy_legacy_client_defers_without_killing_it(update_world,monkeypatch):
 
 def test_different_store_bridge_blocks_global_package_update(update_world,monkeypatch):
     home,root,source,settings,installed=update_world;e=Engine(settings)
-    monkeypatch.setattr(e,'live_bridges',lambda:[{'config_path':str(home/'other.json')}])
+    monkeypatch.setattr(e,'live_bridges',lambda _:[{'config_path':str(home/'other.json')}])
     with pytest.raises(UpdateError,match='additional_config'):e.quiesce()
 
 
@@ -199,6 +199,7 @@ def test_windows_bridge_probe_never_terminates_the_running_bridge(update_world,w
     pid=4321;_register_bridge(root,pid,home/'.knowbase/config.json')
     windows_probe(wait=engine._WINDOWS_WAIT_TIMEOUT,exit_code=engine._WINDOWS_STILL_ACTIVE)
     monkeypatch.setattr(engine,'os',_WindowsOS(os))
+    monkeypatch.setattr(e,'processes',lambda:[(pid,f'"{e.python}" -I "{root / "mcp_bridge.py"}"')])
     bridges=e.live_bridges()
     assert [d['pid'] for d in bridges]==[pid]
 
@@ -209,7 +210,7 @@ def test_windows_quiesce_defers_for_a_live_entry_without_killing_it(update_world
     pid=4321;_register_entry(root,pid)
     windows_probe(wait=engine._WINDOWS_WAIT_TIMEOUT,exit_code=engine._WINDOWS_STILL_ACTIVE)
     monkeypatch.setattr(engine,'os',_WindowsOS(os))
-    monkeypatch.setattr(e,'processes',lambda:[])
+    monkeypatch.setattr(e,'processes',lambda:[(pid,f'"{e.python}" -I "{root / "entry.py"}" hook stop')])
     with pytest.raises(UpdateError,match='busy_or_legacy_client_reconnect_required'):e.quiesce()
     assert json.loads(e.drain.read_text())['phase']=='drain_requests'
 
@@ -223,6 +224,17 @@ def test_windows_quiesce_proceeds_once_the_registered_process_exited(update_worl
     monkeypatch.setattr(e,'processes',lambda:[])
     e.quiesce()
     assert json.loads(e.drain.read_text())['phase']=='pause_backends'
+
+
+def test_quiesce_ignores_stale_registry_after_pid_reuse(update_world, monkeypatch):
+    home,root,source,settings,installed=update_world;e=Engine(settings)
+    bridge = _register_bridge(root, 4321, home/'.knowbase/config.json')
+    state = json.loads(bridge.read_text())
+    atomic(bridge, {**state, 'phase': 'running'})
+    _register_entry(root, 4322)
+    monkeypatch.setattr(e, 'processes', lambda: [(4321, '/usr/bin/node'), (4322, '/usr/bin/git')])
+    e.quiesce()
+    assert json.loads(e.drain.read_text())['phase'] == 'pause_backends'
 
 
 def test_rollback_never_restores_over_new_evidence(update_world,tmp_path):

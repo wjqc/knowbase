@@ -466,8 +466,21 @@ class Engine:
              'KNOWBASE_AGENT_NAME':'update-health-check'}
         command([self.python,'-I','-B','-c',code,candidate],env=env,timeout=60)
 
-    def live_bridges(self):
-        return [d for p in (self.root/'bridges').glob('*.json') if (d:=read(p)) and alive(d.get('pid'))]
+    def live_bridges(self, processes=None):
+        active = self.managed_process_ids(self.processes() if processes is None else processes, 'mcp_bridge.py')
+        return [d for p in (self.root/'bridges').glob('*.json') if (d:=read(p)) and d.get('pid') in active]
+
+    def managed_process_ids(self, processes, script):
+        found = set()
+        for pid, command_line in processes:
+            args = self.runtime_args(command_line)
+            if args is None:
+                continue
+            while args and args[0] in {'-I', '-B', '-u'}:
+                args = args[1:]
+            if args and Path(args[0].strip('"')).resolve() == self.root / script:
+                found.add(pid)
+        return found
 
     def processes(self):
         if os.name=='nt':
@@ -495,18 +508,20 @@ class Engine:
         atomic(self.drain,{'owner':os.getpid(),'started_at':time.time(),'phase':'drain_requests'})
         end=time.monotonic()+min(120,max(1,int(self.cfg.get('max_wait_seconds',60))))
         while time.monotonic()<end:
-            bridges=self.live_bridges();managed={pid for d in bridges for pid in [d.get('backend_pid'),d.get('pid')]}
+            processes=self.processes()
+            bridges=self.live_bridges(processes);managed={pid for d in bridges for pid in [d.get('backend_pid'),d.get('pid')]}
             if any(Path(d.get('config_path','')).resolve()!=self.config_path for d in bridges):
                 raise UpdateError('additional_config_requires_explicit_enrollment')
             legacy=[]
-            for pid,cmd in self.processes():
+            for pid,cmd in processes:
                 args=self.runtime_args(cmd)
                 if args is None or pid==os.getpid() or pid in managed:continue
                 while args and args[0] in {'-I','-B','-u'}:args=args[1:]
                 if args[:2]==['-m','knowbase'] and args[2:3] in (['worker'],['update']):continue
                 if args and Path(args[0].strip('"')).name in {'mcp_bridge.py','entry.py'} and Path(args[0].strip('"')).parent.resolve()==self.root:continue
                 legacy.append(pid)
-            entries=[p for p in (self.root/'entries').glob('*.json') if alive(read(p).get('pid'))]
+            entry_pids=self.managed_process_ids(processes,'entry.py')
+            entries=[p for p in (self.root/'entries').glob('*.json') if read(p).get('pid') in entry_pids]
             db=self.repo/'memory.db';busy=False
             if db.exists():
                 c=sqlite3.connect(db.resolve().as_uri()+'?mode=ro',uri=True)
