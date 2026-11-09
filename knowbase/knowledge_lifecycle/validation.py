@@ -14,8 +14,8 @@ from . import contracts
 
 VALIDATOR_ID = "lifecycle-validation-v1"
 
-GOVERNED_STRICT = ("standard", "preference")  # global preference/standard 需权威
-PROVENANCE_REQUIRED = ("bizrule", "standard")
+# 统一生命周期（2026-11-09）：类型不再参与验证门槛。权威门只看共享范围
+# （risk=R3）；出处不足由准入层升风险进待审，不在此按类型硬拒。
 
 
 def _now() -> str:
@@ -118,11 +118,8 @@ def validate_change(conn, repo, change_id: str) -> dict:
         record("output_frozen", "pass" if frozen_ok else "fail",
                f"{len(outputs)} outputs hash-verified")
 
-    # risk_authority：R3 或 strict 类型变更需权威引用。
-    strict_hit = any(
-        (store.load(repo, h["memory_id"])[0] or {}).get("type") in GOVERNED_STRICT
-        for h in change["base_heads"])
-    needs_authority = change["risk"] == "R3" or strict_hit
+    # risk_authority：统一规则——共享范围（R3）变更需权威引用，类型不参与。
+    needs_authority = change["risk"] == "R3"
     authority_ref = ""
     if needs_authority:
         # 权威引用由 admission 记录；验证引擎只核对是否存在对 change 的
@@ -134,9 +131,9 @@ def validate_change(conn, repo, change_id: str) -> dict:
         authority_ref = row[0] if row else ""
         record("risk_authority", "pass" if authority_ref else "fail",
                "authority confirmation bound to this change" if authority_ref
-               else "R3/strict-type change requires authority confirmation")
+               else "R3 (global scope) change requires authority confirmation")
     else:
-        record("risk_authority", "pass", "not required for this risk/type")
+        record("risk_authority", "pass", "not required for this risk level")
 
     report_id = "AR-" + hashlib.sha256(
         contracts.canonical_json({"c": change_id, "v": VALIDATOR_ID,

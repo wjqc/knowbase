@@ -25,8 +25,10 @@ def test_shared_rule_remains_staging_until_human_activation(memory_repo, tmp_pat
     rule = {"business_object": "订单", "trigger": "撤回请求", "required_or_forbidden": "已结算时拒绝撤回",
         "exceptions": "草稿另行处理", "applicable_version": "受控 PRD 版本", "business_confirmation": "explicit_source",
         "implementation_status": "not_implemented"}
+    # 统一生命周期：来源不足（无 source/provenance/evidence）即落 staging 待审，
+    # 不再按类型分流；带 provenance 的项目内卡会直接发布，无法走待审隔离路径。
     saved = writer.create(memory_repo, "bizrule", "已结算订单撤回业务规则", body,
-        scope="orders", provenance="PRD-ORDER §4", rule_context=rule)
+        scope="orders", rule_context=rule)
     assert not saved.get("error"), saved
     mid = saved["entity_id"]
     git(memory_repo, "config", "user.name", "fixture-a")

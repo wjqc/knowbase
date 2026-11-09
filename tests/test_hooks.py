@@ -48,6 +48,10 @@ r1 = save_impl("pitfall", "EasyConnect 7.6.7 在 macOS 上启动即死锁", BODY
           tags=["network", "vpn"], source="agent:claude-code:sess_t1")
 # 提取实际分配的 ID（兼容旧格式 P-2026-0001 和新格式 P-<uuid12>）
 pid = r1.split()[1] if r1.startswith("已保存") else ""
+# 统一生命周期（2026-11-09）：global（共享范围）卡保存即落 staging，类型不参与；
+# hook 自动检索只注入 active 卡——经 CLI promote 人工激活（治理动作）。
+if "→ staging" in r1:
+    assert cli.main(["promote", pid]) == 0, r1
 save_impl("pitfall", "proj07 场景部署异常排查", BODY,
           tags=["部署", "proj07"], scope="proj07", source="agent:claude-code:sess_t1")
 

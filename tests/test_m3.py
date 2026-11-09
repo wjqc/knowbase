@@ -251,6 +251,7 @@ class TestDistillationGuide:
             result = job_claim_impl(job_id=job_id, host_session_id="test-host")
             assert "提炼指引" in result
             assert "八项结构" in result
-            assert "pitfall" in result
+            # 统一生命周期：指引不再按类型分流，改为统一风险路由说明。
+            assert "统一风险规则" in result
         finally:
             conn.close()

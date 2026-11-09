@@ -1,15 +1,20 @@
-"""首次准入与权威确认门（V2-08）。
+"""首次准入与权威确认门（V2-08；统一生命周期 2026-11-09 修订）。
+
+统一生命周期：类型只作检索分类，不决定准入。准入按统一的内容、变更与
+共享风险判定：
+- R1：项目内新增/非实质补充，且有出处或可核对依据 → 同请求直接发布；
+- R2：改变已发布结论（CORRECT/REPLACE/MERGE/SPLIT）的项目内修订，
+  或来源不足 → 待审 + 变更验证；
+- R3：影响共享范围（scope=global）→ 待审 + 权威确认 + 变更验证。
 
 staging 不需要先被默认检索命中或被真实业务采用即可准入（任务书 V2-08）：
 准入检查的是结构/脱敏/来源/范围/风险/权威，不是使用流量。输出 admission
 report 绑定具体 revision；通过只代表 validated/once 可发布，不自动 verified。
 
-权威门（设计 §7.2）：
-- standard / global preference：一次性权威确认绑定具体版本与 scope——
-  authority_ref 必填（需求编号/负责人确认记录），多个 Agent 赞成不算。
-- bizrule：provenance + rule_context（既有 lint 已强制），现代码行为不
-  单独证明业务真值。
-- project preference：明确用户指令即可（来源声明）。
+权威门（统一规则）：
+- scope=global：一次性权威确认绑定具体版本与 scope——authority_ref 必填
+  （需求编号/负责人确认记录），多个 Agent 赞成不算。
+- 项目内：明确来源声明即可；来源不足只升风险进待审，不按类型硬拒。
 - 人工 promote/verify 也必须落同一报告（不信 CLI 参数自填 human）。
 """
 import hashlib
@@ -26,15 +31,32 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def classify_risk(card_type: str, change_relation: str = "NEW") -> str:
-    """类型 × 关系 → 风险分级（设计 §6.1）。"""
-    if card_type in ("standard",) or (card_type == "preference" and change_relation != "NEW"):
-        return "R3" if card_type == "standard" else "R3"
-    if card_type == "bizrule" or change_relation in ("CORRECT", "REPLACE", "MERGE", "SPLIT"):
+def classify_risk(scope: str, change_relation: str = "NEW", *,
+                  has_basis: bool = True) -> str:
+    """统一风险分级：共享范围 × 变更关系（类型不参与）。
+
+    has_basis 指来源/出处/证据任一存在；缺失的新增视为来源不足升 R2 待审。
+    """
+    if change_relation in ("CORRECT", "REPLACE", "MERGE", "SPLIT"):
+        return "R3" if scope == "global" else "R2"
+    if scope == "global":
+        return "R3"
+    if change_relation == "NEW" and not has_basis:
         return "R2"
-    if change_relation in ("ENRICH",):
-        return "R1"
     return "R1"
+
+
+def has_content_basis(meta: dict) -> bool:
+    """出处或可核对依据：真实来源声明、provenance、evidence/code_refs/source_refs。
+
+    writer.create 在调用方未提供 source 时自动补的 `*:adhoc` 只是落盘兜底，
+    不算依据（来源不足 → 待审）；显式提供的 agent:/human: 来源声明算出处。
+    """
+    src = str(meta.get("source") or "").strip()
+    return bool((src and not src.endswith(":adhoc"))
+                or str(meta.get("provenance") or "").strip()
+                or meta.get("evidence") or meta.get("code_refs")
+                or meta.get("source_refs"))
 
 
 def evaluate_admission(conn, repo, memory_id: str, content_revision: str, *,
@@ -44,7 +66,7 @@ def evaluate_admission(conn, repo, memory_id: str, content_revision: str, *,
 
     返回 {result: pass|fail|unknown, checks, risk, card_type}；同时落
     admission_reports（幂等键：memory_id+revision+change_id+report 内容）。
-    审核超时不默认批准：无 authority_ref 的 strict 类型就是 fail，保持待审。
+    审核超时不默认批准：global 范围无 authority_ref 就是 fail，保持待审。
     """
     meta, body, path = store.load(repo, memory_id)
     if not meta:
@@ -75,26 +97,27 @@ def evaluate_admission(conn, repo, memory_id: str, content_revision: str, *,
     if not (has_source or has_evidence) and overall == "pass":
         overall = "unknown"
 
-    # 类型/权威门。
-    if card_type in ("standard", "bizrule") and not str(meta.get("provenance") or "").strip():
-        record("provenance", "fail", f"{card_type} requires provenance")
-        overall = "fail"
-    elif card_type == "bizrule":
-        record("provenance", "pass", "provenance present")
-    if card_type == "standard" or (card_type == "preference" and scope == "global"):
+    # 统一出处门：所有类型一致——有 provenance 记 pass，缺失记 unknown
+    # （来源不足 → 待审，不按类型硬拒）。
+    has_provenance = bool(str(meta.get("provenance") or "").strip())
+    record("provenance", "pass" if has_provenance else "unknown",
+           "provenance present" if has_provenance
+           else "provenance absent: stays pending review, no type-based rejection")
+
+    # 统一权威门：共享范围（global）需要权威确认，类型不参与。
+    if scope == "global":
         if not authority_ref:
             record("authority_confirmation", "fail",
-                   "standard/global preference requires one-time authority "
-                   "confirmation bound to this revision and scope")
+                   "global scope requires one-time authority confirmation "
+                   "bound to this revision and scope")
             overall = "fail"
         else:
             record("authority_confirmation", "pass", f"authority_ref={authority_ref}")
-    # project preference：明确用户指令可作为授权证据（来源声明，不自动扩大 global）。
-    if card_type == "preference" and scope != "global":
-        record("authority_confirmation", "pass" if has_source else "unknown",
-               "project preference: explicit user instruction via source")
+    else:
+        record("authority_confirmation", "pass" if (has_source or has_evidence) else "unknown",
+               "project scope: explicit source via source/evidence")
 
-    risk = classify_risk(card_type)
+    risk = classify_risk(scope, "NEW", has_basis=has_content_basis(meta))
     report_id = "ADM-" + hashlib.sha256(contracts.canonical_json({
         "m": memory_id, "r": content_revision, "c": change_id, "a": authority_ref,
         "checks": checks}).encode("utf-8")).hexdigest()[:20]

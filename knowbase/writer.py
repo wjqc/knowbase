@@ -6,7 +6,8 @@ from pathlib import Path
 from . import config, gitops, index, store, commit_adapter
 from .locking import RepoLock
 
-GOVERNED = frozenset({"standard", "preference", "bizrule"})
+# 统一生命周期（2026-11-09）：不再有"受治理类型"集合。治理（staging 路由、
+# 激活、验证通道）按共享范围/变更关系/出处统一判定，类型只作检索分类。
 
 
 def _readback(conn, meta, body, staging):
@@ -88,12 +89,12 @@ def update(repo, mid: str, *, request_id="", expected_content_revision="",
     meta, old_body, path = store.load(repo, mid)
     if not meta:
         return {"error": "not_found"}
-    # 自进化：已生效受治理卡允许 Agent 修订，不再以 GOVERNANCE_DENIED 硬拒。
+    # 自进化：已生效卡允许 Agent 修订，不再以 GOVERNANCE_DENIED 硬拒。
     # 修订即降权——内容变化时 adapter_update 会把 confidence 重置为 once 并
     # 清空验证与计数，verified 的帽子不会被改版后继续保留。治理字段仍由
     # 服务端状态机管理，调用方不可直接指定（MCP 层本就不暴露这些字段，
-    # 这里再对直接调用做一道防线）。
-    if meta.get("type") in GOVERNED and path.parent.name != "staging":
+    # 这里再对直接调用做一道防线）。统一生命周期：防线覆盖全部类型。
+    if path.parent.name != "staging":
         reserved = {"status", "confidence", "last_verified", "verified_content_revision",
                     "helpful_count", "unhelpful_count"} & set(updates)
         if reserved:

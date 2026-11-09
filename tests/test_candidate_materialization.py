@@ -46,21 +46,23 @@ def submit(job, claim, candidates, request="req-1", decisions=None):
         candidates=candidates, segment_results=decisions, protocol_version=2))
 
 
-def test_business_rule_becomes_staging_file_not_just_database_candidate(memory_repo):
+def test_business_rule_candidate_materializes_to_active_file_not_just_database(memory_repo):
+    # 统一生命周期：项目内候选带出处（provenance + 物化 source）直接发布 active，
+    # 类型不再决定路由。
     job, claim = prepare()
     out = submit(job, claim, [candidate(claim)])
     assert out["failed"] == 0, out
-    assert out["saved_staging"] == 1 and out["saved_active"] == 0
-    assert out["state"] == "needs_review"
+    assert out["saved_active"] == 1 and out["saved_staging"] == 0
+    assert out["state"] == "succeeded"
     mid = out["results"][0]["memory_id"]
     meta, body, path = store.load(memory_repo, mid)
-    assert path.parent.name == "staging"
+    assert path.parent.name == "bizrules"
     assert meta["type"] == "bizrule" and "用户需求确认" in meta["provenance"]
     assert meta["rule_context"]["implementation_status"] == "not_implemented"
     assert "已结算订单禁止撤回" in body
     conn = index.connect(memory_repo)
-    assert not index.search(conn, "订单 撤回", scope="orders")
-    assert conn.execute("SELECT COUNT(*) FROM meta WHERE id=? AND staging=1", (mid,)).fetchone()[0] == 1
+    assert len(index.search(conn, "订单 撤回", scope="orders")) == 1
+    assert conn.execute("SELECT COUNT(*) FROM meta WHERE id=? AND staging=0", (mid,)).fetchone()[0] == 1
     conn.close()
 
 
@@ -73,12 +75,12 @@ def test_top_level_scope_is_sufficient_and_conflicting_body_scope_is_rejected(me
     assert "SCOPE_MISMATCH" in json.dumps(wrong)
     del c["body"]["scope"]
     out=submit(job,claim,[c],request="canonical-scope")
-    assert out["saved_staging"]==1 and out["failed"]==0,out
+    assert out["saved_active"]==1 and out["failed"]==0,out
     meta,_,path=store.load(memory_repo,out["results"][0]["memory_id"])
-    assert meta["scope"]=="orders" and path.parent.name=="staging"
+    assert meta["scope"]=="orders" and path.parent.name=="bizrules"
 
 
-def test_new_staging_card_can_be_read_in_task_without_becoming_adoptable(memory_repo):
+def test_new_candidate_card_can_be_read_in_task_without_becoming_adoptable(memory_repo):
     from knowbase.server import read_impl,context_impl,use_impl
     job,claim=prepare()
     result=submit(job,claim,[candidate(claim)])
@@ -88,12 +90,14 @@ def test_new_staging_card_can_be_read_in_task_without_becoming_adoptable(memory_
     assert not ctx["candidates"]
     text=read_impl(mid,session_id="reader",event_id="read-new",context_event_id="lookup",host_profile="native-test")
     assert "read_use_id=" in text and "已结算订单禁止撤回" in text
-    assert "staging=true" in text and "未激活" in text and "runtime_version=" in text
+    # 项目内候选直接 active 发布：阅读头标明 staging=false，但未进入检索候选，
+    # 不构成可采纳回执（采纳仍以实际递送为准）。
+    assert "staging=false" in text and "runtime_version=" in text
     from knowbase.mutations import _compute_revision
     meta,body,path=store.load(memory_repo,mid)
     use=json.loads(use_impl(session_id="reader",event_id="adopt-new",context_event_id="lookup",id=mid,
         content_revision=_compute_revision(meta,body),state="adopted",host_profile="native-test"))
-    assert use["error"]=="CANDIDATE_NOT_DELIVERED" and path.parent.name=="staging"
+    assert use["error"]=="CANDIDATE_NOT_DELIVERED" and path.parent.name=="bizrules"
     context_impl(session_id="other-scope",event_id="lookup",scope="unrelated",
                  current_goal="其他任务",host_profile="native-test")
     assert "SCOPE_MISMATCH" in read_impl(mid,session_id="other-scope",event_id="read-wrong-scope",
@@ -127,7 +131,9 @@ def test_no_candidate_is_an_explicit_complete_segment_decision(memory_repo):
 def test_invalid_candidate_does_not_advance_coverage(memory_repo):
     job, claim = prepare()
     c = candidate(claim)
-    del c["provenance"]
+    # 出处缺失不再硬拒（统一生命周期路由 staging）；改用结构非法（bizrule
+    # 缺 rule_context）验证无效候选不推进覆盖。
+    del c["rule_context"]
     out = submit(job, claim, [c])
     assert out["error"] == "VALIDATION_FAILED"
     conn = index.connect(memory_repo)
@@ -169,10 +175,11 @@ def test_transient_write_failure_recovers_via_status_without_duplicate(memory_re
     monkeypatch.setattr(writer, "create", original)
     monkeypatch.setenv("KNOWBASE_AGENT_NAME", "another-recovery-host")
     status = json.loads(job_status_impl(job, protocol_version=2))
-    assert status["state"] == "needs_review", status
+    # 项目内候选直接发布 active：恢复后无待审段，任务结算为 succeeded。
+    assert status["state"] == "succeeded", status
     assert len(list(store.iter_all(memory_repo, include_staging=True))) == 1
     recovered = submit(job, claim, [candidate(claim)])
-    assert recovered["saved_staging"] == 1 and recovered["failed"] == 0
+    assert recovered["saved_active"] == 1 and recovered["failed"] == 0
 
 
 def test_unconfirmed_rule_can_be_retained_for_review_without_fake_provenance(memory_repo):
@@ -214,7 +221,7 @@ def test_related_new_card_requires_explicit_reassessment(memory_repo):
                             for card in rejected["similar_cards"]],
         "rationale": "已有卡是草稿删除，本候选是已结算订单撤回，条件和结果均不同。"}
     accepted = submit(job, claim, [c], request="after-review")
-    assert accepted["saved_staging"] == 1 and accepted["failed"] == 0
+    assert accepted["saved_active"] == 1 and accepted["failed"] == 0
 
 
 def test_stale_application_owner_cannot_advance_coverage(memory_repo, monkeypatch):
@@ -236,7 +243,7 @@ def test_stale_application_owner_cannot_advance_coverage(memory_repo, monkeypatc
     conn.close()
     monkeypatch.setattr(writer, "create", original)
     recovered = json.loads(job_status_impl(job, protocol_version=2))
-    assert recovered["state"] == "needs_review"
+    assert recovered["state"] == "succeeded"
     assert len(list(store.iter_all(memory_repo, include_staging=True))) == 1
 
 

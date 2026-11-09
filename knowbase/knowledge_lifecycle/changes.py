@@ -175,7 +175,7 @@ def propose_new_card(conn, repo, memory_id: str, *, proposer: str = "") -> dict:
 
     供 staging 卡首次发布（W1-6）与手动 `lifecycle propose` 使用。
     base_heads=[]、claim_map=[]（NEW 无旧 claim）、source_dispositions=[]。
-    风险按 admission.classify_risk（类型 × NEW）分级。
+    风险按 admission.classify_risk（共享范围 × NEW × 出处）分级，类型不参与。
     """
     from .. import store as _store
     from ..mutations import _compute_revision
@@ -186,7 +186,8 @@ def propose_new_card(conn, repo, memory_id: str, *, proposer: str = "") -> dict:
     revision = _compute_revision(meta, body)
     return propose_change(
         conn, repo, relation="NEW",
-        risk=_admission.classify_risk(meta.get("type", ""), "NEW"),
+        risk=_admission.classify_risk(meta.get("scope", ""), "NEW",
+                                      has_basis=_admission.has_content_basis(meta)),
         scope=meta.get("scope", ""), base_heads=[],
         outputs=[{"memory_id": memory_id, "disposition": "active",
                   "meta": dict(meta), "body": body}],

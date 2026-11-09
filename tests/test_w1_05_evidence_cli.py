@@ -32,9 +32,13 @@ PASSED tests/test_ev.py::test_rule
 
 def _seed_l3(conn, repo, mid):
     meta, body, _ = store.load(repo, mid)
-    report = validators.parse_pytest_text(PASS_REPORT)
+    revision = _compute_revision(meta, body)
+    report = validators.parse_pytest_text(
+        validators.stamp_report_text(PASS_REPORT, memory_id=mid, content_revision=revision))
+    attribution.record_execution(conn, memory_id=mid, content_revision=revision,
+                                 artifact_hash=report["artifact_hash"])
     report["target"] = {"memory_id": mid,
-                        "content_revision": _compute_revision(meta, body)}
+                        "content_revision": revision}
     result = attribution.verify_execution(conn, repo, run_id="",
                                           validator_id="pytest-text", report=report)
     assert not result.get("error"), result

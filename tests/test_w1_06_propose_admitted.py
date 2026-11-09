@@ -1,8 +1,10 @@
 """W1-6：staging 卡自动提案（lifecycle propose / propose-admitted）。
 
 覆盖：NEW 立案 + 确定性 change_id 幂等；准入通过的 staging 卡 --publish 全链发布
-（正式文件落盘、staging 源删除、search 可见）；standard 无权威确认时停在 proposed，
-确认后可发布；立案后改 staging 源 → 发布 SOURCE_MOVED 且源文件保留。
+（正式文件落盘、staging 源删除、search 可见）；统一生命周期下权威门只看共享
+范围——global 卡无权威确认时停在 proposed，确认后可发布；立案后改 staging 源
+→ 发布 SOURCE_MOVED 且源文件保留。
+staging 路由按统一规则制造：项目内新增去掉 provenance（来源不足）或 scope="global"。
 """
 from pathlib import Path
 
@@ -44,9 +46,11 @@ def test_propose_new_card_idempotent(memory_repo):
 
 
 def test_propose_admitted_publishes_staging_bizrule(memory_repo):
-    biz = writer.create(memory_repo, "bizrule", "折扣审批规则", BODY, scope="orders",
-                        provenance="PRD-9")
+    # 统一生命周期：bizrule 不再按类型进 staging；项目内新增去掉 provenance
+    # （来源不足）按统一规则落 staging，走提案管道发布。
+    biz = writer.create(memory_repo, "bizrule", "折扣审批规则", BODY, scope="orders")
     assert not biz.get("error"), biz
+    assert biz["staging"] is True, biz
     mid = biz["entity_id"]
     conn = index.connect(memory_repo)
     apply_all(conn)
@@ -71,9 +75,12 @@ def test_propose_admitted_publishes_staging_bizrule(memory_repo):
 
 
 def test_propose_admitted_standard_needs_authority_then_publishes(memory_repo):
-    std = writer.create(memory_repo, "standard", "结算标准", BODY, scope="orders",
+    # 统一生命周期：权威门只看共享范围——global 卡（不按类型）无权威确认时
+    # 准入 fail，停在 proposed 等待 authority_confirm。
+    std = writer.create(memory_repo, "standard", "结算标准", BODY, scope="global",
                         provenance="PRD-4")
     assert not std.get("error"), std
+    assert std["staging"] is True, std
     mid = std["entity_id"]
     conn = index.connect(memory_repo)
     apply_all(conn)
@@ -95,9 +102,10 @@ def test_propose_admitted_standard_needs_authority_then_publishes(memory_repo):
 
 
 def test_publish_new_rejects_moved_staging_source(memory_repo):
-    biz = writer.create(memory_repo, "bizrule", "折扣审批规则", BODY, scope="orders",
-                        provenance="PRD-9")
+    # 统一生命周期：项目内新增去掉 provenance（来源不足）按统一规则落 staging。
+    biz = writer.create(memory_repo, "bizrule", "折扣审批规则", BODY, scope="orders")
     assert not biz.get("error"), biz
+    assert biz["staging"] is True, biz
     mid = biz["entity_id"]
     conn = index.connect(memory_repo)
     apply_all(conn)
@@ -123,9 +131,10 @@ def test_publish_new_rejects_moved_staging_source(memory_repo):
 
 
 def test_cli_lifecycle_propose_and_propose_admitted(memory_repo):
-    biz = writer.create(memory_repo, "bizrule", "折扣审批规则", BODY, scope="orders",
-                        provenance="PRD-9")
+    # 统一生命周期：项目内新增去 provenance 落 staging，CLI 管道全链发布。
+    biz = writer.create(memory_repo, "bizrule", "折扣审批规则", BODY, scope="orders")
     assert not biz.get("error"), biz
+    assert biz["staging"] is True, biz
     mid = biz["entity_id"]
     assert cli.main(["lifecycle", "propose", mid]) == 0
     assert cli.main(["lifecycle", "propose-admitted", "--publish"]) == 0

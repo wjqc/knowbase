@@ -49,8 +49,12 @@ PRD-ORDER 第四条定义了结算后撤回限制。
 
 
 def seed_card(repo, title="已结算订单撤回的状态校验", dtype="pitfall"):
+    # 统一生命周期（类型不参与）：递送/证据链测试的本意卡是"已发布的 active 卡"，
+    # 显式 source 算出处 → 项目内直接发布；bizrule 变体不带任何出处 → 来源不足
+    # 按统一规则落 staging 待审（供"staging 卡不写递送"的过滤断言使用）。
+    published = dtype != "bizrule"
     out = save_impl(dtype, title, CARD, scope="orders",
-                    provenance="PRD-ORDER §4" if dtype == "bizrule" else None)
+                    source="agent:pytest:seed" if published else None)
     match = re.search(r"已保存 ([PB]-[\w-]+)", out)
     assert match, out
     return match.group(1)
@@ -499,7 +503,9 @@ def test_multi_query_deliveries_bound_to_own_search(memory_repo):
     """§9 多 query：同一事件内两条查询各命中不同卡，递送按各自 search_id 归属，
     不按最近时间或单个 context_event_id 猜测。"""
     mid1 = seed_card(memory_repo)
-    out2 = save_impl("pitfall", "退款单据金额核对", CARD2, scope="orders")
+    # 统一生命周期：第二条检索命中卡须是已发布 active 卡（显式 source 算出处）。
+    out2 = save_impl("pitfall", "退款单据金额核对", CARD2, scope="orders",
+                     source="agent:pytest:seed")
     mid2 = re.search(r"已保存 ([PB]-[\w-]+)", out2).group(1)
     result = context.execute(memory_repo, session_id="s1", event_id="e-multi", scope="orders",
                              stage="subtask_start", task_id="t1", task_revision="task-v1",

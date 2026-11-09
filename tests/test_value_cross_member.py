@@ -47,9 +47,11 @@ def test_created_revised_activated_events_follow_card_lifecycle(memory_repo):
     new_rev = json.loads(revised[0]["payload"])["payload"]["content_revision"]
     assert revised[0]["source_key"] == f"knowledge:{mid}:{new_rev}:revised"
 
-    # bizrule 走 staging → 人工 promote 产生 activated 事件（正文与 pitfall 卡不同，避免查重拦截）
+    # 统一生命周期：项目内有出处的卡直接发布（无 activated 事件）；要触发
+    # 人工 promote → activated 流程需共享范围（global）落 staging（正文与
+    # pitfall 卡不同，避免查重拦截）。
     rule_body = full_card().replace("已结算订单不能撤回。", "结算完成后禁止发起撤回工单。")
-    rule = save_impl("bizrule", "结算后禁止撤回工单规则", rule_body, scope="orders",
+    rule = save_impl("bizrule", "结算后禁止撤回工单规则", rule_body, scope="global",
                      provenance="PRD-ORDER §5")
     rule_id = __import__("re").search(r"\b([PB]-[0-9a-f]+)\b", rule).group(1)
     assert main(["promote", rule_id]) == 0
@@ -72,7 +74,9 @@ def deliver_and_adopt(repo, mid, revision, *, session="s1", event="use-1"):
 def test_task_outcome_ledger_and_events(memory_repo):
     enable_events()
     from knowbase.server import save_impl
-    saved = save_impl("pitfall", "订单撤回规则", full_card(), scope="orders")
+    # 统一生命周期：检索递送只覆盖 active 卡，显式来源直接发布。
+    saved = save_impl("pitfall", "订单撤回规则", full_card(), scope="orders",
+                      source="agent:pytest:seed")
     import re as _re
     mid = _re.search(r"已保存 ([PB]-[\w-]+)", saved).group(1)
     conn = index.connect(memory_repo)

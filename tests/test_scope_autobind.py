@@ -7,12 +7,27 @@ hook 未映射回退 global 且不再整场跳过。
 """
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from knowbase import config, hooks, index, scope_binding
+
+
+def save_global_active(title):
+    """统一生命周期：global（共享范围）卡保存即落 staging，类型不参与；
+    经 CLI promote 人工激活后才能进默认检索——hook 回退 global 的召回
+    测试需要 active 卡。"""
+    from knowbase.server import save_impl
+    out = save_impl("pitfall", title, BODY, tags=["network", "vpn"],
+                    source="agent:zcode:test-scope-autobind")
+    assert "staging（待审" in out, out  # 统一路由：global 落 staging
+    mid = re.search(r"已保存 ([PB]-[\w-]+)", out).group(1)
+    from knowbase.__main__ import cmd_promote
+    assert cmd_promote(mid) == 0
+    return mid
 
 BODY = ("## 结论\nEasyConnect 7.6.7 在 macOS 26.1 上启动即 Rosetta 死锁，内网 vpn 全部连不上。\n\n"
         "## 解决的问题\n避免把启动死锁误判为系统故障反复重装。\n\n"
@@ -168,9 +183,7 @@ def test_remote_url_forms(repo):
 
 
 def test_hook_unmapped_falls_back_to_global_and_searches(repo, tmp_path):
-    from knowbase.server import save_impl
-    save_impl("pitfall", "EasyConnect 7.6.7 在 macOS 上启动即死锁", BODY,
-              tags=["network", "vpn"], source="agent:zcode:test-scope-autobind")
+    save_global_active("EasyConnect 7.6.7 在 macOS 上启动即死锁")
     project = _git_repo(tmp_path, "fresh-project", "http://git.internal/product/new/fresh-project.git")
     text = hooks.user_prompt("帮我看看内网 vpn 连不上的问题", project_dir=str(project))
     # 不再出现"已跳过自动检索"；global 卡经 (scope=派生 OR global) 召回并注入
@@ -188,9 +201,7 @@ def test_hook_unmapped_falls_back_to_global_and_searches(repo, tmp_path):
 
 
 def test_hook_non_git_dir_uses_global_scope(repo, tmp_path):
-    from knowbase.server import save_impl
-    save_impl("pitfall", "EasyConnect 7.6.7 在 macOS 上启动即死锁", BODY,
-              tags=["network", "vpn"], source="agent:zcode:test-scope-autobind")
+    save_global_active("EasyConnect 7.6.7 在 macOS 上启动即死锁")
     project = tmp_path / "普通目录"
     project.mkdir()
     text = hooks.user_prompt("帮我看看内网 vpn 连不上的问题", project_dir=str(project))

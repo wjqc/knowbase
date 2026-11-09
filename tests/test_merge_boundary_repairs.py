@@ -1,5 +1,6 @@
 """Independent regressions for the merged P0/P1/P3/P4 boundaries."""
 import json
+import re
 import sys
 import threading
 
@@ -63,8 +64,13 @@ def test_v2_roundtrip_preserves_complete_chain_identity(tmp_path):
 
 
 def test_adoption_links_only_to_its_host_and_session(memory_repo):
-    from test_p0_evidence_repair import seed_card
-    mid = seed_card(memory_repo)
+    from test_p0_evidence_repair import CARD
+    from knowbase.server import save_impl
+    # 统一生命周期：无出处的卡落 staging、不进默认检索；检索→递送→采用链
+    # 需要 active 卡，显式补来源发布。
+    out = save_impl("pitfall", "已结算订单撤回的状态校验", CARD, scope="orders",
+                    source="agent:pytest:seed")
+    mid = re.search(r"已保存 (P-[\w-]+)", out).group(1)
     for host, sid, query in [('a', 'session-a', '已结算 订单 撤回'),
                              ('b', 'session-b', '订单 撤回 校验')]:
         result = context.execute(memory_repo, session_id=sid, event_id='same-local-event',

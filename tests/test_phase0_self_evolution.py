@@ -30,8 +30,11 @@ BODY = ("## 结论\n已结算订单不能撤回。\n## 解决的问题\n避免�
 
 def standard_card(repo, *, provenance="PRD-4 §2"):
     enable_trusted_transition()
+    # 统一生命周期：本组是"从 staging 出发的激活/复活机制测试"。
+    # 共享范围（global）按统一路由进 staging 待审（类型不参与）；
+    # 项目内 + 出处的新卡会直接发布 active+once，不再经过本机制。
     result = writer.create(repo, "standard", "结算订单撤回标准", BODY,
-                           scope="orders", provenance=provenance)
+                           scope="global", provenance=provenance)
     assert not result.get("error"), result
     assert result["staging"] is True
     return result["entity_id"]

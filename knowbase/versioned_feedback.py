@@ -146,11 +146,9 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
             return {"error":"not_found"}
         policy=config.load_config().get("evolution",{})
         staged=path.parent.name=="staging"
-        # 自进化统一出口：全部受治理类型（standard/preference/bizrule）的 staged 卡
-        # 均可凭绑定 read 回执的真实任务验证积累激活证据；激活阈值见 decide()。
-        # 延迟导入：与本文件内其他运行时导入一致，避免模块加载期循环。
-        from .writer import GOVERNED
-        validation=bool(bound and use[6]=="read" and meta.get("type") in GOVERNED
+        # 自进化统一出口：全部类型的 staged 卡均可凭绑定 read 回执的真实任务
+        # 验证积累激活证据（统一生命周期：类型不参与治理通道）；激活阈值见 decide()。
+        validation=bool(bound and use[6]=="read"
                         and policy.get("enabled",True) and policy.get("auto_activate_bizrules",True)
                         and task_result in ("completed","failed"))
         if bound and use[6]=="read" and not validation:

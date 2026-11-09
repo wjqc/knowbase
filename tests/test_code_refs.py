@@ -118,9 +118,11 @@ def test_save_search_read_and_update_code_refs(isolated_repo):
 
 
 def test_bizrule_staging_message_points_to_bizrules(isolated_repo):
+    # 统一生命周期：项目内有出处的 bizrule 直接发布；staging 提示只在
+    # 共享范围（global）或来源不足时出现，仍指向对应类型目录。
     result = save_impl(
         "bizrule", "bizrule 的人工激活目标目录", CARD,
-        tags=["bizrule", "业务规则"], scope="knowbase",
+        tags=["bizrule", "业务规则"], scope="global",
         provenance="代码逆向梳理待人工确认出处",
         code_refs=[{"repo": "knowbase", "path": "knowbase/store.py", "symbol": "lint"}],
     )

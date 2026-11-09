@@ -480,3 +480,21 @@ Windows worker安装分支缺失；现有macOS/Linux安装前先停旧任务，�
 - 新接入默认 1 秒，宿主同步路径会解析完整 transcript；标题相似直接链接会吞掉冲突规则；两类 worker 会抢同一采集任务。
 - 本机升级排空时，两条旧 MCP 登记的 PID 已被系统其他程序复用。排空现在校验固定解释器和入口脚本的实际启动命令；两成员更新集成验证通过。
 - 内网执行器 TLS 握手和小请求正常；102545 字节的中文探针在发送后被断开，同一请求改为紧凑 UTF-8（53866 字节）后真实隔离探针 8 项通过。传输保持原有 TLS、授权和端点约束。
+
+## 2026-11-09 Trae MCP 主线
+
+- 用户确认旧积压材料直接清理，不转提炼；取消按知识卡类型分流。保留类型分类、统一版本和可信证据门槛。
+- 只读盘点：当前 1 条失败的采集检查点，无待领或待审，提交台账均已结算。实际清理前应按水位复核并保留现有卡、来源和证据。
+
+# 2026-11-10 统一生命周期实施取证
+
+- 真实数据目录是 `~/knowbase/memory.db`（内容库根，repo_path=~/knowbase）；`~/.knowbase/memory.db` 是 0 字节旧残留，`.backup` 取证别打错库。
+- writer.create 在调用方未传 source 时自动补 `agent:<agent>:adhoc`；统一路由把 `:adhoc` 视为"无依据"（→staging），显式 agent:/human: 来源声明才算出处。materialize 候选带显式 `agent:knowbase:candidate-*`，因此候选路由实际由 scope 决定。
+- staging 判定按目录（path.parent.name=="staging" + DB meta.staging=1），confidence 字段仍为 once——"待审卡 confidence=staging"是旧印象。
+- verify 报告绑定：EMPTY_REPORT 先于绑定门（先看报告成立，再看绑定）；`--run` 与 `--report-file` 同用时把带戳原件写回 --report-file 路径，供审计重放；治理消费端 effective_evidence 本就按 subject_revision 过滤，漏洞只在投喂侧。
+- lifecycle verify 的 --format 既是格式也是 validator_id（choices 仅 pytest-text），注册表须含同名 validator。
+- 9MB transcript Stop 入队读尾 <0.5s；尾部窗口可能截掉窗口外的 tool_use 行导致 legacy 统计 no_delta——尾件样本要把 tool_use 放进最后 256KB。
+- 分页契约：材料按 segment 内分块（max_chars 截断，page_start/complete/truncated），去重键是 (segment_id, page_start) 而非 segment_id。
+- 提交语义：distilled 片段必须各有候选（MISSING_CANDIDATE），支撑材料应标 no_value+理由；全片段决策齐才离开 awaiting_agent。
+- test_governance.py/test_bizrule.py/test_e2e.py 等脚本式测试在模块 import 时断言执行，组合运行的相互影响靠全量跑验证；单独子集可能因 CONFIG_PATH 模块级绑定顺序出现假失败。
+- 检索 golden 与真实库语料漂移（BM25 被 L2 同义扩展压位）是既有排序质量信号，已按 gap 重基线跟踪，非本次改造回归。

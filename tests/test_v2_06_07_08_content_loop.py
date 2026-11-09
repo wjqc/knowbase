@@ -306,13 +306,17 @@ def test_rollback_creates_new_publication_without_resurrecting_verified(memory_r
 
 
 def test_admission_authority_gate(memory_repo):
-    """首次准入：staging 无需被采用即可评估；standard 无权威确认 fail。"""
-    std = writer.create(memory_repo, "standard", "结算标准", BODY, scope="orders",
+    """首次准入：staging 无需被采用即可评估；统一权威门只看共享范围——
+    global 卡无权威确认 fail，项目内不再按类型要求。"""
+    # 统一生命周期：global（共享范围）→ staging，准入需权威确认；类型不参与。
+    std = writer.create(memory_repo, "standard", "结算标准", BODY, scope="global",
                         provenance="PRD-4")
-    pit = make_card(memory_repo, "pitfall 准入卡")
+    assert std["staging"] is True, std
+    # 项目内新增带 provenance（有依据）→ 直接发布 active。
+    pit = make_card(memory_repo, "pitfall 准入卡", provenance="PRD-PIT-1")
     conn = index.connect(memory_repo)
     apply_all(conn)
-    # standard 无 authority_ref → fail（多个 Agent 赞成也不行）。
+    # global 卡无 authority_ref → fail（多个 Agent 赞成也不行）。
     result = admission.evaluate_admission(
         conn, memory_repo, std["entity_id"], head_of(conn, std["entity_id"]))
     assert result["result"] == "fail"
@@ -323,10 +327,13 @@ def test_admission_authority_gate(memory_repo):
         conn, memory_repo, "CH-x", std["entity_id"], head_of(conn, std["entity_id"]),
         authority_ref="需求 PRD-4 §2 负责人确认 2026-11-05")
     assert confirmed["result"] == "pass"
-    # pitfall：结构/来源通过即 pass（低风险），无检查项时 unknown 不阻断。
+    # 项目内卡：结构与来源通过即 pass（低风险），无权威检查项、provenance
+    # 缺失只记 unknown 不阻断。
     pitfall = admission.evaluate_admission(conn, memory_repo, pit,
                                            head_of(conn, pit))
     assert pitfall["result"] in ("pass", "unknown")
+    assert all(c["check"] != "authority_confirmation" or c["result"] == "pass"
+               for c in pitfall["checks"])
     # 待准入清单含 staging 卡（无需先被检索命中）；已激活 pitfall 不在列。
     pending = admission.pending_admissions(conn, memory_repo)
     ids = {p["memory_id"] for p in pending}

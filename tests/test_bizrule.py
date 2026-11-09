@@ -1,6 +1,8 @@
-"""bizrule 类型测试：provenance 硬校验 / 提案制 / import 只产 source。
+"""bizrule 统一生命周期测试：出处驱动路由 / staging 待审 / import 只产 source。
 
 运行：.venv/bin/python tests/test_bizrule.py
+统一规则（2026-11-09）：类型只作检索分类；项目内新增且有出处直接发布，
+共享范围或来源不足进 staging 待审，无按类型的硬拒或强制分流。
 """
 
 import os, sys, tempfile
@@ -33,38 +35,43 @@ BODY = ("## 结论\n欠费停机用户不可发起新业务受理，VIP 欠费 �
         "## 验证情况\n2026-09-21 业务方按 PRD 条目确认生效。\n\n"
         "## 未知与待确认\n携号转网用户口径未定。\n")
 
-# 1. 无出处 → lint 拦截
-r = save_impl("bizrule", "欠费停机不可受理", BODY)
-check("无 provenance 拦截", "provenance" in r, r)
-
-# 2. Agent 带出处保存 → 强制 staging
+# 1. 项目内 + 出处 → 直接发布（类型不再强制 staging）
 r = save_impl("bizrule", "欠费停机用户不可发起新业务受理", BODY,
               tags=["受理", "计费"], scope="cmi", provenance="PRD-2026-031 §4.2",
               domain="cmi-受理", rule_status="effective")
-check("bizrule 落 staging", "staging" in r and "B-" in r, r)
+check("bizrule 项目内+出处直接发布", "已保存 B-" in r and "staging（" not in r, r)
+bid_active = r.split()[1]
+meta = store.load(config.repo_path(), bid_active)[0]
+check("发布为 active+once", meta["confidence"] == "once" and meta["status"] == "active", str(meta)[:200])
 
-# 3. human source 入参不可绕过 staging；人工 CLI promote 后生效
+# 2. 无出处 → 来源不足进 staging 待审（不再 lint 硬拒）
+r = save_impl("bizrule", "欠费停机不可受理兜底口径", BODY, tags=["受理"], scope="cmi")
+check("无出处 bizrule 落 staging", "staging" in r, r)
+bid_staged = r.split()[1]
+check("待审不可检索", "未命中" in search_impl("兜底口径", scope="cmi"))
+
+# 3. 共享范围（global）→ staging 待审；人工 promote 后生效
 r = save_impl("bizrule", "VIP 透支受理额度规则", BODY,
-              tags=["受理"], scope="cmi", provenance="2026-08-12 业务方邮件确认",
+              tags=["受理"], scope="global", provenance="2026-08-12 业务方邮件确认",
               source="human:文剑", domain="cmi-受理", rule_status="effective")
-check("human source 不可绕过 staging", "staging" in r, r)
-bid = r.split()[1]
-check("人工 promote bizrule", cli.main(["promote", bid]) == 0)
+check("global bizrule 落 staging", "staging" in r, r)
+bid_global = r.split()[1]
+check("人工 promote staging 卡", cli.main(["promote", bid_global]) == 0)
 
-# 4. 检索命中业务规则
+# 4. 检索命中已发布业务规则
 r = search_impl("欠费停机 受理", scope="cmi")
-check("业务规则可检索", bid in r, r[:120])
+check("业务规则可检索", bid_active in r, r[:120])
 
-# 5. import 原始规则文档 → 只产 source artifact（不产 staging 卡，规则提炼走 memory_save）
+# 5. import 原始规则文档 → 只产 source artifact（不产卡，规则提炼走 memory_save）
 SRC = TMP / "规则文档"; SRC.mkdir()
 (SRC / "透支受理规则.md").write_text("# 透支受理规则\n\n金卡用户欠费 100 元内可透支受理。\n", encoding="utf-8")
 import io, contextlib
 buf = io.StringIO()
-staging_before = len(list((config.repo_path() / "staging").glob("B-*.md")))
+staging_before = len(list((config.repo_path() / "staging").glob("*.md")))
 with contextlib.redirect_stdout(buf):
     cli.main(["import", str(SRC), "--type", "bizrule", "--scope", "cmi"])
 mfs = list(sources.iter_manifests(config.repo_path()))
-staging_after = len(list((config.repo_path() / "staging").glob("B-*.md")))
+staging_after = len(list((config.repo_path() / "staging").glob("*.md")))
 check("import bizrule 只产 source", len(mfs) == 1 and staging_after == staging_before,
       f"manifests={[m['id'] for m in mfs]} staging {staging_before}->{staging_after}")
 check("source 内容不进检索", "未命中" in search_impl("金卡用户欠费 100 元内", scope="cmi"))

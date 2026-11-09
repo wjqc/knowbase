@@ -320,7 +320,7 @@ def cmd_promote(mid: str) -> int:
 
 def cmd_revise(mid: str, body_file: str, title: str | None = None,
                expect_revision: str = "") -> int:
-    """可信人工 CLI：修订已生效的 standard/preference/bizrule。
+    """可信人工 CLI：修订已生效卡（统一生命周期：不再限定类型）。
 
     expect_revision: 可选的 content_revision CAS 检查。
     """
@@ -363,9 +363,6 @@ def cmd_revise(mid: str, body_file: str, title: str | None = None,
         meta, _old_body, path = store.load(rp, mid)
         if not meta:
             print(f"错误：未找到 {mid}")
-            return 1
-        if meta.get("type") not in ("standard", "preference", "bizrule"):
-            print(f"错误：revise 仅用于 standard/preference/bizrule，当前为 {meta.get('type')}")
             return 1
         if path.parent.name == "staging":
             print(f"错误：{mid} 仍在 staging，请使用 memory_update 后再 promote")
@@ -763,6 +760,27 @@ def cmd_jobs_expire() -> int:
     return 0
 
 
+def cmd_jobs_retire(cutoff: str, spool_days: int, execute: bool) -> int:
+    """T0 旧积压盘点/一次性撤销。默认只读清单；--execute 才写库。
+
+    执行前须先备份数据库；候选、staging、needs_review 与使用/证据记录一律不动。
+    """
+    rp = config.repo_path()
+    conn = jobs.connect(rp)
+    try:
+        if not execute:
+            plan = jobs.retire_plan(conn, cutoff=cutoff, spool_days=spool_days)
+            print(json.dumps(plan, ensure_ascii=False, indent=2))
+            print(f"\n以上为只读盘点（cutoff={cutoff}, spool_days={spool_days}）。"
+                  f"确认清单并完成备份后，加 --execute 执行。")
+            return 0
+        receipt = jobs.retire_backlog(conn, cutoff=cutoff, spool_days=spool_days)
+        print(json.dumps(receipt, ensure_ascii=False, indent=2))
+        return 0
+    finally:
+        conn.close()
+
+
 def cmd_archive_sweep() -> int:
     """Phase 1：自动归档 stale 满期且近 X 天内无成功复验证据的卡片。"""
     from .lifecycle import auto_archive_sweep
@@ -1055,6 +1073,13 @@ def _parse_args(argv=None):
     p_jobs_retry = jobs_sub.add_parser("retry", help="重试失败任务")
     p_jobs_retry.add_argument("job_id")
     jobs_sub.add_parser("expire", help="回收过期租约")
+    p_jobs_retire = jobs_sub.add_parser(
+        "retire-backlog", help="T0 旧积压盘点/一次性撤销（默认只读，--execute 才写库）")
+    p_jobs_retire.add_argument("--cutoff", default="", help="未终态任务的纳入截止时间（ISO）；已失败任务不受此限")
+    p_jobs_retire.add_argument("--spool-days", type=int, default=7,
+                               help="终态任务 spool 正文保留天数（与 retention 一致，默认 7）")
+    p_jobs_retire.add_argument("--execute", action="store_true",
+                               help="实际执行撤销与 spool 清理；执行前须先备份")
     sub.add_parser("archive-sweep", help="自动归档 stale 满期且近 X 天内无成功复验证据的卡片（Phase 1）")
     sub.add_parser("review-sweep", help="自动丢弃超期未补充出处的 needs_review 候选（Phase 1）")
     p_scope = sub.add_parser("scope", help="项目识别绑定（P4）")
@@ -1142,9 +1167,14 @@ def _parse_args(argv=None):
     p_lc_confirm.add_argument("memory_id")
     p_lc_confirm.add_argument("--authority-ref", required=True)
     p_lc_confirm.add_argument("--change-id", default="")
-    p_lc_verify = lc_sub.add_parser("verify", help="验证器核对真实执行报告 → L3 证据（W1-3；报告来自真实 pytest 运行）")
+    p_lc_verify = lc_sub.add_parser("verify", help="验证器核对真实执行报告 → L3 证据（W1-3；报告须带执行戳绑定卡片版本）")
     p_lc_verify.add_argument("--memory-id", required=True)
-    p_lc_verify.add_argument("--report-file", required=True)
+    p_lc_verify.add_argument("--report-file", default="",
+                             help="报告文件（与 --run 二选一；须含 --run 写入的执行戳）")
+    p_lc_verify.add_argument("--run", default="",
+                             help="直接执行验证命令（如 \"pytest -ra tests/...\"），执行时打戳并登记 validator_executions")
+    p_lc_verify.add_argument("--run-timeout", type=int, default=600,
+                             help="--run 命令超时秒数（默认 600）")
     p_lc_verify.add_argument("--format", default="pytest-text", choices=["pytest-text"],
                              help="报告格式，同时是已登记 validator_id")
     p_lc_verify.add_argument("--run-id", default="", help="关联任务运行（缺省卡级验证，不参与独立性计数）")
@@ -1520,19 +1550,55 @@ def _dispatch(args):
                     meta, _body, _ = store.load(repo, args.memory_id)
                     if not meta:
                         result = {"error": "NOT_FOUND"}
+                    elif not args.run and not args.report_file:
+                        result = {"error": "INPUT_REQUIRED",
+                                  "detail": "--run CMD 或 --report-file 二选一"}
                     else:
                         claim_map = {}
                         if args.claim_map:
                             claim_map = json.loads(Path(args.claim_map)
                                                    .expanduser().read_text(encoding="utf-8"))
-                        report = lc_validators.parse_pytest_text(
-                            Path(args.report_file).expanduser()
-                            .read_text(encoding="utf-8"), claim_map=claim_map)
+                        revision = _compute_revision(meta, _body)
+                        if args.run:
+                            import shlex as _shlex
+                            import subprocess as _subprocess
+                            from datetime import datetime as _dt, timezone as _tz
+                            proc = _subprocess.run(
+                                _shlex.split(args.run), capture_output=True, text=True,
+                                timeout=max(1, args.run_timeout))
+                            executed_at = _dt.now(_tz.utc).isoformat(timespec="seconds")
+                            raw = proc.stdout
+                            if proc.stderr.strip():
+                                raw += "\n" + proc.stderr
+                            raw = lc_validators.stamp_report_text(
+                                raw, memory_id=args.memory_id, content_revision=revision,
+                                run_id=args.run_id or "", validator_id=args.format,
+                                executed_at=executed_at)
+                            report = lc_validators.parse_pytest_text(raw, claim_map=claim_map)
+                            # 统一生命周期：执行时登记（版本+原件指纹），投喂侧据此核对。
+                            attribution.record_execution(
+                                conn, memory_id=args.memory_id, content_revision=revision,
+                                artifact_hash=report["artifact_hash"],
+                                run_id=args.run_id or "", validator_id=args.format,
+                                executed_at=executed_at)
+                            if args.report_file:
+                                # 带戳原件落盘：审计与重放都以同一份为准。
+                                out_path = Path(args.report_file).expanduser()
+                                out_path.parent.mkdir(parents=True, exist_ok=True)
+                                out_path.write_text(raw, encoding="utf-8")
+                            exit_code = proc.returncode
+                        else:
+                            report = lc_validators.parse_pytest_text(
+                                Path(args.report_file).expanduser()
+                                .read_text(encoding="utf-8"), claim_map=claim_map)
+                            exit_code = None
                         report["target"] = {"memory_id": args.memory_id,
-                                            "content_revision": _compute_revision(meta, _body)}
+                                            "content_revision": revision}
                         result = attribution.verify_execution(
                             conn, repo, run_id=args.run_id or "",
                             validator_id=args.format, report=report)
+                        if exit_code is not None:
+                            result["executed_command_exit"] = exit_code
                 elif args.lifecycle_cmd == "recompute":
                     from .knowledge_lifecycle import reconcile
                     result = reconcile.materialize_and_recompute(repo, conn)
@@ -1817,6 +1883,10 @@ def _dispatch(args):
             return cmd_jobs_retry(args.job_id)
         if args.jobs_cmd == "expire":
             return cmd_jobs_expire()
+        if args.jobs_cmd == "retire-backlog":
+            from datetime import datetime as _dt, timezone as _tz
+            cutoff = args.cutoff or _dt.now(_tz.utc).isoformat(timespec="seconds")
+            return cmd_jobs_retire(cutoff, args.spool_days, args.execute)
         return 1
     if args.cmd == "executor":
         if args.executor_cmd == "probe":

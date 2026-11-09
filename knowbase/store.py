@@ -482,8 +482,8 @@ def lint(meta: dict, body: str, repo: Path | None = None) -> list[str]:
         for sec in REQUIRED_SECTIONS.get(t, []):
             if not any(sec in h for h in heads):
                 errs.append(f"缺少必填小节: {sec}")
-    if t == "bizrule" and not str(meta.get("provenance", "")).strip():
-        errs.append("业务规则必须带出处 provenance（PRD 编号/条款/业务方确认记录），无出处的规则不入库")
+    # 统一生命周期：出处缺失不再按类型硬拒——由路由升风险进 staging 待审
+    # （无出处的卡不激活、不自动晋升，经 resubmit_review 补出处后放行）。
     rule = meta.get("rule_context")
     if rule is not None:
         if not isinstance(rule, dict):

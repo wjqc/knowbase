@@ -166,14 +166,36 @@ def registered_validators() -> dict:
             for v in raw if isinstance(v, dict) and v.get("validator_id")}
 
 
+def record_execution(conn, *, memory_id: str, content_revision: str,
+                     artifact_hash: str, run_id: str = "",
+                     validator_id: str = "", executed_at: str = "") -> str:
+    """登记一次真实执行（lifecycle verify --run 在执行时调用）。
+
+    execution_id 由 memory_id+artifact_hash 派生，重复投喂同一原件幂等。
+    """
+    execution_id = hashlib.sha256(
+        f"{memory_id}:{artifact_hash}".encode("utf-8")).hexdigest()[:20]
+    conn.execute(
+        "INSERT OR REPLACE INTO validator_executions"
+        "(execution_id,memory_id,content_revision,artifact_hash,run_id,validator_id,executed_at)"
+        " VALUES(?,?,?,?,?,?,?)",
+        (execution_id, memory_id, content_revision, artifact_hash,
+         run_id or "", validator_id or "", executed_at or _now()))
+    conn.commit()
+    return execution_id
+
+
 def verify_execution(conn, repo, *, run_id, validator_id, report) -> dict:
     """核对一份真实执行报告，产出 L3 或 unknown。
 
-    report：{artifact_hash, expected_hash, checks:[{check_id, claim_id?,
-    observed_result}], target:{memory_id, content_revision, claim_id?}}。
+    report：{artifact_hash, expected_hash, execution_stamp, checks:[...],
+    target:{memory_id, content_revision, claim_id?}}。
     硬门：
     - validator 已登记；
     - 报告含非空 artifact_hash 与至少一个 check（空报告/自报不能过）；
+    - 执行绑定（统一生命周期）：报告必须带执行戳，且 validator_executions
+      存在 (memory_id, artifact_hash) 的执行记录，戳内版本、记录版本与目标
+      版本三方一致——卡片改版后旧报告不再绑定新正文；
     - observed_result 全为 pass 才 pass；任何 fail → fail；缺失 → unknown；
     - claim 级核对：checks 引用的 claim_id 必须存在于卡（防“跑过测试但没
       测该卡的断言”）。
@@ -187,10 +209,32 @@ def verify_execution(conn, repo, *, run_id, validator_id, report) -> dict:
     revision = target.get("content_revision", "")
     if not memory_id or not revision:
         return {"error": "TARGET_REQUIRED"}
-    checks = report.get("checks") or []
+    stamp = report.get("execution_stamp") or {}
     artifact_hash = str(report.get("artifact_hash") or "")
+    checks = report.get("checks") or []
     if not artifact_hash or not checks:
         return {"error": "EMPTY_REPORT", "detail": "no artifact or no checks: unknown, not pass"}
+    if not stamp:
+        return {"error": "EXECUTION_STAMP_REQUIRED",
+                "detail": "reports must be stamped at execution time "
+                          "(lifecycle verify --run); unstamped artifacts "
+                          "cannot validate a specific card version"}
+    if stamp.get("memory_id") != memory_id or stamp.get("content_revision") != revision:
+        return {"error": "STALE_EXECUTION_RECORD",
+                "detail": f"report was executed for {stamp.get('memory_id')}"
+                          f"@{stamp.get('content_revision')}, "
+                          f"not {memory_id}@{revision}"}
+    rec = conn.execute(
+        "SELECT content_revision FROM validator_executions WHERE memory_id=? AND artifact_hash=?",
+        (memory_id, artifact_hash)).fetchone()
+    if not rec:
+        return {"error": "EXECUTION_RECORD_MISSING",
+                "detail": "no validator_executions row for this artifact: "
+                          "feed must reference a run recorded at execution time"}
+    if rec[0] != revision:
+        return {"error": "STALE_EXECUTION_RECORD",
+                "detail": f"execution recorded for revision {rec[0]}, "
+                          f"card is now {revision}"}
     from .. import store
     meta, body, _ = store.load(repo, memory_id)
     if not meta:

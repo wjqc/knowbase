@@ -248,3 +248,16 @@
 - [x] 修复采集异步交接、错误归并与作业分派。
 - [x] 验证长 transcript、冲突知识、重试及安装接线。
 - [x] 备份并协调固定运行包与更新登记，恢复 worker 与执行器，读回验证。
+
+## 2026-11-09 Trae MCP 主线与统一生命周期
+
+- [x] 确认两项取舍：旧积压直接清理；取消按类型分流，使用统一生命周期。
+- [x] 形成 [实施计划](docs/plans/knowbase-trae-mcp-unified-lifecycle.md)。
+- [x] T0：生产只读盘点（2 失败 checkpoint + 79 超期 spool，其余全终态）+ 隔离演练全通过；`jobs retire-backlog` CLI 落地（只读默认/--execute/幂等）。生产执行待审批。
+- [x] T1：stdio MCP 基线链路 4/4（capture→claim→material 分页→submit→read、无候选、重放防重、无独立模型证据）。真实 Trae 会话待用户复验。
+- [x] T2：类型分流合并（classify_risk 按范围×关系×依据；权威门只看 global；全类型验证通道/防线/revise）+ 验证绑定修复（执行戳+validator_executions v35+三重校验，`lifecycle verify --run`）。72 个旧类型断言改写，T2 专项 7 项。
+- [x] T3：transcript 有界尾持久化（≤256KB 行对齐，宿主删文件后仍可后台解析，4/4）+ trae-rules.md/MCP 描述收敛。
+- [x] T4：隔离库样例卡全链验收（生成→待审→权威发布→使用→修订→3 任务×2 组晋升→反证隔离→归档时钟）。
+- [ ] 待人工：源码提交、T0 生产清理（runbook 见交付 §6.1）、部署（§6.3）、真实 Trae 复验（§6.2）。
+
+交付明细：docs/implementation/lifecycle-unified-20261110/delivery.md；全量 1221 passed / 1 skipped。

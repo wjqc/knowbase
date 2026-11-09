@@ -24,7 +24,10 @@ def rule(repo):
           "## 适用条件\n订单完成结算。\n## 不适用条件\n草稿订单。\n"
           "## 可执行动作\n拒绝撤回请求。\n## 关键证据\n需求 PRD-4。\n"
           "## 验证情况\n使用场景测试验证。\n## 未知与待确认\n无。\n")
-    result=writer.create(repo,"bizrule","结算订单撤回规则",body,scope="orders",provenance="PRD-4 §2")
+    # 统一生命周期：本组是"从 staging 出发的自动激活机制测试"（类型不参与）。
+    # 共享范围（global）按统一路由进 staging 待审；项目内 + 出处会直接发布
+    # active+once，不再经过候选激活通道。
+    result=writer.create(repo,"bizrule","结算订单撤回规则",body,scope="global",provenance="PRD-4 §2")
     assert not result.get("error"),result
     return result["entity_id"]
 

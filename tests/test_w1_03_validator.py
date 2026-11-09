@@ -78,14 +78,18 @@ def test_cli_verify_fail_path_quarantines_via_recompute(memory_repo, tmp_path):
     mid = _make_card(memory_repo)
     report_file = tmp_path / "pytest-fail.txt"
     report_file.write_text(PYTEST_TEXT, encoding="utf-8")
+    # --run：真实执行时打戳并登记 validator_executions（统一生命周期绑定）。
     assert cli.main(["lifecycle", "verify", "--memory-id", mid,
-                     "--report-file", str(report_file)]) == 0
+                     "--run", f"cat {report_file}"]) == 0
     conn = index.connect(memory_repo)
     apply_all(conn)
     rows = conn.execute(
         "SELECT level,polarity,trust_basis,import_state FROM evidence_events "
         "WHERE event_type='validation.completed'").fetchall()
     assert rows == [("L3", "negative", "registered-adapter", "local")], rows
+    rec = conn.execute(
+        "SELECT COUNT(*) FROM validator_executions WHERE memory_id=?", (mid,)).fetchone()[0]
+    assert rec == 1, "执行记录须在执行时登记"
     # trusted fail → 反证门 → quarantine 投影为 stale。
     applied = governance.apply_decision(memory_repo, conn, mid)
     assert applied["decision"] == "quarantine", applied
@@ -99,7 +103,7 @@ def test_cli_verify_pass_path_honest_unverified_without_task_identity(memory_rep
     report_file = tmp_path / "pytest-pass.txt"
     report_file.write_text(PYTEXT_ALL_PASS, encoding="utf-8")
     assert cli.main(["lifecycle", "verify", "--memory-id", mid,
-                     "--report-file", str(report_file)]) == 0
+                     "--run", f"cat {report_file}"]) == 0
     conn = index.connect(memory_repo)
     apply_all(conn)
     row = conn.execute(
@@ -113,20 +117,80 @@ def test_cli_verify_pass_path_honest_unverified_without_task_identity(memory_rep
     conn.close()
 
 
+def test_unstamped_report_cannot_validate_new_content(memory_repo, tmp_path):
+    """统一生命周期绑定门：无执行戳的报告不能产生 L3（旧投喂路径封死）。"""
+    mid = _make_card(memory_repo)
+    report_file = tmp_path / "raw.txt"
+    report_file.write_text(PYTEXT_ALL_PASS, encoding="utf-8")
+    out = _cap(lambda: cli.main(["lifecycle", "verify", "--memory-id", mid,
+                                 "--report-file", str(report_file)]))
+    assert '"error": "EXECUTION_STAMP_REQUIRED"' in out, out
+    conn = index.connect(memory_repo)
+    apply_all(conn)
+    assert conn.execute("SELECT COUNT(*) FROM evidence_events").fetchone()[0] == 0
+    conn.close()
+
+
+def test_stale_execution_record_cannot_validate_edited_card(memory_repo, tmp_path):
+    """执行后卡片改版 → 旧执行记录/旧戳不再验证新正文。"""
+    from knowbase.mutations import _compute_revision
+    mid = _make_card(memory_repo)
+    report_file = tmp_path / "pytest-pass.txt"
+    report_file.write_text(PYTEXT_ALL_PASS, encoding="utf-8")
+    assert cli.main(["lifecycle", "verify", "--memory-id", mid,
+                     "--run", f"cat {report_file}",
+                     "--report-file", str(report_file) + ".stamped"]) == 0
+    # 执行后修订卡内容（新版本）。
+    meta, body, _path = store.load(memory_repo, mid)
+    updated = writer.update(memory_repo, mid, expected_content_revision=_compute_revision(meta, body),
+                            body=body + "\n补充条款", push=False)
+    assert not updated.get("error"), updated
+    # 重放带戳原件（旧版本戳）→ STALE_EXECUTION_RECORD，不产新 L3。
+    out = _cap(lambda: cli.main(["lifecycle", "verify", "--memory-id", mid,
+                                 "--report-file", str(report_file) + ".stamped"]))
+    assert '"error": "STALE_EXECUTION_RECORD"' in out, out
+    conn = index.connect(memory_repo)
+    apply_all(conn)
+    rows = conn.execute(
+        "SELECT DISTINCT subject_revision FROM evidence_events "
+        "WHERE event_type='validation.completed'").fetchall()
+    head = conn.execute(
+        "SELECT content_revision FROM entity_heads WHERE entity_id=?", (mid,)).fetchone()[0]
+    assert all(rev != head for rev, in rows), rows
+    conn.close()
+
+
+def _cap(fn):
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        fn()
+    return buf.getvalue()
+
+
 def test_unregistered_validator_rejected(memory_repo):
     mid = _make_card(memory_repo)
     conn = index.connect(memory_repo)
     apply_all(conn)
     meta, body, _ = store.load(memory_repo, mid)
-    report = validators.parse_pytest_text(PYTEXT_ALL_PASS)
+    report = validators.parse_pytest_text(
+        validators.stamp_report_text(PYTEXT_ALL_PASS, memory_id=mid,
+                                     content_revision=_compute_revision(meta, body)))
     report["target"] = {"memory_id": mid,
                         "content_revision": _compute_revision(meta, body)}
     result = attribution.verify_execution(conn, memory_repo, run_id="",
                                           validator_id="not-registered",
                                           report=report)
     assert result.get("error") == "VALIDATOR_NOT_REGISTERED", result
-    # 空报告（无 summary 行的纯点号输出）→ EMPTY_REPORT，不产 L3。
-    empty = validators.parse_pytest_text("...\n2 passed in 0.01s\n")
+    # 空报告（无 summary 行的纯点号输出）→ 先过绑定门（有戳+有记录），
+    # 再按 EMPTY_REPORT 不放行，不产 L3。
+    empty = validators.parse_pytest_text(
+        validators.stamp_report_text("...\n2 passed in 0.01s\n", memory_id=mid,
+                                     content_revision=_compute_revision(meta, body)))
+    attribution.record_execution(conn, memory_id=mid,
+                                 content_revision=report["target"]["content_revision"],
+                                 artifact_hash=empty["artifact_hash"])
     result2 = attribution.verify_execution(conn, memory_repo, run_id="",
                                            validator_id="pytest-text", report={
                                                **empty,

@@ -149,11 +149,17 @@ def test_l3_requires_registered_validator_and_real_report(memory_repo):
         report={"target": {"memory_id": mid, "content_revision": rev},
                 "artifact_hash": "", "checks": []})
     assert empty["error"] == "EMPTY_REPORT"
-    # 真实报告全 pass → L3 trusted。
+    # 真实报告全 pass → L3 trusted（执行时打戳+登记，统一生命周期绑定）。
+    attribution.record_execution(conn, memory_id=mid, content_revision=rev,
+                                 artifact_hash="a" * 64, run_id=run["run_id"],
+                                 validator_id="test-report-adapter")
     good = attribution.verify_execution(
         conn, memory_repo, run_id=run["run_id"], validator_id="test-report-adapter",
         report={"target": {"memory_id": mid, "content_revision": rev, "claim_id": "C-whole"},
                 "artifact_hash": "a" * 64, "expected_hash": "e" * 64,
+                "execution_stamp": {"memory_id": mid, "content_revision": rev,
+                                    "run_id": run["run_id"],
+                                    "validator_id": "test-report-adapter"},
                 "checks": [{"check_id": "crlf-roundtrip", "claim_id": "C-whole",
                             "observed_result": "pass"}]})
     assert good["outcome"] == "pass", good
@@ -164,6 +170,9 @@ def test_l3_requires_registered_validator_and_real_report(memory_repo):
         conn, memory_repo, run_id=run["run_id"], validator_id="test-report-adapter",
         report={"target": {"memory_id": mid, "content_revision": rev},
                 "artifact_hash": "a" * 64,
+                "execution_stamp": {"memory_id": mid, "content_revision": rev,
+                                    "run_id": run["run_id"],
+                                    "validator_id": "test-report-adapter"},
                 "checks": [{"check_id": "c", "claim_id": "C-ghost",
                             "observed_result": "pass"}]})
     assert ghost["outcome"] == "unknown"
@@ -172,6 +181,9 @@ def test_l3_requires_registered_validator_and_real_report(memory_repo):
         conn, memory_repo, run_id=run["run_id"], validator_id="test-report-adapter",
         report={"target": {"memory_id": mid, "content_revision": rev, "claim_id": "C-whole"},
                 "artifact_hash": "a" * 64,
+                "execution_stamp": {"memory_id": mid, "content_revision": rev,
+                                    "run_id": run["run_id"],
+                                    "validator_id": "test-report-adapter"},
                 "checks": [{"check_id": "c2", "claim_id": "C-whole",
                             "observed_result": "fail"}]})
     assert failed["outcome"] == "fail"

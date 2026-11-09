@@ -87,7 +87,10 @@ def test_hook_self_calls_are_not_double_recorded(memory_repo, tmp_path):
 
 
 def test_mcp_memory_calls_land_in_observation(memory_repo):
-    card = writer.create(memory_repo, "pitfall", "检索观测卡", BODY, scope="orders")
+    # 统一生命周期：项目内新增需内容依据（provenance）才直接发布 active
+    # 并进入默认检索；否则落 staging 不出现在 candidates。
+    card = writer.create(memory_repo, "pitfall", "检索观测卡", BODY, scope="orders",
+                         provenance="PR-114")
     assert not card.get("error"), card
     mid = card["entity_id"]
     conn = index.connect(memory_repo)

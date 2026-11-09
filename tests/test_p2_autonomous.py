@@ -41,7 +41,9 @@ NO_VALUE = "import sys,json;p=json.load(sys.stdin);print(json.dumps({'candidates
 def test_real_controller_claim_page_submit_readback(memory_repo, monkeypatch):
     cfg,_=setup_executor(monkeypatch); job=capture()
     result=distillation.run_due(memory_repo,cfg)
-    assert result['processed']==1 and state(memory_repo,job)=='needs_review',result
+    # 统一生命周期：探针候选带 provenance 且项目内 → 直接发布 active，
+    # 任务结算为 succeeded（不再按类型进 needs_review）。
+    assert result['processed']==1 and state(memory_repo,job)=='succeeded',result
     c=index.connect(memory_repo)
     assert c.execute('SELECT count(*) FROM meta').fetchone()[0]==1
     assert c.execute('SELECT count(*) FROM feedback_events').fetchone()[0]==0
@@ -75,7 +77,8 @@ def test_cached_response_survives_crash_before_submit(memory_repo,monkeypatch):
     monkeypatch.setattr(distillation.materialize,'submit',original)
     monkeypatch.setattr(execution,'execute_text',lambda *a,**k:pytest.fail('must reuse durable response'))
     distillation.run_due(memory_repo,cfg)
-    assert state(memory_repo,job)=='needs_review'
+    # 缓存重放走同一物化路径：项目内有出处候选直接发布 → succeeded。
+    assert state(memory_repo,job)=='succeeded'
     c=index.connect(memory_repo);assert c.execute('SELECT calls FROM automation_budget').fetchone()[0]==1;c.close()
 
 

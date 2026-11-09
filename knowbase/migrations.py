@@ -632,6 +632,19 @@ MIGRATIONS: list[tuple[int, str]] = [
     ALTER TABLE evidence_events ADD COLUMN key_id TEXT NOT NULL DEFAULT '';
     ALTER TABLE evidence_events ADD COLUMN scope TEXT NOT NULL DEFAULT '';
     """),
+    (35, """
+    CREATE TABLE IF NOT EXISTS validator_executions(
+      execution_id TEXT PRIMARY KEY,
+      memory_id TEXT NOT NULL,
+      content_revision TEXT NOT NULL,
+      artifact_hash TEXT NOT NULL,
+      run_id TEXT NOT NULL DEFAULT '',
+      validator_id TEXT NOT NULL DEFAULT '',
+      executed_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_validator_exec_card
+      ON validator_executions(memory_id, content_revision);
+    """),
 ]
 
 

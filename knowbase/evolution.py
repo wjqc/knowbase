@@ -82,9 +82,7 @@ def activation_policy() -> dict:
 
 
 def decide(conn, mid, revision, meta, use, task_key, outcome, task_result, *, staged=False):
-    # 延迟导入：writer→commit_adapter 链在模块加载期有循环风险；decide 只在运行时调用。
     # auto_activate_bizrules 现为全类型统一自动激活出口的总开关（历史名称保留）。
-    from .writer import GOVERNED
     policy = config.load_config().get("evolution", {})
     counts = evidence(conn, mid, revision, use, task_key, outcome, task_result)
     counts["promote"] = counts["retire"] = False
@@ -105,7 +103,7 @@ def decide(conn, mid, revision, meta, use, task_key, outcome, task_result, *, st
     revalidation = (meta.get("status") == "stale"
                     and bool(meta.get("revalidation_pending")) and not staged)
     promotable = (meta.get("status") == "active" and (not staged or (
-        meta.get("type") in GOVERNED and bool(meta.get("provenance")) and
+        bool(meta.get("provenance")) and
         policy.get("auto_activate_bizrules", True)))) or revalidation
     counts["promote"] = bool(promotable and outcome == "helpful" and not counts["blocked"]
         and counts["helpful_tasks"] >= max(2, int(policy.get("min_helpful_tasks", 3)))

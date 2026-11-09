@@ -31,8 +31,10 @@ PRD-ORDER 第四条定义了结算后撤回限制。
 
 
 def seed(repo, scope="orders", dtype="pitfall"):
+    # 统一生命周期：项目内新增需有内容依据（provenance）才直接发布 active；
+    # 类型不参与路由，所有类型都带依据。
     out = save_impl(dtype, "已结算订单撤回的状态校验", CARD, scope=scope,
-                    provenance="PRD-ORDER §4" if dtype == "bizrule" else None)
+                    provenance="PRD-ORDER §4")
     match = re.search(r"已保存 ([PB]-[\w-]+)", out)
     assert match, out
     return match.group(1)
@@ -68,7 +70,9 @@ def test_context_event_idempotency_and_scope_binding(memory_repo):
 
 
 def test_rule_in_staging_is_not_default_execution_advice(memory_repo):
-    seed(memory_repo, dtype="bizrule")
+    # 统一生命周期：staging 路由不再看类型——global 共享范围按统一规则进
+    # staging，staging 卡不进默认检索（机制断言保持）。
+    seed(memory_repo, dtype="bizrule", scope="global")
     assert run("rules")["candidates"] == []
 
 

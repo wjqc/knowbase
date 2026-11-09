@@ -47,6 +47,15 @@ PITFALL_BODY = card(
     "1. 升级客户端版本\n2. 用 netstat 验证路由",
     "netstat -rn | grep ^172 无路由表项，升级后恢复。")
 
+
+def promote_if_staged(r):
+    """统一生命周期（2026-11-09）：类型不参与路由——global（共享范围）或
+    来源不足的卡保存即落 staging；需要 active 可检索的卡经 CLI promote
+    人工激活（治理动作，等价审过的 git mv）。"""
+    if "→ staging" in r:
+        mid = r.split()[1]
+        assert cli.main(["promote", mid]) == 0, r
+
 # 0. 幂等 init：跑两次
 check("init 第1次", cli.main(["init"]) == 0)
 check("init 第2次(幂等)", cli.main(["init"]) == 0)
@@ -68,6 +77,7 @@ os.environ["KNOWBASE_AGENT_NAME"] = "claude-code"
 r = save_impl("pitfall", "EasyConnect 7.6.7 在 macOS 上启动即死锁", PITFALL_BODY,
               tags=["network", "vpn"], source="agent:claude-code:sess_a1")
 check("save pitfall", r.startswith("已保存 P-"), r)
+promote_if_staged(r)  # global 卡统一落 staging；promote 后进默认检索
 pid = r.split()[1]
 
 # 2. lint：缺八项小节
@@ -153,6 +163,7 @@ check("人工 verify 复活", meta["status"] == "active" and meta["confidence"] 
 r = save_impl("pitfall", "EasyConnect 8.x 新版安装与验证方法", PITFALL_BODY,
               relations=[{"id": pid, "type": "supersedes"}])
 new_pid = r.split()[1]
+promote_if_staged(r)  # 统一生命周期：promote 后 active，供第 20 步矛盾裁决（staging 卡不裁决）
 meta, _, _ = store.load(rp, pid)
 check("supersedes → 旧条目 stale", meta["status"] == "stale", r)
 conn = index.connect(rp)
@@ -197,13 +208,17 @@ for i, (t, dom) in enumerate(mods):
         f"{dom}压测后{t}采用方案{chr(65+i)}。", f"解决{dom}在{t}上的性能瓶颈。",
         f"- {dom}模块\n- 高并发场景", "- 低流量场景", f"1. 按方案{chr(65+i)}改造\n2. 压测回归",
         f"{dom}压测报告对比数据。"))
+    promote_if_staged(r)  # 统一生命周期：第 24 步需检索命中，promote 后 active
     ids.add(r.split()[1])
 check("并发 id 唯一", len(ids) == 5, str(ids))
 
 # 20. contradicts 双向回指 + 自动裁决（Phase 1：零证据打平 → 双方同时降 stale 并隔离，
 # 不再是旧的“状态不动”；回指本身保持不变）
+# 统一生命周期：裁决在保存时运行且 staging 卡不参与——声明卡用项目 scope+
+# 显式 source 直接发布 active（global 卡保存即 staging 无法当步裁决）。
 os.environ["XINHUO_AGENT_NAME"] = "claude-code"
 r = save_impl("pitfall", "EasyConnect 9.x 企业证书安装流程", PITFALL_BODY,
+              scope="e2e-contradict", source="agent:claude-code:sess_c1",
               relations=[{"id": new_pid, "type": "contradicts"}])
 c_pid = r.split()[1]
 meta_n, _, _ = store.load(rp, new_pid)

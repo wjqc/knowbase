@@ -1,51 +1,30 @@
-# Trae knowbase 规则（rc5）
+# Trae knowbase 规则（统一生命周期版，2026-11-09）
 
 本机已在原生设置启用 ~/.trae-cn/hooks.json，并关闭重复导入 Claude Hook；规则已在全局规则界面保存，不需要再次手动粘贴。接入与回滚见 [最新本机记录](hosts/latest-local.md)。
 
-- 阶段开始主动 memory_context，host_profile=trae，沿用真实 session_id/scope；实际消费 memory_use，验证后携带当前版本/use_id/唯一稳定 task_outcome_id/task_result 回填。
-- Hook自动采集静默入队；Stop不因待办/未反馈阻断，不要求主任务立即领取或逐段提炼。明确整理知识/维护任务再capture→claim(protocol_version=2)→material续页→submit→读回；入队和普通阅读不当作成功。
-- 业务规则保存来源、条件、例外、rule_context/code_refs。validation_candidates 是验证候选，关联读取后用 read_use_id 和实际任务结果回填；当前版本 3 个独立完成任务、2 会话 helpful 自动激活，负面证据失效并保留历史。不得凑任务或伪造人工确认。
-- standards/全局 preferences 保持既有人工激活权限。无出处、不完整材料、缺失观测如实标注，不把原始文档或明文密钥入卡。
+现行规则（以 MCP 初始化说明为准，此处为摘要）：
 
-## 历史规则（由 rc5 替代）
+- 任务涉及具体项目/系统/报错时先 memory_search / memory_context（host_profile=trae，真实 session_id/scope）；检索命中先 memory_read 再动手；不整读 INDEX.md。
+- 有明确可复用结论时 memory_save（八项结构、来源与适用条件如实标注；无出处、不完整材料如实标注，不把原始文档或明文密钥入卡）。
+- 实际消费 memory_use；任务结果验证后 memory_feedback（携带当前 content_revision/use_id/稳定 task_outcome_id/task_result）。正文变化后旧反馈不能验证新版本；工具标签不代表真实人数。
+- **统一生命周期**：类型只作检索分类。是否直接发布由统一风险规则判定——项目内新增且有出处直接发布（active+once）；改变已发布结论、共享范围（global）或来源不足进入 staging 待审，凭独立任务验证证据达标后自动激活（当前版本 3 个独立完成任务、2 会话，负面证据失效并保留历史）。不得凑任务或伪造出处/人工确认。
+- Hook 自动采集静默入队（临时 transcript 已有有界尾持久化，宿主删除后仍可后台解析）；Stop 不因待办/未反馈阻断，不催办、不等模型。**日常任务不要求领取、补材料或续租**；只有明确整理知识/维护任务才走 capture → claim(protocol_version=2) → material 续页 → submit → 读回；入队和普通阅读不当作成功。
+- 待审卡人工放行：knowbase promote / lifecycle confirm（global 需权威确认 authority_ref）；修订已生效卡用 revise（不再限定类型）。
 
-# Trae 接入 knowbase 使用规则（粘贴用）
+## 历史版本说明
 
-> Trae 不支持 hook，也不读 AGENTS.md，把下面内容粘贴到 **Trae → 设置 → 规则 → 用户规则**（一次，全局生效）；
-> 或放进某个项目的 `.trae/rules/project_rules.md`（仅该项目生效）。
-> 另：Trae CN 已开启 `AI.rules.importClaudeMd`，把本文件内容放进项目根目录 `CLAUDE.md` 同样生效。
-
-```text
-【knowbase 经验库使用规则】
-1. 任务涉及具体项目/系统/报错/环境配置时，先调用 memory_search（knowbase MCP，用 ≥3 字技术词，
-   如 "EasyConnect 死锁"、"Docker 镜像加速"），命中后先 memory_read 再动手；
-2. 任务结束：产生了踩坑（现象/原因/正确做法）、技术决策、固化流程、用户约束 → memory_save；
-   返回"已存在相似记忆"时改用 memory_update；
-3. 按某条记忆实际行动并验证任务结果后，memory_feedback 回填 helpful / not_helpful / outdated / incorrect，携带 expected_content_revision、memory_use 返回的 use_id、稳定 task_outcome_id。旧调用只保留未绑定观察，不改变治理；重试同一结果保持ID。正文变化后旧反馈不能验证新版本，工具标签不代表真实人数；
-4. stale / once 状态的记忆采信前先在当前环境验证；不要整读 INDEX.md，检索一律走 memory_search；
-5. standard / preference / bizrule 保存时强制进 staging 待人审；正式规则 Agent 不可 memory_update，人工使用 promote/revise CLI；
-6. body 里不要出现明文密钥。
-7. 长任务先列目标、约束、子任务；进入新子任务、新错误和重要决策前主动调用 memory_context，
-   对实际候选调用 memory_use 记录 referenced/adopted/irrelevant/unverified；context_event_id 是返回该卡的检索事件，沿用会话、host_profile与content_revision。需要任务关联的全文读取时，memory_read 同时传 session_id/event_id/context_event_id/host_profile，得到独立阅读回执；不把命中或阅读自动变成helpful。
-   指定 session_id/event_id/scope/stage/topics（当前主题+短查询），不要等下一条用户输入。
-8. 阶段结束同时识别技术经验及业务规则。材料较多时 memory_capture → memory_job_claim(protocol_version=2)，
-   has_more 时 memory_job_material 续页；查重、按八项结构 memory_job_submit 后核对实际 memory_id/保存状态。
-9. 业务规则记录条件、结果、例外、provenance 和 rule_context，确认/激活/实现状态分开；
-   代码推断无业务确认时保留待确认候选，不伪造出处，不自动激活 staging。
-10. 只处理已读完整的片段；无可复用结论给明确理由。候选已提交或任务入队不代表知识卡已保存。
-```
-
----
+- rc4/rc5 时期的"粘贴用十条规则"已废弃：其中"standard/preference/bizrule 强制进 staging 待人审、Agent 不可 update"等按类型分流的条目自 2026-11-09 起被统一生命周期取代（见 docs/plans/knowbase-trae-mcp-unified-lifecycle.md）；"任务结束自动 capture→claim"的条目收敛为"明确整理任务才走提炼协议"。
+- rc5 全文见 Git 历史（docs/trae-rules.md @ e753066 之前）。
 
 ## 与 Claude Code / ZCode 的能力差异（诚实说明）
 
 | 能力 | Claude Code | ZCode | Trae |
 |---|---|---|---|
-| MCP 14 工具（重连新版本后） | 支持 | 支持 | 支持 |
-| 会话开始规则注入 | ✅ hook | ✅ hook | ❌ 靠本规则 |
-| 每条输入自动检索注入 | ✅ hook（本地检索） | ✅ hook（本地检索） | ❌ 靠模型自觉 search |
-| 会话结束漏存再判断 | ✅ Stop hook | ✅ Stop hook* | ❌ 无 |
+| MCP 17 工具 | 支持 | 支持 | 支持 |
+| 会话开始规则注入 | ✅ hook | ✅ hook | ✅ 原生 hooks.json（16 天零流量已修复：设置→Conversation→本地自动运行） |
+| 每条输入自动检索注入 | ✅ hook（本地检索） | ✅ hook（本地检索） | ✅ UserPromptSubmit hook |
+| 会话结束漏存再判断 | ✅ Stop hook | ✅ Stop hook（含有界尾持久化） | ✅ Stop hook |
 | 来源标识 | claude-code | zcode | trae |
-| 执行中使用 | 工具事件适配待真实验收 | 工具事件注入/消费局部通过，提炼待验 | 主动工作流，待真实验收 |
+| 独立执行器（无兜底） | 复用宿主 CLI | 复用宿主 CLI | 同机其他宿主 CLI 执行 |
 
-\* ZCode Stop 钩子依赖 stdin 载荷里的 transcript 路径；若 ZCode 不提供该字段，该钩子会静默放行（不报错），此时任务后沉淀退回"靠规则第 2 条"。
+\* ZCode Stop 钩子依赖 stdin 载荷里的 transcript 路径；若该文件已被宿主删除，采集回退到入队时的有界尾持久化与 DB 观察路径，不留失败在主任务里。

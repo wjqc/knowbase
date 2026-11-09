@@ -32,6 +32,14 @@ def _payload_hash(data: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def _routes_staging(meta: dict) -> bool:
+    """统一生命周期路由（类型不参与）：项目内新增且有出处/依据直接发布；
+    共享范围（global）或来源不足进入 staging 待审。"""
+    from .knowledge_lifecycle.admission import classify_risk, has_content_basis
+    return classify_risk(str(meta.get("scope") or ""), "NEW",
+                         has_basis=has_content_basis(meta)) != "R1"
+
+
 def _persist_intent(conn, kind: str, entity_id: str, scope: str,
                     request_id: str, payload_hash: str,
                     expected_entity_id: str = "", expected_path: str = "") -> str:
@@ -180,7 +188,7 @@ def adapter_create(repo: Path, conn, dtype: str, title: str, body: str, *,
         if v is not None:
             meta[k] = v
     meta["id"] = mid
-    staging = meta.get("confidence") == "staging" or dtype in ("standard", "preference", "bizrule")
+    staging = meta.get("confidence") == "staging" or _routes_staging(meta)
     path = store.mem_path(repo, dtype, mid, staging=staging)
 
     # 持久化 intent（含期望 entity_id/路径）

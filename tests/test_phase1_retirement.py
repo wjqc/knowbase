@@ -26,8 +26,10 @@ BODY2 = ("## 结论\n库存低于阈值时触发补货提醒。\n## 解决的问
 
 def standard_card(repo, title, provenance="PRD-4 §2", body=BODY):
     # V2-01：反馈驱动晋升默认关闭；本文件的机制测试沿用过渡开关。
+    # 统一生命周期：归档/裁决机制都从"已激活的 active 卡"出发，卡片先落
+    # staging（共享范围 global 按统一路由进待审，类型不参与），再经验证激活。
     enable_trusted_transition()
-    result = writer.create(repo, "standard", title, body, scope="orders", provenance=provenance)
+    result = writer.create(repo, "standard", title, body, scope="global", provenance=provenance)
     assert not result.get("error"), result
     assert result["staging"] is True
     return result["entity_id"]
@@ -89,9 +91,15 @@ def doctor_check(repo, name):
 
 
 def review_candidate_job(memory_repo):
-    """提交一个 action=review 的候选，返回 (job, claim, 原候选 key)。"""
-    job, claim = prepare_job()
+    """提交一个 action=review 的候选，返回 (job, claim, 原候选 key)。
+
+    统一生命周期：待审（review 出口）机制测试让 job/候选用共享范围 global，
+    按统一路由落 staging——项目内带出处的候选现在会直接发布 active。
+    """
+    job, claim = prepare_job(scope="global")
     cand = build_candidate(claim)
+    cand["scope"] = "global"
+    cand["body"]["scope"] = "global"
     cand["action"] = "review"
     cand["candidate_key"] = "review-1"
     out = submit_candidates(job, claim, [cand], request="req-review")
@@ -230,7 +238,8 @@ def test_both_negative_evidence_quarantines_both(memory_repo):
 def test_staging_contradiction_skips_adjudication(memory_repo):
     established = standard_card(memory_repo, "已生效卡")
     activate(memory_repo, established, "est")
-    newborn = writer.create(memory_repo, "standard", "新生矛盾卡", BODY, scope="orders",
+    # 统一生命周期：仍在待审（staging）的新卡不触发裁决——共享范围落 staging。
+    newborn = writer.create(memory_repo, "standard", "新生矛盾卡", BODY, scope="global",
                             provenance="PRD-4 §2",
                             relations=[{"id": established, "type": "contradicts"}])
     assert not newborn.get("error"), newborn
@@ -242,6 +251,8 @@ def test_staging_contradiction_skips_adjudication(memory_repo):
 def test_newborn_active_card_loses_to_established(memory_repo):
     established = standard_card(memory_repo, "已生效卡二")
     activate(memory_repo, established, "est2")
+    # 统一生命周期：项目内 + 出处的新卡直接发布 active（不再进 staging），
+    # 发布即参与裁决，输给已验证卡后标 stale。
     newborn = writer.create(memory_repo, "pitfall", "新生陷阱卡", BODY, scope="orders",
                             provenance="PRD-4 §2",
                             relations=[{"id": established, "type": "contradicts"}])
@@ -255,10 +266,18 @@ def test_newborn_active_card_loses_to_established(memory_repo):
 
 # ---------------- 1-C review 候选出口 ----------------
 
+def resubmit_candidate(claim, key):
+    """构造与 job 同范围（global）的重提交候选：统一路由下共享范围落 staging。"""
+    new = build_candidate(claim)
+    new["scope"] = "global"
+    new["body"]["scope"] = "global"
+    new["candidate_key"] = key
+    return new
+
+
 def test_review_candidate_resubmit_creates_card_and_supersedes(memory_repo):
     job, claim, orig = review_candidate_job(memory_repo)
-    new = build_candidate(claim)
-    new["candidate_key"] = "resubmit-1"
+    new = resubmit_candidate(claim, "resubmit-1")
     out = json.loads(job_resubmit_review_impl(job_id=job, candidate_key="review-1", candidate=new))
     assert out.get("outcome") == "saved", out
     assert out["superseded_candidate_key"] == "review-1"
@@ -278,27 +297,36 @@ def test_review_candidate_resubmit_creates_card_and_supersedes(memory_repo):
         conn.close()
     assert orig_row[1] == "superseded"
     assert dup == orig_row[0]
-    # 成卡路径与正常候选一致：bizrule 进 staging，段与 job 仍为 needs_review。
+    # 成卡路径与正常候选一致：共享范围候选按统一路由进 staging，段与 job 仍为 needs_review。
     assert segment[0] == "needs_review" and job_state == "needs_review"
 
 
-def test_review_resubmit_rejects_missing_provenance(memory_repo):
-    """负向断言：无出处内容永不进库；失败时原行不动。"""
+def test_review_resubmit_missing_provenance_routes_staging_and_invalid_keeps_row(memory_repo):
+    """统一生命周期：无出处不再 lint 硬拒，重提交按统一规则落 staging 待审
+    （共享范围，不直接发布）；真正非法的重提交仍 VALIDATION_FAILED，
+    且失败时原行不动、不产生新行。"""
     job, claim, orig = review_candidate_job(memory_repo)
-    new = build_candidate(claim)
-    new["candidate_key"] = "resubmit-noprov"
-    del new["provenance"]
-    out = json.loads(job_resubmit_review_impl(job_id=job, candidate_key="review-1", candidate=new))
+    bad = resubmit_candidate(claim, "resubmit-noev")
+    bad.pop("evidence_refs")
+    out = json.loads(job_resubmit_review_impl(job_id=job, candidate_key="review-1", candidate=bad))
     assert out.get("error") == "VALIDATION_FAILED", out
     conn = index.connect(memory_repo)
     try:
         state = conn.execute("SELECT materialization_state FROM candidates WHERE job_id=? "
                              "AND candidate_key='review-1'", (job,)).fetchone()[0]
         count = conn.execute("SELECT COUNT(*) FROM candidates WHERE job_id=? "
-                             "AND candidate_key='resubmit-noprov'", (job,)).fetchone()[0]
+                             "AND candidate_key='resubmit-noev'", (job,)).fetchone()[0]
     finally:
         conn.close()
     assert state == "needs_review" and count == 0
+    # 补齐出处缺失的重提交：按统一路由落 staging 待审（不直接发布）。
+    new = resubmit_candidate(claim, "resubmit-noprov")
+    del new["provenance"]
+    out2 = json.loads(job_resubmit_review_impl(job_id=job, candidate_key="review-1", candidate=new))
+    assert out2.get("outcome") == "saved", out2
+    assert out2["governance_status"] == "staging", out2
+    _, _, path = store.load(memory_repo, out2["memory_id"])
+    assert path.parent.name == "staging"
 
 
 def test_review_resubmit_rejects_key_reuse_segment_mismatch_and_review(memory_repo):
@@ -324,8 +352,7 @@ def test_review_resubmit_update_flips_job_to_succeeded(memory_repo):
     activate(memory_repo, target, "upd-tgt")
     job, claim, orig = review_candidate_job(memory_repo)
     tmeta, tbody, _ = store.load(memory_repo, target)
-    new = build_candidate(claim)
-    new["candidate_key"] = "resubmit-upd"
+    new = resubmit_candidate(claim, "resubmit-upd")
     new["action"] = "update"
     new["type"] = "standard"
     new.pop("rule_context", None)
@@ -341,8 +368,7 @@ def test_review_resubmit_update_flips_job_to_succeeded(memory_repo):
 
 def test_review_resubmit_replay_is_idempotent(memory_repo):
     job, claim, orig = review_candidate_job(memory_repo)
-    new = build_candidate(claim)
-    new["candidate_key"] = "resubmit-replay"
+    new = resubmit_candidate(claim, "resubmit-replay")
     first = json.loads(job_resubmit_review_impl(job_id=job, candidate_key="review-1", candidate=new))
     assert first.get("outcome") == "saved", first
     second = json.loads(job_resubmit_review_impl(job_id=job, candidate_key="review-1", candidate=new))

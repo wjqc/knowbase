@@ -23,9 +23,11 @@ BODY = ("## 结论\n已结算订单不能撤回。\n## 解决的问题\n避免�
 
 
 def governed_card(repo):
-    result = writer.create(repo, "standard", "结算订单撤回标准", BODY,
-                           scope="orders", provenance="PRD-4 §2")
+    # 统一生命周期：类型不参与路由。项目内新增不带 provenance（来源不足）
+    # 按统一规则落 staging，与旧"standard 类型自动 staging"等效。
+    result = writer.create(repo, "standard", "结算订单撤回标准", BODY, scope="orders")
     assert not result.get("error"), result
+    assert result["staging"] is True, result
     return result["entity_id"]
 
 
@@ -154,8 +156,9 @@ def test_replay_ten_times_records_single_event(memory_repo):
 
 def test_feedback_counts_do_not_affect_ranking_by_default(memory_repo):
     """frontmatter 反馈计数默认不参与排序：同一卡计数抬升后得分不变。"""
+    # 统一生命周期：带 provenance 让项目内新增直接发布 active，可进默认检索。
     res = writer.create(memory_repo, "pitfall", "CRLF 行尾读视图不一致排查A", BODY,
-                        scope="orders")
+                        scope="orders", provenance="PRD-4 §2")
     assert not res.get("error"), res
     mid = res["entity_id"]
     conn = index.connect(memory_repo)

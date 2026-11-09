@@ -61,8 +61,8 @@ DEFAULTS = {
                   "archive_after_stale_days": 90, "review_candidate_ttl_days": 30,
                   # P4 显式激活策略：团队允许自动激活的类型/范围与策略版本。
                   # 默认 None/None = 沿用已有授权范围（不改变现有行为）：
-                  # decide() 的 promotable 门仍在（staging 卡须为 GOVERNED
-                  # 类型且有出处；已激活卡由证据驱动）。团队收紧时显式
+                  # decide() 的 promotable 门仍在（staging 卡须有出处；
+                  # 已激活卡由证据驱动）。团队收紧时显式
                   # 填 allowed_types/allowed_scopes，策略只 gate 晋升/激活，
                   # 不影响证据收集与候选存储。
                   "activation_policy": {"allowed_types": None,

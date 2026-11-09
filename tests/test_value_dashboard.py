@@ -23,7 +23,9 @@ def full_card():
 def produce_events(repo):
     import re
     from knowbase.server import context_impl, save_impl, use_impl
-    saved = save_impl("pitfall", "订单撤回规则<script>", full_card(), scope="orders")
+    # 统一生命周期：检索递送只覆盖 active 卡，显式来源直接发布。
+    saved = save_impl("pitfall", "订单撤回规则<script>", full_card(), scope="orders",
+                      source="agent:pytest:seed")
     mid = re.search(r"\b([PB]-[0-9a-f]+)\b", saved).group(1)
     conn = index.connect(repo)
     revision = conn.execute("SELECT content_revision FROM entity_heads WHERE entity_id=?",

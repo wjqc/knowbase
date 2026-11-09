@@ -45,11 +45,19 @@ def trusted_l3(conn, repo, mid, revision, *, run_key, task_key, outcome="pass",
                              [{"native_key": f"n-{run_key}", "kind": "note", "payload": {}}],
                              project_key="repo:orders", native_task_key=task_key,
                              native_run_key=run_key)
+    from knowbase.knowledge_lifecycle import validators as lc_validators
+    artifact_hash = "a" * 64
+    # 统一生命周期绑定：执行时打戳 + 登记 validator_executions。
+    attribution.record_execution(conn, memory_id=mid, content_revision=revision,
+                                 artifact_hash=artifact_hash, run_id=run["run_id"],
+                                 validator_id=validator)
     result = attribution.verify_execution(
         conn, repo, run_id=run["run_id"], validator_id=validator,
         report={"target": {"memory_id": mid, "content_revision": revision,
                            "claim_id": "C-whole"},
-                "artifact_hash": "a" * 64, "expected_hash": "e" * 64,
+                "artifact_hash": artifact_hash, "expected_hash": "e" * 64,
+                "execution_stamp": {"memory_id": mid, "content_revision": revision,
+                                    "run_id": run["run_id"], "validator_id": validator},
                 "checks": [{"check_id": check, "claim_id": "C-whole",
                             "observed_result": outcome}]})
     assert not result.get("error"), result

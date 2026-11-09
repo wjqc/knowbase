@@ -419,10 +419,14 @@ def test_retention_prunes_runtime_ledgers_but_keeps_active_jobs(memory_repo):
 
 def test_hook_auto_inject_records_retrieval_delivery(memory_repo, monkeypatch):
     from knowbase import hooks
+    from knowbase.__main__ import cmd_promote
+    # 统一生命周期：global 新卡一律落 staging 待审；Hook 注入只覆盖 active 卡，
+    # 先走人工激活（夹具模拟可信 CLI）再验证检索递送。
     created = writer.create(memory_repo, "pitfall", "库存补货阈值排查",
                             BODY, scope="global")
     assert not created.get("error"), created
     mid = created["entity_id"]
+    assert cmd_promote(mid) == 0
     cfg = config.load_config()
     cfg["hooks"] = {"enabled": True, "inject_min_confidence": "any"}
     cfg["inflight"]["enabled"] = False

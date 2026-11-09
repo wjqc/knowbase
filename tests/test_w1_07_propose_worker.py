@@ -25,9 +25,11 @@ def _enable(repo, *, propose=True, publish=False):
 
 
 def _staging_card(repo):
-    card = writer.create(repo, "bizrule", "自动提案规则", BODY, scope="orders",
-                         provenance="PRD-8")
+    # 统一生命周期：类型不参与路由——bizrule 项目内新增去掉 provenance
+    # （来源不足）按统一规则落 staging。
+    card = writer.create(repo, "bizrule", "自动提案规则", BODY, scope="orders")
     assert not card.get("error"), card
+    assert card["staging"] is True, card
     return card["entity_id"]
 
 

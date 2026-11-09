@@ -1127,3 +1127,17 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - 发布并原地安装构建 e753066 / 04d4b5c50500220d；更新器从 GitHub 正常推进，固定路径、安装哈希及 12 个现有 MCP 桥接读回一致，worker 已运行。
 - 固定 ZCode Stop 命令在隔离环境中 70 ms 登记超过 10 MiB 的会话，后台生成 11 个采集任务并保留尾部。真实内网执行器隔离探针 8 项通过（期间出现 TLS 连接中断，重试通过）；同一固定命令配合真实模型，在隔离库完成检查点、采集、成卡和文件读回。真实业务会话未作为测试样本。
 - 安装排空与两成员升级定向 20 passed；内网文本与共享传输定向 66 passed。
+
+## 2026-11-09 Trae MCP 主线实施计划
+
+- 已整理清理边界、统一状态转换、T0–T4、真实 Trae 验收与主任务不中断验收口径。没有删除生产材料，也未修改源码或运行配置。
+
+## 2026-11-10 统一生命周期实施（T0–T4）
+
+- T0：生产盘点（/tmp 快照）——jobs 155 全终态，2 条当晚失败 checkpoint（transcript 被宿主删）+79 行超期 spool 为清理对象；113 候选/staging/证据全保留。隔离演练：retire-backlog execute 后 spool 155→74、九项账本不变、二次全零幂等；新增 jobs retire-backlog（只读默认）+5 测试。
+- T1：stdio MCP 真实契约 4/4——分页为片段内分块（按 segment_id+page_start 去重拼回全文）、distilled 片段须各有候选、job_status 须 protocol_version=2 才回 JSON；executor_runs 空 + automation/embedding/capture 三关 = 无独立模型证据。
+- T2：类型分流合并（commit_adapter._routes_staging 统一路由：global/无依据→staging，项目内+依据→active；权威门只看 scope=global；provenance 缺失=unknown 待审；GOVERNED/GOVERNED_STRICT/PROVENANCE_REQUIRED 移除）+ 验证绑定（执行戳 knowbase-execution-v1 + validator_executions v35 + EMPTY→STAMP→RECORD→revision 四级校验；verify --run 执行时打戳登记并落盘带戳原件）。writer.create 自动补 :adhoc 来源不算依据是路由关键。
+- T3：checkpoint_queue 入队同步读 ≤256KB 行对齐尾随 spool 持久化，worker 在原件被删后经临时文件解析（用后即删），9MB 会话入队 <0.5s；trae-rules.md 重写、MCP 描述收敛（不再提示日常领取）。
+- T4：样例卡全链 1 项通过（待审→R3 权威发布→修订降权→3 任务×2 组 verified→可信反证 quarantine→受控时钟归档），回执链 job_submissions/candidates 可追溯。
+- 全量 1221 passed / 1 skipped（72 个旧类型断言按新语义改写，机制断言未弱化）；test_retrieval.py 重基线系语料漂移非回归（worktree 对照取证）。
+- 未做（待人工）：源码提交、T0 生产执行、部署（wheel 原地装+kill worker+MCP 重连）、真实 Trae 复验。生产库当晚另有并行会话改动（303 卡治理投影未提交、34 张 staging），未触碰。

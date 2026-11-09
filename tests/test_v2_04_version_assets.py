@@ -234,7 +234,10 @@ def test_legacy_import_classifies_bad_cards_without_blocking(memory_repo):
     bad = memory_repo / "pitfalls" / "P-badbadbadbad.md"
     bad.write_text("没有 frontmatter 的坏卡", encoding="utf-8")
     # 重复 ID 卡：同 ID 两份（staging 一份、正式一份）。
-    dup = writer.create(memory_repo, "pitfall", "重复ID卡", BODY, scope="orders")
+    # 统一生命周期：带 provenance 让这张卡直接发布到正式目录，再复制进
+    # staging 构造同 ID 两份；不带依据时卡本身已落 staging，会覆盖同一路径。
+    dup = writer.create(memory_repo, "pitfall", "重复ID卡", BODY, scope="orders",
+                        provenance="PRD-DUP-1")
     from pathlib import Path
     src = store.load(memory_repo, dup["entity_id"])[2]
     target = memory_repo / "staging" / src.name
