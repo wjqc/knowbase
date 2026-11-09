@@ -90,6 +90,8 @@
 ## 6. 审批件与执行记录
 
 > 2026-11-10 01:11–01:16 用户批准后执行：§6.1 生产清理 ✅、§6.3 提交部署 ✅；§6.2 Trae 接线层 ✅、GUI 两条任务因环境输入守卫（Trae 窗口不在在屏列表，三类注入路径全拒）待用户在 Trae 界面完成。
+>
+> **01:26 部署验收补充（deploy-verify 标识，非 Trae）**：rc10 生产全链两条任务通过——任务 A：capture→claim→查重门 NEEDS_REASSESSMENT→逐卡真读 10 张相似卡→duplicate_evaluation 重提交→succeeded（saved_active=1）→读回（P-b4506b0ae008）；任务 B：search 命中→context→read→use(adopted)→feedback(helpful, task_outcome_id=deploy-verify-task-b)→update 修订（修订清验证 once）。生产轨迹：knowledge_uses host=deploy-verify 两条；内容库自动提交 3b4ef0e/8645097。新语义防线（本机路径 lint 拒绝、NEEDS_REASSESSMENT 查重门）在真实链路中各拦截一次并按协议放行。
 
 ### 6.1 T0 生产清理 runbook
 

@@ -1141,3 +1141,9 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - T4：样例卡全链 1 项通过（待审→R3 权威发布→修订降权→3 任务×2 组 verified→可信反证 quarantine→受控时钟归档），回执链 job_submissions/candidates 可追溯。
 - 全量 1221 passed / 1 skipped（72 个旧类型断言按新语义改写，机制断言未弱化）；test_retrieval.py 重基线系语料漂移非回归（worktree 对照取证）。
 - 未做（待人工）：源码提交、T0 生产执行、部署（wheel 原地装+kill worker+MCP 重连）、真实 Trae 复验。生产库当晚另有并行会话改动（303 卡治理投影未提交、34 张 staging），未触碰。
+
+## 2026-11-10 01:26 部署验收补充（deploy-verify）
+
+- rc10 生产全链两条任务通过：A=capture→claim→NEEDS_REASSESSMENT（10 相似卡）→逐卡真读→duplicate_evaluation 重提交→succeeded→读回 P-b4506b0ae008；B=检索→读→adopted→feedback(helpful/completed)→update 修订清验证。
+- 生产新语义防线各拦截一次并按协议放行：本机路径（~/）lint 拒绝候选；查重门要求逐卡评估。卡 active/once，内容库自动提交 3b4ef0e/8645097。
+- Trae GUI 两条任务仍待用户：注入四类路径（应用点击/底层事件/键盘/菜单 AX 动作）全部被 WindowServer 守卫拒绝（onscreen:false），Trae 已留在 knowbase 工作区待用户操作。
