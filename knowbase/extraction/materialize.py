@@ -19,7 +19,7 @@ def _settle_session_cursor(conn, job_id):
     if not host or not session or not capture_range:
         return
     kind = capture_range["source_kind"]
-    ranges = []
+    ranges = {}
     for raw, state in conn.execute("SELECT s.input_json,j.state FROM job_spool s JOIN jobs j ON j.job_id=s.job_id "
                                    "WHERE j.kind='capture' AND j.scope=?", (current["scope"],)):
         try:
@@ -28,12 +28,17 @@ def _settle_session_cursor(conn, job_id):
             continue
         r = entry.get("capture_range", {})
         if entry.get("host_profile") == host and entry.get("session_id") == session and r.get("source_kind") == kind:
-            ranges.append((r["start"], r["end"], state))
+            ranges.setdefault((r["start"], r["end"]), []).append(state)
+    observed = conn.execute("SELECT observed_cursor FROM context_sessions WHERE host_profile=? AND session_id=?",
+                            (host, session)).fetchone()
+    prefix = f"{kind}:"
+    observed_end = int(observed[0][len(prefix):]) if observed and observed[0].startswith(prefix) else 0
     end = 0
-    for start, finish, state in sorted(ranges):
+    for (start, finish), states in sorted(ranges.items()):
         if finish <= end:
             continue
-        if start != end or state not in ("succeeded", "no_candidate", "needs_review"):
+        if start != end or finish > observed_end or any(
+                state not in ("succeeded", "no_candidate", "needs_review") for state in states):
             break
         end = finish
     conn.execute("UPDATE context_sessions SET settled_cursor=? WHERE host_profile=? AND session_id=?",

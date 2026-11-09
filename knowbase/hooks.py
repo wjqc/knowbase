@@ -246,39 +246,6 @@ def _mid_capture_flag_path(session_id: str) -> Path:
     return Path(base) / f"knowbase-mid-capture-{_safe_session_token(session_id)}.flag"
 
 
-def _maybe_trigger_mid_session_capture(session_id: str, transcript_path: str) -> None:
-    """M3-2: 检测 work_ops 达到阈值时触发中途 capture（不阻断）。
-
-    每个会话最多触发一次中途 capture，通过 flag 文件控制。
-    与 Stop Hook 的 capture 共享幂等键前缀，避免重复。
-    """
-    cfg = config.load_config()
-    hooks_cfg = cfg.get("hooks", {}) or {}
-    if not hooks_cfg.get("enabled", True):
-        return
-    # 检查是否启用中途 capture
-    if not hooks_cfg.get("mid_session_capture", False):
-        return
-    # 检查是否已经触发过
-    flag = _mid_capture_flag_path(session_id)
-    if flag.exists():
-        return
-    # 获取阈值（默认 5 次 work_ops）
-    threshold = hooks_cfg.get("mid_session_threshold", 5)
-    # 统计 work_ops
-    stats = _transcript_stats(transcript_path)
-    if stats["work_ops"] < threshold:
-        return
-    # 达到阈值，尝试入队 capture
-    job_id = _try_enqueue_capture(session_id, transcript_path, cfg)
-    if job_id:
-        # 设置 flag 防止重复触发
-        try:
-            flag.write_text("1", encoding="utf-8")
-        except OSError:
-            pass
-
-
 def stop_event(session_id: str, transcript_path: str, *, allow_enqueue: bool = True) -> str:
     """Legacy hooks may queue material; knowledge maintenance never blocks Stop."""
     cfg = config.load_config()
@@ -366,7 +333,7 @@ def cmd_session_start(style: str = "claude"):
     text = session_start()
     if config.load_config()["inflight"]["enabled"] and (data.get("session_id") or data.get("sessionId")):
         from .adapters import host_events
-        result = host_events.handle(data, event="recover", style=style)
+        result = host_events.handle(data, event="recover", style=style, defer_capture=True)
         text += "\n" + host_events.render_foreground(result, data, event="recover", style=style)
     _emit(text, style)
 
@@ -378,18 +345,33 @@ def cmd_user_prompt(style: str = "claude"):
     # M3-2: 中途检查点触发（不阻断，异步入队）
     sid = _first(data, "session_id", "sessionId")
     transcript = _first(data, "transcript_path", "transcriptPath", "transcript")
-    if sid and transcript and not config.load_config()["inflight"]["enabled"]:
-        _maybe_trigger_mid_session_capture(sid, transcript)
+    cfg = config.load_config()
+    if (sid and transcript and not cfg["inflight"]["enabled"] and cfg["inflight"]["capture_enabled"]
+            and cfg["hooks"].get("enabled", True) and cfg["hooks"].get("mid_session_capture", False)
+            and not _mid_capture_flag_path(sid).exists()):
+        _defer_legacy_capture(data, cfg, style, mid_session=True)
     delivery_info={"session_id": sid or "", "host_profile": style}
     text = user_prompt(prompt, data.get("cwd") or data.get("project_dir"), delivery_info)
-    if config.load_config()["inflight"]["enabled"]:
+    if cfg["inflight"]["enabled"]:
         from .adapters import host_events
-        observation = host_events.handle(data, event="user-prompt", style=style)
+        observation = host_events.handle(data, event="user-prompt", style=style, defer_capture=True)
         text = host_events.render_foreground(observation, data, event="user-prompt", style=style, prefix=text)
     from .retrieval_metrics import delivery
     delivery(config.repo_path(),delivery_info.get("search_id"),text,
              tiers=delivery_info.get("tiers"), dropped_once=delivery_info.get("dropped_once",0))
     _emit(text, style)
+
+
+def _defer_legacy_capture(data, cfg, style, *, mid_session=False):
+    from .adapters.checkpoint_queue import enqueue
+    sid = _first(data, "session_id", "sessionId") or os.environ.get("ZCODE_SESSION_ID") or os.environ.get("CLAUDE_SESSION_ID")
+    transcript = _first(data, "transcript_path", "transcript", "transcriptPath")
+    if not sid or not transcript:
+        return {"error": "CHECKPOINT_REFERENCE_MISSING"}
+    project = (_first(data, "cwd", "project_dir") or os.environ.get("ZCODE_PROJECT_DIR")
+               or os.environ.get("CLAUDE_PROJECT_DIR") or "")
+    return enqueue(config.repo_path(cfg), sid, transcript, "", style, project=project,
+                   legacy=True, mid_session=mid_session)
 
 
 def cmd_stop(style: str = "claude"):
@@ -402,13 +384,13 @@ def cmd_stop(style: str = "claude"):
     try:
         if cfg["inflight"]["enabled"] and cfg["inflight"]["capture_enabled"]:
             from .adapters import host_events
-            result = host_events.handle(data, event="stop", style=style)
-            if result.get("error"):
-                print("[knowbase] Stop capture incomplete: " + str(result["error"]), file=sys.stderr)
-        elif not cfg["inflight"]["enabled"]:
-            sid = _first(data, "session_id", "sessionId") or "unknown"
-            tp = _first(data, "transcript_path", "transcript", "transcriptPath")
-            stop_event(sid, tp, allow_enqueue=cfg["inflight"]["capture_enabled"])
+            result = host_events.handle(data, event="stop", style=style, defer_capture=True)
+        elif not cfg["inflight"]["enabled"] and cfg["inflight"]["capture_enabled"]:
+            result = _defer_legacy_capture(data, cfg, style)
+        else:
+            return
+        if result.get("error"):
+            print("[knowbase] Stop capture incomplete: " + str(result["error"]), file=sys.stderr)
     except Exception as exc:
         print("[knowbase] Stop capture incomplete: " + type(exc).__name__, file=sys.stderr)
 
@@ -418,7 +400,7 @@ def cmd_tool_event(style: str = "claude", event: str = "tool-after"):
     from .adapters import host_events
     data = _read_stdin()
     try:
-        result = host_events.handle(data, event=event, style=style)
+        result = host_events.handle(data, event=event, style=style, defer_capture=True)
         text = host_events.render_foreground(result, data, event=event, style=style)
     except Exception as exc:
         print("[knowbase] hook incomplete: " + type(exc).__name__, file=sys.stderr)
@@ -437,7 +419,7 @@ def cmd_before_compact(style: str = "claude"):
         _emit("[knowbase] unsupported_event：此宿主未验证支持压缩前 Hook，未执行。", style)
         return
     from .adapters import host_events
-    result = host_events.handle(_read_stdin(), event="before-compact", style=style)
+    result = host_events.handle(_read_stdin(), event="before-compact", style=style, defer_capture=True)
     if result.get("error"):
         print("[knowbase] 压缩前材料处理未完成：" + str(result["error"]), file=sys.stderr)
 

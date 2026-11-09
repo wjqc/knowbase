@@ -11,18 +11,29 @@ import re
 
 import pytest
 
-from knowbase import config, index, jobs, materials, store
+from knowbase import config, index, materials, store
 from knowbase.automation import distillation, execution, hook_capture, worker
 from knowbase.automation.hook_capture import normalize_hook_candidates, run_hook_capture
 from knowbase.mutations import _compute_revision
+from knowbase.adapters.host_events import capture_increment
 from knowbase.server import capture_impl
 from test_p2_autonomous import setup_executor
 
 
-def _capture(text, scope="probe"):
-    out = capture_impl(session_id="hook-b-fixture", scope=scope,
-                       messages=[{"role": "user", "text": text}])
-    return re.search(r"J-[a-f0-9]+", out).group()
+def _capture(repo, text, scope="probe"):
+    from uuid import uuid4
+
+    sid = uuid4().hex
+    transcript = repo.parent / f"{sid}.jsonl"
+    transcript.write_text(json.dumps({"role": "user", "text": text}), encoding="utf-8")
+    conn = index.connect(repo)
+    try:
+        conn.execute("INSERT INTO context_sessions(host_profile,session_id,scope,updated_at) VALUES(?,?,?,?)",
+                     ("zcode", sid, scope, distillation.now()))
+        conn.commit()
+    finally:
+        conn.close()
+    return capture_increment(repo, sid, str(transcript), scope, "zcode")["job_ids"][0]
 
 
 def _job_state(repo, job_id):
@@ -131,7 +142,7 @@ CREATE_TEXT = ("订单去重用幂等键：最终规则：下单时用订单号�
 def test_hook_capture_creates_card_without_distillation(memory_repo, monkeypatch):
     """P0-1：检查点入队后，Hook 路径直接成卡，不调用 run_due（提炼）。"""
     cfg, _ = setup_executor(monkeypatch)
-    job = _capture(CREATE_TEXT)
+    job = _capture(memory_repo, CREATE_TEXT)
 
     def build(options, request, text, segments, related):
         cand = _candidate(action="create", segments=segments, scope="probe",
@@ -156,7 +167,7 @@ def test_hook_duplicate_links_existing_no_new_card(memory_repo, monkeypatch):
     """P0-2 重复：模型判 link_existing，旧卡现读版本号修复后链接成功，不产生新卡。"""
     cfg, _ = setup_executor(monkeypatch)
     mid = _seed_card(memory_repo, "订单去重用幂等键")
-    job = _capture(CREATE_TEXT)
+    job = _capture(memory_repo, CREATE_TEXT)
 
     def build(options, request, text, segments, related):
         assert related["similar_cards"], "相似卡应含已建卡"
@@ -181,28 +192,28 @@ def test_hook_duplicate_links_existing_no_new_card(memory_repo, monkeypatch):
         conn.close()
 
 
-def test_hook_wrong_create_converted_by_title_guard(memory_repo, monkeypatch):
-    """P0-2 确定性防线：模型误判 create，但标题与现存卡相同，改走 link_existing。"""
+def test_conflicting_titles_go_to_review(memory_repo, monkeypatch):
     cfg, _ = setup_executor(monkeypatch)
-    mid = _seed_card(memory_repo, "订单去重用幂等键")
-    job = _capture(CREATE_TEXT)
+    _seed_card(memory_repo, "审批单可在提交后撤回")
+    job = _capture(memory_repo, "业务规则：审批单不可在提交后撤回。")
 
     def build(options, request, text, segments, related):
         cand = _candidate(action="create", segments=segments, scope="probe",
+                          title="审批单不可在提交后撤回",
+                          conclusion="审批单提交后禁止撤回。",
                           snapshot=related["similarity_snapshot"],
                           evaluated=related["similar_cards"])
-        cand["duplicate_evaluation"]["rationale"] = "桩误判为独立知识"
         return [cand], _segment_results(segments)
     monkeypatch.setattr(execution, "execute_text", _stub_response(build))
 
     assert run_hook_capture(memory_repo, cfg).get("processed") == 1
-    assert _job_state(memory_repo, job) == "succeeded"
+    assert _job_state(memory_repo, job) == "needs_review"
     assert _card_count(memory_repo) == 1
     conn = index.connect(memory_repo)
     try:
         row = conn.execute("SELECT materialization_state,memory_id FROM candidates "
                            "WHERE job_id=?", (job,)).fetchone()
-        assert row[0] == "linked_existing" and row[1] == mid
+        assert tuple(row) == ("needs_review", "")
     finally:
         conn.close()
 
@@ -211,7 +222,7 @@ def test_hook_supplement_updates_existing_card(memory_repo, monkeypatch):
     """P0-2 补充：模型判 update，旧卡内容被增量更新，仍只有一张卡。"""
     cfg, _ = setup_executor(monkeypatch)
     mid = _seed_card(memory_repo, "订单去重用幂等键")
-    job = _capture("订单去重用幂等键补充：最终规则：幂等键有效期 24 小时，"
+    job = _capture(memory_repo, "订单去重用幂等键补充：最终规则：幂等键有效期 24 小时，"
                    "过期后同一订单号可重新下单。")
 
     def build(options, request, text, segments, related):
@@ -245,7 +256,7 @@ def test_hook_supplement_to_verified_card_goes_to_review(memory_repo, monkeypatc
     mid = _seed_card(memory_repo, "订单去重用幂等键")
     _mark_verified(memory_repo, mid)
     before = store.load(memory_repo, mid)[1]
-    job = _capture("订单去重用幂等键补充：最终规则：幂等键有效期 24 小时。")
+    job = _capture(memory_repo, "订单去重用幂等键补充：最终规则：幂等键有效期 24 小时。")
 
     def build(options, request, text, segments, related):
         assert related["similar_cards"]
@@ -276,7 +287,7 @@ def test_hook_budget_exhausted_goes_retry_wait(memory_repo, monkeypatch):
     """超预算进 retry_wait（不扣 attempt、不调模型），不静默丢弃。"""
     cfg, _ = setup_executor(monkeypatch)
     cfg["automation"]["daily_calls"] = 0
-    job = _capture(CREATE_TEXT)
+    job = _capture(memory_repo, CREATE_TEXT)
     monkeypatch.setattr(execution, "execute_text",
                         lambda *a, **k: pytest.fail("超预算时不得调模型"))
 
@@ -293,15 +304,15 @@ def test_hook_budget_exhausted_goes_retry_wait(memory_repo, monkeypatch):
 
 def test_hook_no_executor_blocked(memory_repo):
     """无已验证执行器时 blocked，任务保持 awaiting_agent（不探针、不认领）。"""
-    job = _capture(CREATE_TEXT)
+    job = _capture(memory_repo, CREATE_TEXT)
     assert run_hook_capture(memory_repo)["blocked"] == "automation_disabled"
     assert _job_state(memory_repo, job) == "awaiting_agent"
 
 
 def test_hook_flag_selection_and_worker_wiring(memory_repo, monkeypatch):
-    """标记选择：capture_impl 置标；未带标记的任务不被 Hook 处理；worker 已注册任务。"""
+    """标记选择：普通提炼只取显式作业，Hook 只取检查点作业与到期重试。"""
     cfg, _ = setup_executor(monkeypatch)
-    flagged = _capture(CREATE_TEXT)
+    flagged = _capture(memory_repo, CREATE_TEXT)
     conn = index.connect(memory_repo)
     try:
         row = conn.execute("SELECT json_extract(input_json,'$.hook_capture') FROM job_spool "
@@ -309,42 +320,35 @@ def test_hook_flag_selection_and_worker_wiring(memory_repo, monkeypatch):
         assert row[0] == 1
     finally:
         conn.close()
-    # 未带标记的 capture 任务：直接入队，不走 capture_impl/capture_increment。
-    payload = materials.capture_payload(
-        [type("E", (), {"text": "未标记材料：最终规则：X。", "message_id": "e1",
-                        "role": "user", "tool_name": "", "tool_call_id": "",
-                        "timestamp": ""})()],
-        scope="probe", session_id="hook-b-unflagged")
-    conn = index.connect(memory_repo)
-    try:
-        queued = jobs.enqueue(conn, jobs.KIND_CAPTURE, "probe", payload,
-                              idempotency_key="capture:unflagged-fixture")
-        assert queued.get("created")
-        materials.register_manifest(conn, queued["job_id"], payload)
-        jobs.set_preparing(conn, queued["job_id"])
-        jobs.set_awaiting(conn, queued["job_id"], len(payload["segments"]))
-        unflagged = queued["job_id"]
-    finally:
-        conn.close()
+    unflagged = re.search(r"J-[a-f0-9]+", capture_impl(
+        session_id="explicit-fixture", scope="probe",
+        messages=[{"role": "user", "text": "显式材料：最终规则：X。"}])).group()
 
     assert "hook_capture" in worker.TASK_INTERVALS
     assert worker.TASK_INTERVALS["hook_capture"] == 10
     assert worker._HANDLERS["hook_capture"] is worker._h_hook_capture
+    def no_value(options, request, text, segments, related):
+        assert request.job_id == unflagged
+        return [], _segment_results(segments, decision="no_value", reason="测试材料")
+    monkeypatch.setattr(execution, "execute_text", _stub_response(no_value))
+    assert distillation.run_due(memory_repo, cfg)["processed"] == 1
+    assert _job_state(memory_repo, unflagged) == "no_candidate"
+    assert _job_state(memory_repo, flagged) == "awaiting_agent"
+
     # 只处理带标记任务：未标记任务保持 awaiting_agent；标记任务因预算走 retry_wait。
     monkeypatch.setattr(execution, "execute_text",
                         lambda *a, **k: pytest.fail("超预算时不得调模型"))
     cfg["automation"]["daily_calls"] = 0  # 标记任务也因预算跳过，不调模型
     out = run_hook_capture(memory_repo, cfg)
     assert out["processed"] == 1 and out["results"][0]["error"] == "daily_budget_exhausted", out
-    assert _job_state(memory_repo, unflagged) == "awaiting_agent"
+    assert _job_state(memory_repo, unflagged) == "no_candidate"
     assert _job_state(memory_repo, flagged) == "retry_wait"
 
     # worker handler 直调：有执行器且放行租约时处理标记任务。
     cfg["automation"]["daily_calls"] = 20
     conn = index.connect(memory_repo)
     try:
-        conn.execute("UPDATE jobs SET state='awaiting_agent',error=NULL,next_run_at=? "
-                     "WHERE job_id=?", (distillation.now(), flagged))
+        conn.execute("UPDATE jobs SET next_run_at=? WHERE job_id=?", (distillation.now(), flagged))
         conn.commit()
     finally:
         conn.close()
@@ -368,7 +372,7 @@ def test_hook_capture_leaves_quarantine_and_verified_untouched(memory_repo, monk
     """治理隔离：Hook 成卡/链接/更新不产生证据事件、不动 quarantine、不晋升 verified。"""
     cfg, _ = setup_executor(monkeypatch)
     mid = _seed_card(memory_repo, "订单去重用幂等键")
-    create_job = _capture("退款原路返回：最终规则：退款必须原路返回，不可改道。")
+    create_job = _capture(memory_repo, "退款原路返回：最终规则：退款必须原路返回，不可改道。")
 
     calls = {"n": 0}
 
@@ -383,7 +387,7 @@ def test_hook_capture_leaves_quarantine_and_verified_untouched(memory_repo, monk
     assert run_hook_capture(memory_repo, cfg).get("processed") == 1
     assert _job_state(memory_repo, create_job) == "succeeded"
 
-    link_job = _capture(CREATE_TEXT)
+    link_job = _capture(memory_repo, CREATE_TEXT)
 
     def build_link(options, request, text, segments, related):
         calls["n"] += 1

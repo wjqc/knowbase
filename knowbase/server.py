@@ -529,9 +529,6 @@ def capture_impl(session_id: str = "", checkpoint: str = "", scope: str = "",
         return f"错误：{exc}"
     if not payload["segments"]:
         return "错误：无可分析材料"
-    # Path B 第一批：显式捕获同样带 hook_capture 标记，worker 的 hook_capture
-    # 任务短时处理成卡；与 capture_increment 的检查点路径一致。
-    payload["hook_capture"] = True
     conn = index.connect(rp)
     try:
         result = jobs.enqueue(

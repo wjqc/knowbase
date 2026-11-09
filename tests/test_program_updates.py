@@ -93,6 +93,8 @@ def test_managed_profiles_migrate_and_preserve_other_servers_and_hook_timeouts(t
     changes=integration.plan(['zcode','claude-code','trae','codex','opencode'],tmp_path)
     integration.apply(changes,tmp_path)
     z=tmp_path/'.zcode/cli/config.json';doc=json.loads(z.read_text());doc['mcp']['servers']['other']={'command':'keep'}
+    assert doc['hooks']['events']['Stop'][0]['hooks'][0]['timeoutMs']==15000
+    assert doc['hooks']['events']['PreToolUse'][0]['hooks'][0]['timeoutMs']==5000
     doc['hooks']['events']['Stop'][0]['hooks'][0]['timeoutMs']=777;z.write_text(json.dumps(doc))
     integration.apply(integration.plan(['zcode','claude-code','trae','codex','opencode'],tmp_path,managed=True),tmp_path)
     doc=json.loads(z.read_text());assert doc['mcp']['servers']['other']=={'command':'keep'}

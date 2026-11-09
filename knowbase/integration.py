@@ -240,8 +240,9 @@ def plan(agents, home=None, *, managed=None):
         if name=="claude-code":events["PreCompact"]="before-compact"
         for event, action in events.items():
             command = _join_command([runtime_command(home),*hook_args(home,action,host['style'],managed)])
-            handler = ({"type": "process", "command": runtime_command(home), "args": hook_args(home,action,host['style'],managed), "timeoutMs": 1000}
-                       if name == "zcode" else {"type": "command", "command": command, "timeout": 1})
+            seconds = 15 if event in {"SessionStart", "UserPromptSubmit", "Stop", "PreCompact"} else 5
+            handler = ({"type": "process", "command": runtime_command(home), "args": hook_args(home,action,host['style'],managed), "timeoutMs": seconds * 1000}
+                       if name == "zcode" else {"type": "command", "command": command, "timeout": seconds})
             entries = hooks.setdefault(event, [])
             if not isinstance(entries, list):
                 raise IntegrationError("HOOK_SCHEMA_CONFLICT")
@@ -482,7 +483,8 @@ def extra_plan(agents,home, *, managed=False):
                 _toml(after);result.append({'path':str(path),'before':before,'after':after})
             hp=home/'.codex/hooks.json';hr=_read(hp);hd=_document(hr);hooks=_section(hd,('hooks',))
             for event,action in {**EVENTS,'PreToolUse':'tool-before','PostToolUse':'tool-after','Stop':'stop','PreCompact':'before-compact'}.items():
-                handler={'type':'command','command':_join_command([command,*hook_args(home,action,'codex',managed)]),'timeout':1}
+                seconds = 15 if event in {"SessionStart", "UserPromptSubmit", "Stop", "PreCompact"} else 5
+                handler={'type':'command','command':_join_command([command,*hook_args(home,action,'codex',managed)]),'timeout':seconds}
                 entries=hooks.setdefault(event,[])
                 if not isinstance(entries,list):raise IntegrationError('HOOK_SCHEMA_CONFLICT')
                 owned=[h for entry in entries for h in entry.get('hooks',[]) if 'knowbase' in str(h.get('command',''))]

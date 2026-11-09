@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -139,11 +140,25 @@ def _save_capture_checkpoint(conn, host, session_id, scope, coverage, events, so
     conn.commit()
 
 
+def _capture_chunks(events):
+    """Keep each manifest below the material limit, including JSON escaping."""
+    chunk, size = [], 0
+    for event in events:
+        for start in range(0, len(event.text) or 1, 100_000):
+            part = event.text[start:start + 100_000]
+            cost = len(json.dumps(part, ensure_ascii=False).encode("utf-8")) + 4096
+            if chunk and size + cost > 1024 * 1024:
+                yield chunk
+                chunk, size = [], 0
+            chunk.append(replace(event, text=part) if part != event.text else event)
+            size += cost
+    if chunk:
+        yield chunk
+
+
 def capture_increment(repo, session_id, transcript_path, scope, host, *, automatic=True):
     """只从显式宿主 transcript 引用采集未入队增量，不扫描聊天目录。"""
     path = Path(transcript_path or "")
-    if path.is_file() and path.stat().st_size > 10 * 1024 * 1024:
-        return {"error": "MATERIAL_TOO_LARGE", "needs_input": True}
     events = (normalizer.parse_transcript_auto(str(path), default_session_id=session_id, default_scope=scope, strict=True)
               if path.is_file() else None)
     conn = index.connect(repo)
@@ -178,36 +193,31 @@ def capture_increment(repo, session_id, transcript_path, scope, host, *, automat
             # 增量全被过滤（自身调用/提炼会话回声）：推进游标避免每次钩子重算。
             _save_capture_checkpoint(conn, host, session_id, scope, coverage, events, source_kind)
             return {"job_ids": [], "capture_status": "no_delta"}
-        backlog = conn.execute("SELECT COUNT(*) FROM jobs WHERE state NOT IN "
-                               "('succeeded','no_candidate','needs_review','failed')").fetchone()[0]
-        if backlog >= config.load_config()["inflight"]["max_pending_jobs"]:
-            return {"error": "BACKLOG_FULL"}
-        payload = materials.capture_payload(delta, scope=scope, session_id=session_id)
         seen = _enqueued_text_hashes(conn, host, session_id)
-        if seen:
+        job_ids = []
+        for chunk in _capture_chunks(delta):
+            payload = materials.capture_payload(chunk, scope=scope, session_id=session_id)
             payload["segments"] = [s for s in payload["segments"] if s["text_hash"] not in seen]
             payload["total_segments"] = len(payload["segments"])
-        if not payload["segments"]:
-            # 全部为重复/自身调用：推进游标避免每次钩子重算，不产生新任务。
-            _save_capture_checkpoint(conn, host, session_id, scope, coverage, events, source_kind)
-            return {"job_ids": [], "capture_status": "no_delta"}
-        payload.update(host_profile=host, capture_range={"source_kind": source_kind, "start": cursor, "end": len(events)},
-                       coverage_scope="observed_host_events" if source_kind == "observations" else "provided_transcript",
-                       # Path B 第一批：检查点入队的 capture 任务带标记，worker 的
-                       # hook_capture 任务（10 秒节律）短时处理成卡；未带标记的历史
-                       # 任务与 legacy 路径任务仍走 60 秒提炼。
-                       hook_capture=True)
-        queued = jobs.enqueue(conn, jobs.KIND_CAPTURE, scope, payload,
-                              idempotency_key=f"capture:{host}:{session_id}:{scope}:{cursor}:{payload['input_version']}")
-        if queued.get("error"):
-            return queued
-        if queued["created"] or queued.get("state") in ("queued", "preparing"):
-            materials.register_manifest(conn, queued["job_id"], payload)
-            jobs.set_preparing(conn, queued["job_id"])
-            jobs.set_awaiting(conn, queued["job_id"], len(payload["segments"]))
+            if not payload["segments"]:
+                continue
+            payload.update(host_profile=host, capture_range={"source_kind": source_kind, "start": cursor, "end": len(events)},
+                           coverage_scope="observed_host_events" if source_kind == "observations" else "provided_transcript",
+                           hook_capture=automatic)
+            hashes = [segment["text_hash"] for segment in payload["segments"]]
+            queued = jobs.enqueue(conn, jobs.KIND_CAPTURE, scope, payload,
+                                  idempotency_key=f"capture:{host}:{session_id}:{scope}:{cursor}:{payload['input_version']}:{materials.digest(hashes)}")
+            if queued.get("error"):
+                return {**queued, "job_ids": job_ids}
+            if queued["created"] or queued.get("state") in ("queued", "preparing"):
+                materials.register_manifest(conn, queued["job_id"], payload)
+                jobs.set_preparing(conn, queued["job_id"])
+                jobs.set_awaiting(conn, queued["job_id"], len(payload["segments"]))
+            job_ids.append(queued["job_id"])
+            seen.update(hashes)
         # 这里只推进已持久入队游标；settled 仍由物化服务维护。
         _save_capture_checkpoint(conn, host, session_id, scope, coverage, events, source_kind)
-        return {"job_ids": [queued["job_id"]], "capture_status": "queued", "captured_events": len(delta)}
+        return {"job_ids": job_ids, "capture_status": "queued" if job_ids else "no_delta", "captured_events": len(delta)}
     finally:
         conn.close()
 
@@ -233,7 +243,7 @@ def pending_notifications(conn, job_ids, notices: dict, *, force: bool = False) 
     return notifications
 
 
-def handle(data: dict, *, event: str, style: str) -> dict:
+def handle(data: dict, *, event: str, style: str, defer_capture: bool = False) -> dict:
     cfg = config.load_config()
     if not cfg["inflight"]["enabled"] or not cfg.get("hooks", {}).get("enabled", True):
         return {"status": "disabled"}
@@ -279,7 +289,11 @@ def handle(data: dict, *, event: str, style: str) -> dict:
         last_at = row[2] if row else None
         count = conn.execute("SELECT COUNT(*) FROM context_events WHERE host_profile=? AND session_id=? "
                              "AND trigger IN ('observe','new_failure')", (host, session)).fetchone()[0]
-        captured_count = json.loads(row[3]).get("_hook_capture", {}).get("event_count", 0) if row else 0
+        coverage = json.loads(row[3]) if row else {}
+        requested = coverage.get("_hook_requested", {})
+        captured_count = max(coverage.get("_hook_capture", {}).get("event_count", 0),
+                             requested.get("event_count", 0))
+        last_at = max(last_at or "", requested.get("at", "")) or None
         if not last_at:
             last_at = conn.execute("SELECT MIN(created_at) FROM context_events WHERE host_profile=? AND session_id=?",
                                    (host, session)).fetchone()[0]
@@ -354,7 +368,11 @@ def handle(data: dict, *, event: str, style: str) -> dict:
     transcript = data.get("transcript_path") or data.get("transcriptPath")
     if due and cfg["inflight"]["capture_enabled"]:
         try:
-            captured = capture_increment(repo, session, transcript, scope, host)
+            if defer_capture:
+                from .checkpoint_queue import enqueue
+                captured = enqueue(repo, session, transcript, scope, host)
+            else:
+                captured = capture_increment(repo, session, transcript, scope, host)
         except (OSError, ValueError, TypeError) as exc:
             captured = {"error": "MATERIAL_PARSE_FAILED", "capture_status": "failed", "failure_class": type(exc).__name__}
         pending = result.get("job_ids", [])
@@ -370,6 +388,9 @@ def handle(data: dict, *, event: str, style: str) -> dict:
         current = conn.execute("SELECT coverage_json FROM context_sessions WHERE host_profile=? AND session_id=?",
                                (host, session)).fetchone()
         coverage = json.loads(current[0]) if current else {}
+        if result.get("checkpoint_id"):
+            coverage["_hook_requested"] = {"event_count": count + 1,
+                                          "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
         if result["needs_query_plan"]:
             last = coverage.get("_hook_plan_notice", "")
             now = datetime.now(timezone.utc)

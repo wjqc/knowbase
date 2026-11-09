@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import pytest
 
 from knowbase import config, hooks, index, materials
-from knowbase.adapters import host_events
+from knowbase.adapters import checkpoint_queue, host_events
 from knowbase.adapters.normalizer import NormalizedEvent
 
 
@@ -42,9 +42,36 @@ def test_stop_keeps_business_rule_queue_without_continuing_conversation(memory_r
     monkeypatch.setattr(hooks.sys,'stdin',io.StringIO(json.dumps({'session_id':'business','transcript_path':str(transcript)})))
     hooks.cmd_stop('zcode');assert capsys.readouterr().out==''
     conn=index.connect(memory_repo)
-    job=conn.execute('SELECT job_id FROM jobs').fetchone()
+    assert conn.execute("SELECT kind FROM jobs").fetchone()[0] == "capture_checkpoint"
+    assert checkpoint_queue.run_due(memory_repo, conn, config.load_config(), lambda: True)["processed"] == 1
+    job=conn.execute("SELECT job_id FROM jobs WHERE kind='capture'").fetchone()
     assert job and '已结算订单' in materials.payload_for_job(conn,job[0])['segments'][0]['text']
     conn.close()
+
+
+def test_large_legacy_stop_defers_parsing_and_preserves_late_material(memory_repo, tmp_path, monkeypatch, capsys):
+    transcript = tmp_path / "large.jsonl"
+    with transcript.open("w", encoding="utf-8") as out:
+        out.write('{"type":"tool_use","name":"Bash","input":{"command":"test"}}\n')
+        for i in range(12):
+            out.write(json.dumps({"role": "assistant", "text": chr(65 + i) * 900_000}) + "\n")
+        out.write('{"role":"user","text":"业务规则：已支付订单禁止撤回。"}\n')
+    assert transcript.stat().st_size > 10 * 1024 * 1024
+    monkeypatch.setattr(hooks.sys, "stdin", io.StringIO(json.dumps({
+        "session_id": "legacy-large", "transcript_path": str(transcript)})))
+    hooks.cmd_stop("zcode")
+    assert capsys.readouterr() == ("", "")
+    conn = index.connect(memory_repo)
+    try:
+        assert conn.execute("SELECT kind FROM jobs").fetchall() == [("capture_checkpoint",)]
+        result = checkpoint_queue.run_due(memory_repo, conn, config.load_config(), lambda: True)
+        job_ids = result["results"][0]["job_ids"]
+        assert len(job_ids) > 1
+        payload = materials.payload_for_job(conn, job_ids[-1])
+        assert payload["hook_capture"] is True
+        assert any("禁止撤回" in s["text"] for s in payload["segments"])
+    finally:
+        conn.close()
 
 
 def test_auto_capture_filters_evaluation_and_operational_read_but_keeps_rule(memory_repo,tmp_path):
@@ -139,6 +166,8 @@ def test_formal_cli_two_stops_do_not_resume_model_but_persist_rule(memory_repo,t
         result=subprocess.run(args,input=json.dumps(payload),text=True,capture_output=True,env=env,timeout=15)
         assert result.returncode==0 and result.stdout=='' and result.stderr==''
     conn=index.connect(memory_repo)
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='capture'").fetchone()[0]==0
+    assert checkpoint_queue.run_due(memory_repo, conn, config.load_config(), lambda: True)["processed"] >= 1
     assert conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='capture'").fetchone()[0]==1
     conn.close()
 

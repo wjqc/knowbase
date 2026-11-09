@@ -31,6 +31,7 @@ TASK_DEFS = (
     ("archive_sweep", 86400, "自动归档/候选清理"),
     ("conflict_recheck", 86400, "冲突复验"),
     ("vector_maintenance", 30, "可选向量维护"),
+    ("capture_checkpoint", 5, "读取宿主检查点并入队采集材料"),
     ("distillation", 60, "自动提炼（授权与探针条件满足时运行）"),
     ("hook_capture", 10, "Hook 实时成卡（Path B 第一批，检查点后短时处理）"),
     ("lifecycle_correlate", 300, "待归因 run 自动归因（W1-2，默认开）"),
@@ -157,7 +158,8 @@ def due_tasks(conn, now: str = "") -> list[dict]:
     now = now or _now()
     rows = conn.execute(
         "SELECT task_key,kind,next_run_at,last_success_at,last_error FROM automation_schedule"
-        " WHERE next_run_at<=? ORDER BY next_run_at", (now,)).fetchall()
+        " WHERE next_run_at<=? ORDER BY CASE kind WHEN 'capture_checkpoint' THEN 0 "
+        "WHEN 'hook_capture' THEN 1 ELSE 2 END, next_run_at", (now,)).fetchall()
     return [{"task_key": r[0], "kind": r[1], "next_run_at": r[2],
              "last_success_at": r[3], "last_error": r[4]} for r in rows]
 
@@ -378,6 +380,11 @@ def _h_distillation(repo, conn, cfg) -> dict:
     return run_due(repo,cfg,guard=cfg.get('_lease_valid',lambda:False))
 
 
+def _h_capture_checkpoint(repo, conn, cfg) -> dict:
+    from ..adapters.checkpoint_queue import run_due
+    return run_due(repo, conn, cfg, cfg["_lease_valid"])
+
+
 def _h_hook_capture(repo, conn, cfg) -> dict:
     """Path B 第一批：Hook 实时成卡。检查点入队的带标记 capture 任务由本任务
     在 10 秒节律内短时处理（领取 → Hook 提示词模型调用 → 提交 → 结算，复用
@@ -449,6 +456,7 @@ _HANDLERS = {
     "conflict_recheck": _h_conflict_recheck,
     "vector_maintenance": _h_vector_maintenance,
     "distillation": _h_distillation,
+    "capture_checkpoint": _h_capture_checkpoint,
     "hook_capture": _h_hook_capture,
     "lifecycle_correlate": _h_lifecycle_correlate,
     "lifecycle_recompute": _h_lifecycle_recompute,

@@ -1119,3 +1119,8 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - 测试隔离根因（8→1）：宿主 CLAUDE/ZCODE_PROJECT_DIR 经 _infer_scope（11-04 自动绑定新增 ZCODE 入口）泄漏进 pytest，hook_noise stop 捕获 SCOPE_UNRESOLVED 早退、unified_search scope=global 断言失败；沙箱不泄漏故过、本机泄漏故挂——"失败集合随宿主漂移"的实体。修法 conftest autouse delenv（不再依赖 -u 纪律）。沙箱记录的 5 个基线失败在本机单跑/全量均不复现（同族环境漂移）；test_program_updates_integration 本机既有失败（更新器子进程，干净 e8ab132 同错）另行立项。
 - 回归：新增 5 文件 16 项全过；受影响既有 52 项全过；全量 1180 passed/1 failed/1 skipped（一次性 uv 离线 editable venv，故意保留泄漏变量验证隔离生效）。
 - 边界：verified 晋升仍需任务身份设计（unknown 键诚实保留，L3 反证门 quarantine 路径已通并有测试）；export 无增量水位；wide_recall 重定向在 server 相似卡/materials 两处直调同样未跟随（待语义决策）；运行时未部署（待审后 wheel+kill worker+MCP 重连）。交付明细见 docs/implementation/lifecycle-v2/W1-02_W1-07/delivery.md，缺口勘误（W4-5 已至 v34、config 已恢复）见 reports/knowbase-lifecycle-capability-gaps.md。
+
+## 2026-11-09 Hook 修复
+
+- 开始修复已确认的源码缺陷及本机运行阻断，现有未跟踪资料保留。
+- 源码修复完成：Hook 登记引用、worker 分批采集、冲突标题进待审、自动路径独占分派；全量 1197 passed / 1 skipped，最终定向 28 passed。

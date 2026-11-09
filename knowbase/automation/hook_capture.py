@@ -1,9 +1,8 @@
 """Hook 实时成卡（Path B 第一批）：检查点后短时处理，复用提炼管线。
 
 设计（决策简报 reports/knowbase-hook-path-a-b-decision-brief.md §建议的第一批切分）：
-- 触发：检查点入队的 capture 任务带 hook_capture 标记（capture_increment 置标），
-  worker 新任务 hook_capture 每 10 秒取标记任务处理——不阻塞宿主，不另起队列
-  （队列仍是 jobs 表），不走 60 秒提炼周期。
+- 触发：worker 解析检查点并为 capture 任务置 hook_capture 标记。标记作业
+  由 hook_capture 独占处理；10 秒是到期检查间隔，完成时间取决于积压和执行器。
 - 执行：复用 distillation._one（领取 → 建批 → 分页 → 预算 → 模型 → 提交 →
   结算），只换提示词（HOOK_CAPTURE_INSTRUCTIONS，允许四种 action）与提交前
   的确定性规范化（normalize_hook_candidates）。
@@ -16,9 +15,8 @@
      （模型抄来的值不可信；自动执行器被禁 update/link_existing 正是因为它
      跨进程无法可靠持有版本号——Hook 路径在同一进程内、提交前一刻现读，
      故可用）；
-  3. 标题查重改道：create 候选标题与现存卡相似度 ≥0.82（与写层同一阈值）
-     时改走 link_existing（命中 active 非 reference 卡）或 review（命中
-     reference/非 active 卡），绝不让写层 DUPLICATE 报错把任务打回重试循环。
+  3. 标题查重改道：create 候选标题与现存卡相似度 ≥0.82 时改走 review。
+     标题相似不能证明内容重复，尤其不能覆盖相反结论。
 - 红线：不动 quarantine 与 verified 规则。update 的目标卡为 verified 时改走
   review——writer.update 会把 verified 卡改版降权回 once，自动路径不替
   verified 卡做这个决定；link_existing 不改目标卡本身，可正常链接 verified 卡。
@@ -93,8 +91,7 @@ def normalize_hook_candidates(repo, candidates, scope):
     - update/link_existing：目标卡现读；不存在或非 active → review；
       update 的 verified 目标 → review（自动路径不替 verified 卡改版降权）；
       通过的用现读版本号覆盖模型抄来的期望版本号。
-    - create：标题相似度 ≥0.82 命中现存 active 非 reference 卡 → link_existing
-      （目标即命中卡，版本号现读）；命中 reference/非 active 卡 → review。
+    - create：标题相似度 ≥0.82 只触发 review；标题不能证明内容等价。
     不改 quarantine / verified 规则本身，只决定自动路径的出口。
     """
     if not isinstance(candidates, list):
@@ -117,41 +114,29 @@ def normalize_hook_candidates(repo, candidates, scope):
                     continue
                 candidate["expected_governance_revision"] = _compute_governance_revision(target)
         elif action == "create":
-            sim = store.find_similar(repo, candidate.get("title", ""), scope=scope)
-            if not sim:
-                continue
-            _ratio, smeta, _spath = sim
-            if smeta.get("status") == "active" and smeta.get("type") != "reference":
-                target, body, _path = store.load(repo, smeta["id"])
-                if not target:
-                    candidate["action"] = "review"
-                    _note(candidate, "Hook 规范化：标题相似卡无法读取，改走 review")
-                    continue
-                candidate["action"] = "link_existing"
-                candidate["target_id"] = smeta["id"]
-                candidate["expected_content_revision"] = _compute_revision(target, body)
-                _note(candidate, "Hook 规范化：标题与现存卡相似，改走 link_existing")
-            else:
+            if store.find_similar(repo, candidate.get("title", ""), scope=scope):
                 candidate["action"] = "review"
-                _note(candidate, "Hook 规范化：标题与现存 reference/非 active 卡相似，改走 review")
+                _note(candidate, "Hook 规范化：标题相似，内容可能不同或冲突，待审核")
     return candidates
 
 
 def pending_hook_jobs(conn, allowed_scopes, limit=2):
-    """待 Hook 实时成卡的任务：带 hook_capture 标记的 awaiting_agent capture 任务。
+    """带 hook_capture 标记的待领取和到期重试作业。
 
     标记由 capture_increment 在入队 payload 置入（input_json 顶层键）；
-    未带标记的历史任务与 legacy 路径任务不在此列，仍走提炼。
+    未带标记的历史任务与显式 MCP 采集仍走普通提炼。
     """
     if not allowed_scopes:
         return []
     placeholders = ",".join("?" * len(allowed_scopes))
+    from .distillation import HOOK_CAPTURE_FLAG, now
     rows = conn.execute(
-        "SELECT j.job_id FROM jobs j WHERE j.kind='capture' AND j.state='awaiting_agent' "
-        f"AND j.scope IN ({placeholders}) AND json_extract((SELECT s.input_json FROM job_spool s "
-        "WHERE s.job_id=j.job_id ORDER BY s.rowid DESC LIMIT 1),'$.hook_capture')=1 "
+        "SELECT j.job_id FROM jobs j WHERE j.kind='capture' "
+        "AND (j.state='awaiting_agent' OR (j.state='retry_wait' AND j.next_run_at<=?) "
+        "OR (j.state='claimed' AND j.lease_until<=?)) "
+        f"AND j.scope IN ({placeholders}) AND {HOOK_CAPTURE_FLAG}=1 "
         "ORDER BY j.updated_at, j.job_id LIMIT ?",
-        [*allowed_scopes, int(limit)]).fetchall()
+        [now(), now(), *allowed_scopes, int(limit)]).fetchall()
     return [r[0] for r in rows]
 
 

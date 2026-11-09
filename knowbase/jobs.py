@@ -20,6 +20,7 @@ from . import migrations
 
 KIND_EMBED = "embedding_refresh"
 KIND_CAPTURE = "capture"       # 对话沉淀
+KIND_CHECKPOINT = "capture_checkpoint"  # 仅 worker 可处理的宿主材料引用
 KIND_EXTRACT = "extract"       # 文档导入提炼
 
 # P3 维护任务 kind：与 capture/extract/embedding 明确分派。公开
@@ -145,8 +146,9 @@ def enqueue(conn, kind: str, scope: str, payload: dict, *,
                     "result": existing[2], "error": existing[3]}
         if not maintenance:
             limit = max(0, int(config.load_config()["inflight"]["max_pending_jobs"]))
-            pending = conn.execute("SELECT COUNT(*) FROM jobs WHERE state NOT IN "
-                                   "('succeeded','no_candidate','needs_review','failed')").fetchone()[0]
+            pending = conn.execute("SELECT COUNT(*) FROM jobs WHERE (kind=?)=? AND state NOT IN "
+                                   "('succeeded','no_candidate','needs_review','failed')",
+                                   (KIND_CHECKPOINT, kind == KIND_CHECKPOINT)).fetchone()[0]
             if pending >= limit:
                 conn.rollback()
                 record_capture_gap(conn, scope, note="backlog_full")

@@ -339,6 +339,12 @@ def _one(repo, conn, job_id, options, policy, guard, *, instructions=None,
         stop.set();heartbeat.join(timeout=2)
 
 
+HOOK_CAPTURE_FLAG = (
+    "COALESCE(json_extract((SELECT s.input_json FROM job_spool s "
+    "WHERE s.job_id=j.job_id ORDER BY s.rowid DESC LIMIT 1),'$.hook_capture'),0)"
+)
+
+
 def run_due(repo, cfg=None, *, guard=lambda: True):
     cfg = cfg or config.load_config(); options, reason = ready_executor(cfg)
     if options is None and reason=='verified_executor_required':
@@ -381,7 +387,8 @@ def run_due(repo, cfg=None, *, guard=lambda: True):
             materialize.recover(repo,conn,job_id)
         allowed = list(policy.get('allowed_scopes', []))
         if not all(isinstance(s,str) and s for s in allowed): return {'blocked':'invalid_scope_authorization'}
-        sql = "SELECT job_id FROM jobs WHERE kind IN ('capture','extract') AND scope IN ("+','.join('?' for _ in allowed)+") "
+        sql = "SELECT job_id FROM jobs j WHERE kind IN ('capture','extract') AND scope IN ("+','.join('?' for _ in allowed)+") "
+        sql += f"AND (kind!='capture' OR {HOOK_CAPTURE_FLAG}!=1) "
         sql += "AND (state='awaiting_agent' OR (state='retry_wait' AND next_run_at<=?) OR (state='claimed' AND lease_until<=?)) ORDER BY updated_at,scope,job_id LIMIT ?"
         rows = conn.execute(sql, [*allowed,now(),now(),max(1,min(10,int(policy.get('max_batches',2))))]).fetchall()
         for (job_id,) in rows:
