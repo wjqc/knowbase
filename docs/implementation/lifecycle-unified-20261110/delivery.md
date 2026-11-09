@@ -10,7 +10,7 @@
 | T0 隔离演练 | 合成（隔离库） | ✅ 通过 | §2.2（快照副本：2 失败补回执、spool 155→74、九项账本不变、二次执行全零） |
 | T0 生产执行 | 生产 | ✅ **已执行**（2026-11-10 01:14） | 备份 `~/.knowbase/backups/t0-retire-20261110-011127/`；8 条失败 checkpoint 补 retired 回执、spool 162→75（8+79）、candidates/feedback/evidence/task_outcomes 不变、二次执行全零 |
 | T1 基线链路 | 合成（stdio MCP 真实契约，隔离库） | ✅ 4/4 | tests/test_t1_trae_baseline_chain.py（分页/无候选/重放防重/无模型证据） |
-| T1 真实 Trae | 真实宿主 | 🔶 **接线层已验证**；GUI 两条任务待用户 | Trae 三 hook（SessionStart/UserPromptSubmit/Stop）在 rc10 全部 exit 0、探针检查点 worker 正常消化（no_delta）；GUI 注入被环境输入守卫拦截（窗口不在在屏列表），见 §6.2 附注 |
+| T1 真实 Trae | 真实宿主 | ✅ **以替代口径关闭**（2026-11-10 裁决） | Trae 接线层在 rc10 实证（三 hook exit 0、探针检查点消化、桥→rc10）；真实宿主全链由 deploy-verify 在生产 rc10 完成同构两条任务（含查重门/本机路径 lint 实拦，P-b4506b0ae008）。Trae GUI 注入被环境守卫阻断（onscreen:false，四类路径全拒），GUI 补跑保留为开放加分项（提示词见对话记录） |
 | T2 类型分流合并 | 代码+回归 | ✅ | §3.1；全量 1221 绿 |
 | T2 验证绑定修复 | 代码+回归 | ✅ | §3.2（执行戳+执行记录+三重校验） |
 | T3 宿主流程收敛 | 代码+文档 | ✅ | §4（有界尾持久化 4/4；trae-rules.md/MCP 描述已收敛） |
@@ -92,6 +92,8 @@
 > 2026-11-10 01:11–01:16 用户批准后执行：§6.1 生产清理 ✅、§6.3 提交部署 ✅；§6.2 Trae 接线层 ✅、GUI 两条任务因环境输入守卫（Trae 窗口不在在屏列表，三类注入路径全拒）待用户在 Trae 界面完成。
 >
 > **01:26 部署验收补充（deploy-verify 标识，非 Trae）**：rc10 生产全链两条任务通过——任务 A：capture→claim→查重门 NEEDS_REASSESSMENT→逐卡真读 10 张相似卡→duplicate_evaluation 重提交→succeeded（saved_active=1）→读回（P-b4506b0ae008）；任务 B：search 命中→context→read→use(adopted)→feedback(helpful, task_outcome_id=deploy-verify-task-b)→update 修订（修订清验证 once）。生产轨迹：knowledge_uses host=deploy-verify 两条；内容库自动提交 3b4ef0e/8645097。新语义防线（本机路径 lint 拒绝、NEEDS_REASSESSMENT 查重门）在真实链路中各拦截一次并按协议放行。
+>
+> **01:40 收口裁决（按用户指令文本列明的替代分支执行）**：接受 deploy-verify 生产全链证据替代 Trae GUI 复验，计划关闭。依据：①Trae 专属接线（三 hook/桥/worker 消化）已在 rc10 单独实证；②真实宿主行为验证由 deploy-verify 在生产 rc10 同构完成；③Trae GUI 注入为环境级硬阻断（onscreen:false，应用点击/底层事件/键盘/菜单 AX 四类全拒），非产品缺陷；④未伪造任何 host_profile=trae 轨迹。遗留开放项（不阻断）：用户日后在 Trae 界面补跑两条提示词作加分验证。
 
 ### 6.1 T0 生产清理 runbook
 
