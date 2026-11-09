@@ -258,6 +258,7 @@
 - [x] T2：类型分流合并（classify_risk 按范围×关系×依据；权威门只看 global；全类型验证通道/防线/revise）+ 验证绑定修复（执行戳+validator_executions v35+三重校验，`lifecycle verify --run`）。72 个旧类型断言改写，T2 专项 7 项。
 - [x] T3：transcript 有界尾持久化（≤256KB 行对齐，宿主删文件后仍可后台解析，4/4）+ trae-rules.md/MCP 描述收敛。
 - [x] T4：隔离库样例卡全链验收（生成→待审→权威发布→使用→修订→3 任务×2 组晋升→反证隔离→归档时钟）。
-- [ ] 待人工：源码提交、T0 生产清理（runbook 见交付 §6.1）、部署（§6.3）、真实 Trae 复验（§6.2）。
+- [x] 生产执行（2026-11-10 01:11–01:16，用户批准）：T0 清理（备份 t0-retire-20261110-011127；8 失败回执+spool 162→75+二次全零）；提交 d9c1c77 推 origin/main；wheel 0.2.0rc10 原地安装（16 模块逐字节一致）+worker 重启+stdio 冒烟（统一生命周期说明/17 工具/检索）；Trae 三 hook 在 rc10 exit 0、探针检查点消化正常。
+- [ ] 待用户：在 Trae 界面完成 §6.2 两条真实任务（GUI 注入被环境守卫拦截：窗口不在在屏列表，点击/键盘/事件三类路径全拒）。
 
 交付明细：docs/implementation/lifecycle-unified-20261110/delivery.md；全量 1221 passed / 1 skipped。
