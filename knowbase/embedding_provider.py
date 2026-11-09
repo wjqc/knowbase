@@ -158,7 +158,8 @@ class OpenAICompatProvider:
                 raise ProviderError("auth_missing")
             headers["Authorization"] = "Bearer " + key
         req = urllib.request.Request(self.root+route,
-            data=json.dumps(payload).encode() if payload is not None else None, headers=headers)
+            data=json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            if payload is not None else None, headers=headers)
         if not _NETWORK_SLOTS.acquire(blocking=False):
             raise ProviderError("transport_busy")
         done = queue.Queue(maxsize=1)

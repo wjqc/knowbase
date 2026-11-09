@@ -34,7 +34,8 @@ def test_intranet_text_uses_explicit_chat_protocol_on_local_fixture_only():
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*a):pass
         def do_POST(self):
-            seen.append((self.path,json.loads(self.rfile.read(int(self.headers['Content-Length'])))))
+            data=self.rfile.read(int(self.headers['Content-Length']))
+            seen.append((self.path,json.loads(data),data))
             raw=json.dumps({'model':'fixture','choices':[{'message':{'content':'{"candidates":[],"segment_results":[]}'}}],
                             'usage':{'prompt_tokens':11,'completion_tokens':4}}).encode()
             self.send_response(200);self.end_headers();self.wfile.write(raw)
@@ -44,10 +45,13 @@ def test_intranet_text_uses_explicit_chat_protocol_on_local_fixture_only():
         runner=IntranetTextRunner({'kind':'intranet_text','protocol':'openai_chat_completions',
             'endpoint':f'http://127.0.0.1:{server.server_port}/v1','model':'fixture',
             'allowed_hosts':['127.0.0.1'],'auth_kind':'none','allow_insecure_http':True})
-        result=runner.run_text(DistillationRequest('fixture','orders','fixture'),'synthetic text',[])
+        material='已结算订单禁止撤回。'
+        result=runner.run_text(DistillationRequest('fixture','orders','fixture'),material,[])
         assert result['usage']['prompt_tokens']==11
         assert seen[0][0]=='/v1/chat/completions' and seen[0][1]['model']=='fixture'
         assert 'tools' not in seen[0][1]
+        assert material.encode('utf-8') in seen[0][2]
+        assert json.loads(seen[0][1]['messages'][0]['content'])['materials']==material
     finally:server.shutdown();server.server_close();thread.join()
 
 
