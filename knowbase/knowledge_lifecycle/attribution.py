@@ -176,7 +176,7 @@ def record_execution(conn, *, memory_id: str, content_revision: str,
     execution_id = hashlib.sha256(
         f"{memory_id}:{artifact_hash}".encode("utf-8")).hexdigest()[:20]
     conn.execute(
-        "INSERT OR REPLACE INTO validator_executions"
+        "INSERT OR IGNORE INTO validator_executions"
         "(execution_id,memory_id,content_revision,artifact_hash,run_id,validator_id,executed_at)"
         " VALUES(?,?,?,?,?,?,?)",
         (execution_id, memory_id, content_revision, artifact_hash,
@@ -225,7 +225,7 @@ def verify_execution(conn, repo, *, run_id, validator_id, report) -> dict:
                           f"@{stamp.get('content_revision')}, "
                           f"not {memory_id}@{revision}"}
     rec = conn.execute(
-        "SELECT content_revision FROM validator_executions WHERE memory_id=? AND artifact_hash=?",
+        "SELECT content_revision,run_id,validator_id FROM validator_executions WHERE memory_id=? AND artifact_hash=?",
         (memory_id, artifact_hash)).fetchone()
     if not rec:
         return {"error": "EXECUTION_RECORD_MISSING",
@@ -235,10 +235,17 @@ def verify_execution(conn, repo, *, run_id, validator_id, report) -> dict:
         return {"error": "STALE_EXECUTION_RECORD",
                 "detail": f"execution recorded for revision {rec[0]}, "
                           f"card is now {revision}"}
+    if (rec[1], rec[2]) != (run_id or "", validator_id) or (
+            stamp.get("run_id") or "", stamp.get("validator_id")) != (rec[1], rec[2]):
+        return {"error": "EXECUTION_IDENTITY_MISMATCH",
+                "detail": "report, recorded execution, task run and validator must match"}
     from .. import store
     meta, body, _ = store.load(repo, memory_id)
     if not meta:
         return {"error": "NOT_FOUND"}
+    from ..mutations import _compute_revision
+    if _compute_revision(meta, body) != revision:
+        return {"error": "STALE_EXECUTION_RECORD", "detail": "card changed after validation ran"}
     claim_ids = {c.get("claim_id") for c in (meta.get("claims") or [])
                  if isinstance(c, dict)} or {"C-whole"}
     unknown_claims = [c.get("check_id") for c in checks

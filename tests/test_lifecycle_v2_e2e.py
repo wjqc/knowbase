@@ -136,6 +136,8 @@ def test_s6_dependency_change_restricts_then_revives_via_revision(memory_repo):
                     "mapping": "preserved",
                     "justification_ref": "env:example-lib-2.1.0"}])
     assert not proposal.get("error"), proposal
+    from test_v2_06_07_08_content_loop import seed_evidence
+    seed_evidence(conn, mid, base)
     check = validation.validate_change(conn, memory_repo, proposal["change_id"])
     assert check["result"] == "pass", check  # 旧证据作为回归样本在位
     published = publication.publish(memory_repo, conn, proposal["change_id"])

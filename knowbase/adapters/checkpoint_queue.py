@@ -1,11 +1,13 @@
-"""Persist host checkpoint references; only the worker reads transcript content."""
+"""Persist a bounded host checkpoint; the worker parses its transcript."""
 
 import json
 import sqlite3
+import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .. import index, jobs, materials
+from ..extraction.sanitizer import sanitize
 from . import host_events
 
 # 有界尾持久化（统一生命周期 T3）：宿主（如 ZCode）可能在 Stop 返回后删除
@@ -17,17 +19,22 @@ TAIL_BYTES = 256 * 1024
 def _read_tail(path: Path) -> str:
     """读取 transcript 尾部 ≤TAIL_BYTES；对齐到完整行（丢弃首个残行）。"""
     try:
-        size = path.stat().st_size
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode):
+            return ""
+        size = info.st_size
         with open(path, "rb") as f:
+            aligned = True
             if size > TAIL_BYTES:
-                f.seek(size - TAIL_BYTES)
-            data = f.read()
+                f.seek(size - TAIL_BYTES - 1)
+                aligned = f.read(1) == b"\n"
+            data = f.read(TAIL_BYTES)
     except OSError:
         return ""
-    text = data.decode("utf-8", errors="replace")
-    if size > TAIL_BYTES and "\n" in text:
-        text = text.split("\n", 1)[1]
-    return text
+    if not aligned:
+        data = data.partition(b"\n")[2]
+    return "".join(sanitize(line.rstrip("\r\n")) + "\n"
+                   for line in data.decode("utf-8", errors="replace").splitlines(keepends=True))
 
 
 def enqueue(repo, session_id, transcript, scope, host, *, project="", legacy=False, mid_session=False):
@@ -90,23 +97,25 @@ def _capture(repo, conn, scope, payload, cfg):
     flag = None
     tail_tmp = None
     try:
-        if payload["legacy"]:
-            from ..hooks import _infer_scope, _mid_capture_flag_path, _transcript_stats
-            if payload.get("mid_session"):
-                flag = _mid_capture_flag_path(session)
-                if flag.exists() or not cfg["hooks"].get("mid_session_capture", False):
-                    return {"capture_status": "no_delta", "job_ids": []}
-            if not Path(transcript).is_file():
-                # 宿主已删除临时 transcript：回退到入队时的有界尾持久化。
-                tail = payload.get("transcript_tail") or ""
-                if not tail:
-                    return {"error": "MATERIAL_PARSE_FAILED"}
+        if transcript and not Path(transcript).is_file():
+            tail = payload.get("transcript_tail") or ""
+            if tail:
                 import os
                 import tempfile
                 fd, tail_tmp = tempfile.mkstemp(prefix="knowbase-tail-", suffix=".jsonl")
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(tail)
                 transcript = tail_tmp
+            elif payload["legacy"]:
+                return {"error": "MATERIAL_PARSE_FAILED"}
+            else:
+                transcript = ""
+        if payload["legacy"]:
+            from ..hooks import _infer_scope, _mid_capture_flag_path, _transcript_stats
+            if payload.get("mid_session"):
+                flag = _mid_capture_flag_path(session)
+                if flag.exists() or not cfg["hooks"].get("mid_session_capture", False):
+                    return {"capture_status": "no_delta", "job_ids": []}
             stats = _transcript_stats(transcript)
             threshold = cfg["hooks"].get("mid_session_threshold", 5) if flag else 1
             if stats["work_ops"] < threshold or stats["memory_write"]:
@@ -118,9 +127,6 @@ def _capture(repo, conn, scope, payload, cfg):
             conn.execute("INSERT OR IGNORE INTO context_sessions(host_profile,session_id,scope,updated_at) VALUES(?,?,?,?)",
                          (host, session, scope, datetime.now(timezone.utc).isoformat(timespec="seconds")))
             conn.commit()
-        elif transcript and not Path(transcript).is_file():
-            # Compact/rotation may remove the file; the observation path remains valid.
-            transcript = ""
         result = host_events.capture_increment(repo, session, transcript, scope, host)
         if flag and result.get("job_ids") and not result.get("error"):
             flag.write_text("1", encoding="utf-8")

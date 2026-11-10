@@ -21,6 +21,7 @@ ENRICHED = BODY.replace("## 未知与待确认\n无。\n",
 
 
 def make_card(repo, title, body=BODY, **kw):
+    kw.setdefault("provenance", "受控回归样本 PR-7")
     result = writer.create(repo, "pitfall", title, body, scope="orders", **kw)
     assert not result.get("error"), result
     return result["entity_id"]
@@ -32,13 +33,14 @@ def head_of(conn, mid):
 
 
 def seed_evidence(conn, mid, revision, count=1):
-    """绑定旧版本的成功证据（回归样本）。"""
+    """Fixture: trusted evidence bound to the previous revision."""
+    from knowbase.knowledge_lifecycle.attribution import _record_event
+
     for i in range(count):
-        conn.execute(
-            "INSERT INTO feedback_events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (f"rc-{mid}-{i}", "", "x", mid, revision, f"use-{i}", f"tk-{i}",
-             f"out-{i}", "seed", "helpful", "version_task", "applied",
-             "", "", "{}", "{}", "2026-01-01T00:00:00"))
+        _record_event(conn, event_type="validation.completed", memory_id=mid,
+                      revision_algo="content-v1", content_revision=revision, level="L3",
+                      polarity="positive", run_id=f"rc-run-{i}", logical_task_key=f"task-{i}",
+                      independence_group=f"group-{i}", payload={}, trust_basis="registered-adapter")
     conn.commit()
 
 
@@ -324,7 +326,8 @@ def test_admission_authority_gate(memory_repo):
                for c in result["checks"])
     # 带权威出处 → pass，且只代表 validated/once。
     confirmed = admission.authority_confirm(
-        conn, memory_repo, "CH-x", std["entity_id"], head_of(conn, std["entity_id"]),
+        conn, memory_repo, changes.propose_new_card(conn, memory_repo, std["entity_id"])["change_id"],
+        std["entity_id"], head_of(conn, std["entity_id"]),
         authority_ref="需求 PRD-4 §2 负责人确认 2026-11-05")
     assert confirmed["result"] == "pass"
     # 项目内卡：结构与来源通过即 pass（低风险），无权威检查项、provenance

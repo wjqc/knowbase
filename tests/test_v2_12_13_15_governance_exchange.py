@@ -46,7 +46,7 @@ def trusted_l3(conn, repo, mid, revision, *, run_key, task_key, outcome="pass",
                              project_key="repo:orders", native_task_key=task_key,
                              native_run_key=run_key)
     from knowbase.knowledge_lifecycle import validators as lc_validators
-    artifact_hash = "a" * 64
+    artifact_hash = __import__("hashlib").sha256(f"{run_key}:{check}:{outcome}".encode()).hexdigest()
     # 统一生命周期绑定：执行时打戳 + 登记 validator_executions。
     attribution.record_execution(conn, memory_id=mid, content_revision=revision,
                                  artifact_hash=artifact_hash, run_id=run["run_id"],

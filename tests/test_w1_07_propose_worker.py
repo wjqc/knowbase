@@ -30,6 +30,7 @@ def _staging_card(repo):
     card = writer.create(repo, "bizrule", "自动提案规则", BODY, scope="orders")
     assert not card.get("error"), card
     assert card["staging"] is True, card
+    assert writer.update(repo, card["entity_id"], provenance="测试依据 PRD-4")["staging"]
     return card["entity_id"]
 
 

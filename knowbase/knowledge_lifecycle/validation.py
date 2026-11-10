@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 from .. import store
 from . import changes as _changes
-from . import contracts
+from . import admission, contracts, governance
 
 VALIDATOR_ID = "lifecycle-validation-v1"
 
@@ -80,13 +80,9 @@ def validate_change(conn, repo, change_id: str) -> dict:
             record("claim_coverage", "fail", ";".join(problems))
         else:
             record("claim_coverage", "pass", f"{len(old_claims)} old claims mapped")
-        evidence_rows = 0
-        for claim in old_claims:
-            n = conn.execute(
-                "SELECT COUNT(*) FROM feedback_events WHERE memory_id=? AND "
-                "content_revision=? AND state='applied'",
-                (head["memory_id"], head["content_revision"])).fetchone()[0]
-            evidence_rows += n
+        evidence_rows = sum(
+            event["polarity"] == "positive" and event["trust_basis"] == "registered-adapter"
+            for event in governance.effective_evidence(conn, head["memory_id"], head["content_revision"]))
         # R0/R1：无旧样本记 unknown 不阻断——可准入为 once，不自动 verified。
         # R2/R3（修改 verified/多卡/危险动作）：缺回归样本即 fail。
         if evidence_rows:
@@ -117,23 +113,26 @@ def validate_change(conn, repo, change_id: str) -> dict:
                 frozen_ok = False
         record("output_frozen", "pass" if frozen_ok else "fail",
                f"{len(outputs)} outputs hash-verified")
-
-    # risk_authority：统一规则——共享范围（R3）变更需权威引用，类型不参与。
-    needs_authority = change["risk"] == "R3"
-    authority_ref = ""
-    if needs_authority:
-        # 权威引用由 admission 记录；验证引擎只核对是否存在对 change 的
-        # authority 确认（绑定 change_id + 版本）。
+    # A confirmation must cover the exact output revision, not the old head or a different card.
+    from ..mutations import _compute_revision
+    authority_refs = []
+    for out in outputs:
+        if out["disposition"] != "active":
+            continue
         row = conn.execute(
             "SELECT authority_ref FROM admission_reports WHERE change_id=? AND "
-            "result='pass' AND authority_ref!='' ORDER BY created_at DESC LIMIT 1",
-            (change_id,)).fetchone()
-        authority_ref = row[0] if row else ""
-        record("risk_authority", "pass" if authority_ref else "fail",
-               "authority confirmation bound to this change" if authority_ref
-               else "R3 (global scope) change requires authority confirmation")
-    else:
-        record("risk_authority", "pass", "not required for this risk level")
+            "memory_id=? AND content_revision=? AND validator_id=? "
+            "AND result='pass' AND authority_ref!='' ORDER BY created_at DESC LIMIT 1",
+            (change_id, out["memory_id"], _compute_revision(out["meta"], out["body"]),
+             admission.ADMISSION_VALIDATOR_ID)).fetchone()
+        if row:
+            authority_refs.append(row[0])
+        basis = bool(row) or admission.has_content_basis(out["meta"])
+        record("output_basis", "pass" if basis else "unknown", out["memory_id"])
+        if change["risk"] == "R3" or out["meta"].get("scope") == "global":
+            record("risk_authority", "pass" if row else "fail",
+                   f"{out['memory_id']}: output revision requires authority confirmation")
+    authority_ref = "; ".join(dict.fromkeys(authority_refs))
 
     report_id = "AR-" + hashlib.sha256(
         contracts.canonical_json({"c": change_id, "v": VALIDATOR_ID,

@@ -271,8 +271,8 @@ def cmd_archive(mid: str, expect_revision: str = "") -> int:
                      expect_revision=expect_revision)
 
 
-def cmd_promote(mid: str) -> int:
-    """人工激活 staging 提案：等价于审过的 git mv，等价于通过状态机入口的治理动作。"""
+def cmd_promote(mid: str, authority_ref: str = "") -> int:
+    """人工激活 staging 卡，使用与提案发布相同的内容和范围准入规则。"""
     rp = config.repo_path()
     cfg = config.load_config()
     with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
@@ -283,10 +283,25 @@ def cmd_promote(mid: str) -> int:
         if path.parent.name != "staging":
             print(f"错误：{mid} 不在 staging/（无需 promote）")
             return 1
+        from .knowledge_lifecycle.admission import evaluate_admission
+        from .mutations import _compute_revision
+        check_conn = index.connect(rp)
+        try:
+            admission = evaluate_admission(check_conn, rp, mid, _compute_revision(meta, body),
+                                           authority_ref=authority_ref)
+        finally:
+            check_conn.close()
+        if admission.get("result") != "pass":
+            print("错误：准入未通过，请补充依据；共享范围需 --authority-ref。")
+            print(json.dumps(admission, ensure_ascii=False))
+            return 1
         dtype = meta.get("type")
         target = store.mem_path(rp, dtype, mid)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(path), str(target))
+        meta.update(status="active", confidence="once", helpful_count=0, unhelpful_count=0)
+        meta.pop("last_verified", None)
+        meta.pop("verified_content_revision", None)
         meta["updated"] = date.today().isoformat()
         target.write_text(store.render(meta, body), encoding="utf-8")
         conn = index.connect(rp)
@@ -760,10 +775,10 @@ def cmd_jobs_expire() -> int:
     return 0
 
 
-def cmd_jobs_retire(cutoff: str, spool_days: int, execute: bool) -> int:
+def cmd_jobs_retire(cutoff: str, spool_days: int | None, execute: bool) -> int:
     """T0 旧积压盘点/一次性撤销。默认只读清单；--execute 才写库。
 
-    执行前须先备份数据库；候选、staging、needs_review 与使用/证据记录一律不动。
+    执行前须先备份数据库；已落卡项、staging 与使用/证据记录不动。
     """
     rp = config.repo_path()
     conn = jobs.connect(rp)
@@ -776,7 +791,7 @@ def cmd_jobs_retire(cutoff: str, spool_days: int, execute: bool) -> int:
             return 0
         receipt = jobs.retire_backlog(conn, cutoff=cutoff, spool_days=spool_days)
         print(json.dumps(receipt, ensure_ascii=False, indent=2))
-        return 0
+        return 1 if receipt.get("error") else 0
     finally:
         conn.close()
 
@@ -1028,6 +1043,7 @@ def _parse_args(argv=None):
     p_arch.add_argument("--expect-revision", default="", help="期望的 governance_revision（可选，用于 CAS 检查）")
     p_pro = sub.add_parser("promote", help="激活 staging 提案")
     p_pro.add_argument("id")
+    p_pro.add_argument("--authority-ref", default="", help="可核对的人工审核依据；共享范围必填")
     p_rev = sub.add_parser("revise", help="人工修订已生效的标准/偏好/业务规则")
     p_rev.add_argument("id")
     p_rev.add_argument("--body-file", required=True)
@@ -1075,9 +1091,9 @@ def _parse_args(argv=None):
     jobs_sub.add_parser("expire", help="回收过期租约")
     p_jobs_retire = jobs_sub.add_parser(
         "retire-backlog", help="T0 旧积压盘点/一次性撤销（默认只读，--execute 才写库）")
-    p_jobs_retire.add_argument("--cutoff", default="", help="未终态任务的纳入截止时间（ISO）；已失败任务不受此限")
-    p_jobs_retire.add_argument("--spool-days", type=int, default=7,
-                               help="终态任务 spool 正文保留天数（与 retention 一致，默认 7）")
+    p_jobs_retire.add_argument("--cutoff", default="", help="积压纳入截止时间（ISO 8601），同样约束失败项")
+    p_jobs_retire.add_argument("--spool-days", type=int, default=None,
+                               help="显式启用终态材料保留期清理；默认不清理其他终态正文")
     p_jobs_retire.add_argument("--execute", action="store_true",
                                help="实际执行撤销与 spool 清理；执行前须先备份")
     sub.add_parser("archive-sweep", help="自动归档 stale 满期且近 X 天内无成功复验证据的卡片（Phase 1）")
@@ -1448,7 +1464,7 @@ def _dispatch(args):
     if args.cmd == "archive":
         return cmd_archive(args.id, expect_revision=getattr(args, "expect_revision", ""))
     if args.cmd == "promote":
-        return cmd_promote(args.id)
+        return cmd_promote(args.id, authority_ref=args.authority_ref)
     if args.cmd == "revise":
         return cmd_revise(args.id, args.body_file, args.title,
                           expect_revision=getattr(args, "expect_revision", ""))
@@ -1575,6 +1591,11 @@ def _dispatch(args):
                                 run_id=args.run_id or "", validator_id=args.format,
                                 executed_at=executed_at)
                             report = lc_validators.parse_pytest_text(raw, claim_map=claim_map)
+                            if proc.returncode != 0 and not any(
+                                    check["observed_result"] == "fail" for check in report["checks"]):
+                                print(json.dumps({"error": "VALIDATOR_COMMAND_FAILED",
+                                                  "executed_command_exit": proc.returncode}))
+                                return 1
                             # 统一生命周期：执行时登记（版本+原件指纹），投喂侧据此核对。
                             attribution.record_execution(
                                 conn, memory_id=args.memory_id, content_revision=revision,
@@ -1678,6 +1699,12 @@ def _dispatch(args):
                 else:  # confirm
                     from .mutations import _compute_revision
                     meta, _body, _path = store.load(repo, args.memory_id)
+                    if args.change_id:
+                        change = changes.get_change(conn, args.change_id)
+                        output = next((o for o in change.get("outputs", [])
+                                       if o["memory_id"] == args.memory_id), None)
+                        if output:
+                            meta, _body = output["meta"], output["body"]
                     if not meta:
                         result = {"error": "NOT_FOUND"}
                     else:
@@ -1885,8 +1912,14 @@ def _dispatch(args):
             return cmd_jobs_expire()
         if args.jobs_cmd == "retire-backlog":
             from datetime import datetime as _dt, timezone as _tz
-            cutoff = args.cutoff or _dt.now(_tz.utc).isoformat(timespec="seconds")
-            return cmd_jobs_retire(cutoff, args.spool_days, args.execute)
+            try:
+                cutoff = _dt.fromisoformat(args.cutoff) if args.cutoff else _dt.now(_tz.utc)
+                if cutoff.utcoffset() is None or (args.spool_days is not None and args.spool_days < 0):
+                    raise ValueError
+            except ValueError:
+                return _report_error("错误：--cutoff 须包含时区，--spool-days 须为非负整数。")
+            return cmd_jobs_retire(cutoff.astimezone(_tz.utc).isoformat(timespec="seconds"),
+                                   args.spool_days, args.execute)
         return 1
     if args.cmd == "executor":
         if args.executor_cmd == "probe":

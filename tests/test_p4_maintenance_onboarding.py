@@ -426,7 +426,7 @@ def test_hook_auto_inject_records_retrieval_delivery(memory_repo, monkeypatch):
                             BODY, scope="global")
     assert not created.get("error"), created
     mid = created["entity_id"]
-    assert cmd_promote(mid) == 0
+    assert cmd_promote(mid, authority_ref="测试审核 §1") == 0
     cfg = config.load_config()
     cfg["hooks"] = {"enabled": True, "inject_min_confidence": "any"}
     cfg["inflight"]["enabled"] = False

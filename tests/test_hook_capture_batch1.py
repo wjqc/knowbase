@@ -218,7 +218,7 @@ def test_conflicting_titles_go_to_review(memory_repo, monkeypatch):
         conn.close()
 
 
-def test_hook_supplement_updates_existing_card(memory_repo, monkeypatch):
+def test_hook_supplement_proposes_review_without_overwriting_card(memory_repo, monkeypatch):
     """P0-2 补充：模型判 update，旧卡内容被增量更新，仍只有一张卡。"""
     cfg, _ = setup_executor(monkeypatch)
     mid = _seed_card(memory_repo, "订单去重用幂等键")
@@ -236,16 +236,16 @@ def test_hook_supplement_updates_existing_card(memory_repo, monkeypatch):
     monkeypatch.setattr(execution, "execute_text", _stub_response(build))
 
     assert run_hook_capture(memory_repo, cfg).get("processed") == 1
-    assert _job_state(memory_repo, job) == "succeeded"
+    assert _job_state(memory_repo, job) == "needs_review"
     assert _card_count(memory_repo) == 1
     meta, body, _ = store.load(memory_repo, mid)
-    assert "24 小时" in body  # store.load 返回渲染后的 markdown 正文
+    assert "24 小时" not in body
     assert meta.get("confidence") == "once"
     conn = index.connect(memory_repo)
     try:
         row = conn.execute("SELECT materialization_state FROM candidates WHERE job_id=?",
                            (job,)).fetchone()
-        assert row[0] == "updated"
+        assert row[0] == "needs_review"
     finally:
         conn.close()
 

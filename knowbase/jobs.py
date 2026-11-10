@@ -561,10 +561,12 @@ def retry(conn, job_id: str) -> dict:
     """手动重试：failed/retry_wait → queued，不新增逻辑保存。"""
     now_str = datetime.now(timezone.utc).isoformat(timespec="seconds")
     row = conn.execute(
-        "SELECT state FROM jobs WHERE job_id=?", (job_id,)
+        "SELECT state, error, result FROM jobs WHERE job_id=?", (job_id,)
     ).fetchone()
     if not row:
         return {"error": "not_found"}
+    if row[1] == "RETIRED_BACKLOG" or (row[2] and json.loads(row[2]).get("retired")):
+        return {"error": "RETIRED_BACKLOG"}
     if row[0] not in (STATE_FAILED, STATE_RETRY_WAIT):
         return {"error": f"cannot_retry_{row[0]}"}
     conn.execute(
@@ -595,7 +597,7 @@ def status(conn, job_id: str) -> dict | None:
 
 
 def list_jobs(conn, scope: str = "", kind: str = "", state: str = "",
-              limit: int = 50, kinds: tuple | frozenset = ()) -> list[dict]:
+              limit: int = 50, kinds: tuple | frozenset = (), *, claimable: bool = False) -> list[dict]:
     """列出任务。kinds 不为空时只列该 kind 集合（公开领取通道用）。"""
     conds, params = [], []
     if scope:
@@ -610,6 +612,11 @@ def list_jobs(conn, scope: str = "", kind: str = "", state: str = "",
     if state:
         conds.append("state=?")
         params.append(state)
+    if claimable:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        conds.append("(state='awaiting_agent' OR (state='retry_wait' AND COALESCE(next_run_at,'')<=?) "
+                     "OR (state='claimed' AND lease_until!='' AND lease_until<?))")
+        params.extend((now, now))
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
     params.append(limit)
     rows = conn.execute(
@@ -652,18 +659,17 @@ def expire_leases(conn) -> int:
 RETIRE_KINDS = (KIND_CAPTURE, KIND_CHECKPOINT, KIND_EXTRACT)
 
 
-def retire_plan(conn, *, cutoff: str, spool_days: int = 7, now_str: str = "") -> dict:
+def retire_plan(conn, *, cutoff: str, spool_days: int | None = None, now_str: str = "") -> dict:
     """只读盘点旧积压：未终态/已失败的知识类任务 + 超期终态 spool 正文。
 
-    不动：needs_review 任务与候选、已结算的成卡回执、staging 卡、
+    不动：已落卡的待审项、已结算的成卡回执、staging 卡、
     使用/验证/证据记录、队列外原始资料，以及仍在有效租约内的在途写入。
     已带 retired 回执的任务不再列出（幂等）。
     """
     now_str = now_str or datetime.now(timezone.utc).isoformat(timespec="seconds")
-    spool_cutoff = (
-        datetime.now(timezone.utc) - timedelta(days=spool_days)
-    ).isoformat(timespec="seconds")
-    plan = {"failed": [], "unterminal": [], "stale_spool": 0, "kept": {}}
+    plan = {"failed": [], "unterminal": [], "review_candidates": [], "review_jobs": [],
+            "stale_spool": 0, "kept": {}, "protected": []}
+    protected = {r[0] for r in conn.execute("SELECT DISTINCT job_id FROM job_submissions WHERE state!='done'")}
     rows = conn.execute(
         f"SELECT job_id, kind, state, error, created_at, lease_until, result "
         f"FROM jobs WHERE kind IN ({','.join('?' * len(RETIRE_KINDS))}) "
@@ -671,12 +677,13 @@ def retire_plan(conn, *, cutoff: str, spool_days: int = 7, now_str: str = "") ->
         RETIRE_KINDS,
     ).fetchall()
     for job_id, kind, state, error, created_at, lease_until, _result in rows:
-        if state == STATE_FAILED:
+        if state in (ACTIVE_STATES | {STATE_FAILED}) and created_at < cutoff and (
+                job_id in protected or (lease_until and lease_until >= now_str)):
+            plan["protected"].append(job_id)
+        elif state == STATE_FAILED and created_at < cutoff:
             plan["failed"].append({"job_id": job_id, "kind": kind, "error": error,
                                    "created_at": created_at})
         elif state in ACTIVE_STATES and created_at < cutoff:
-            if lease_until and lease_until >= now_str:
-                continue  # 在途写入：先确认结果，不当垃圾
             plan["unterminal"].append({"job_id": job_id, "kind": kind, "state": state,
                                        "created_at": created_at})
     kept = conn.execute(
@@ -689,23 +696,58 @@ def retire_plan(conn, *, cutoff: str, spool_days: int = 7, now_str: str = "") ->
         RETIRE_KINDS + tuple(ACTIVE_STATES) + (cutoff,),
     ).fetchall()
     plan["kept"] = {state: n for state, n in kept}
-    plan["stale_spool"] = conn.execute(
-        "SELECT COUNT(*) FROM job_spool WHERE datetime(created_at) < datetime(?) "
-        "AND job_id IN (SELECT job_id FROM jobs WHERE state IN ('succeeded','no_candidate','failed'))",
-        (spool_cutoff,),
-    ).fetchone()[0]
+    reviews = conn.execute(
+        "SELECT c.candidate_id,j.job_id,COALESCE(j.lease_until,'') FROM candidates c "
+        "JOIN jobs j USING(job_id) WHERE c.materialization_state='needs_review' "
+        "AND c.memory_id='' AND c.created_at<? AND j.created_at<? AND j.state='needs_review' "
+        "AND j.kind IN (?,?)", (cutoff, cutoff, KIND_CAPTURE, KIND_EXTRACT)).fetchall()
+    by_job = {}
+    for candidate_id, job_id, lease_until in reviews:
+        if job_id not in protected and lease_until < now_str:
+            plan["review_candidates"].append(candidate_id)
+            by_job.setdefault(job_id, []).append(candidate_id)
+    for job_id, pending in by_job.items():
+        remaining = conn.execute(
+            "SELECT count(*) FROM candidates WHERE job_id=? "
+            "AND (memory_id!='' OR materialization_state='needs_review')", (job_id,)).fetchone()[0]
+        if remaining == len(pending):
+            plan["review_jobs"].append({"job_id": job_id})
+    if spool_days is not None:
+        predicate, args = _retention_filter(cutoff, now_str, spool_days)
+        plan["stale_spool"] = conn.execute("SELECT COUNT(*) FROM job_spool WHERE " + predicate, args).fetchone()[0]
     return plan
 
 
-def retire_backlog(conn, *, cutoff: str, spool_days: int = 7, now_str: str = "") -> dict:
+def _retention_filter(cutoff, now_str, spool_days):
+    expiry = (datetime.fromisoformat(now_str) - timedelta(days=spool_days)).isoformat(timespec="seconds")
+    return (
+        "datetime(created_at) < datetime(?) AND job_id IN (SELECT j.job_id FROM jobs j "
+        "WHERE j.kind IN (?, ?, ?) AND j.state IN ('succeeded','no_candidate','failed') "
+        "AND j.created_at<? AND COALESCE(j.lease_until,'')<? "
+        "AND NOT EXISTS (SELECT 1 FROM job_submissions s WHERE s.job_id=j.job_id AND s.state!='done'))",
+        (expiry, *RETIRE_KINDS, cutoff, now_str),
+    )
+
+
+def retire_backlog(conn, *, cutoff: str, spool_days: int | None = None, now_str: str = "") -> dict:
     """按 retire_plan 的范围一次性撤销旧积压并清除可独立删除的正文。
 
     已失败任务保留 jobs 行并写入 retired 回执（终态、不可再领取）；
     未终态旧任务结算为 no_candidate；spool 只删已撤销任务与超保留期的终态正文。
     幂等：二次执行各项均为 0。
     """
-    plan = retire_plan(conn, cutoff=cutoff, spool_days=spool_days, now_str=now_str)
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        now_str = now_str or datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if conn.execute("SELECT 1 FROM automation_lease WHERE owner!='' AND lease_until>?",
+                        (now_str,)).fetchone():
+            return {"error": "WORKER_ACTIVE", "jobs": [], "spool_deleted": 0}
+        return _apply_retirement(conn, cutoff, spool_days, now_str)
+
+
+def _apply_retirement(conn, cutoff, spool_days, now_str):
     now_str = now_str or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    plan = retire_plan(conn, cutoff=cutoff, spool_days=spool_days, now_str=now_str)
     receipt = {"retired_at": now_str, "cutoff": cutoff, "jobs": [], "spool_deleted": 0}
 
     def _retire(item: dict, target_state: str, new_error: str) -> None:
@@ -728,8 +770,14 @@ def retire_backlog(conn, *, cutoff: str, spool_days: int = 7, now_str: str = "")
         receipt["jobs"].append({"job_id": job_id, "state": target_state})
 
     for item in plan["failed"]:
-        _retire(item, STATE_FAILED, item.get("error") or "")
+        _retire(item, STATE_FAILED, "RETIRED_BACKLOG")
     for item in plan["unterminal"]:
+        _retire(item, STATE_NO_CANDIDATE, "RETIRED_BACKLOG")
+    conn.executemany(
+        "UPDATE candidates SET decision='discarded',materialization_state='discarded',"
+        "body_json='{}',payload_json='{}',updated_at=? WHERE candidate_id=?",
+        [(now_str, cid) for cid in plan["review_candidates"]])
+    for item in plan["review_jobs"]:
         _retire(item, STATE_NO_CANDIDATE, "RETIRED_BACKLOG")
 
     retired_ids = [j["job_id"] for j in receipt["jobs"]]
@@ -738,15 +786,14 @@ def retire_backlog(conn, *, cutoff: str, spool_days: int = 7, now_str: str = "")
         cur = conn.execute(
             f"DELETE FROM job_spool WHERE job_id IN ({placeholders})", retired_ids)
         receipt["spool_deleted"] += max(cur.rowcount, 0)
-    cur = conn.execute(
-        "DELETE FROM job_spool WHERE datetime(created_at) < datetime(?) "
-        "AND job_id IN (SELECT job_id FROM jobs WHERE state IN ('succeeded','no_candidate','failed'))",
-        ((datetime.now(timezone.utc) - timedelta(days=spool_days))
-         .isoformat(timespec="seconds"),))
-    receipt["stale_spool_deleted"] = max(cur.rowcount, 0)
+    receipt["stale_spool_deleted"] = 0
+    if spool_days is not None:
+        predicate, args = _retention_filter(cutoff, now_str, spool_days)
+        cur = conn.execute("DELETE FROM job_spool WHERE " + predicate, args)
+        receipt["stale_spool_deleted"] = max(cur.rowcount, 0)
     receipt["spool_deleted"] += receipt["stale_spool_deleted"]
-    conn.commit()
     receipt["plan"] = {"failed": len(plan["failed"]),
                        "unterminal": len(plan["unterminal"]),
-                       "kept": plan["kept"]}
+                       "review_candidates": len(plan["review_candidates"]),
+                       "kept": plan["kept"], "protected": len(plan["protected"])}
     return receipt

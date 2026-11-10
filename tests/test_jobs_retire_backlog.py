@@ -62,7 +62,7 @@ def _mk_job(conn, kind, *, state="queued", days_old=0, lease_until=None, result=
 def test_failed_checkpoint_gets_receipt_and_spool_removed(isolated_repo):
     conn = jobs.connect(isolated_repo)
     try:
-        failed = _mk_job(conn, jobs.KIND_CHECKPOINT, state="failed",
+        failed = _mk_job(conn, jobs.KIND_CHECKPOINT, state="failed", days_old=30,
                          result={"error": "MATERIAL_PARSE_FAILED"})
         receipt = jobs.retire_backlog(conn, cutoff="2026-11-01T00:00:00+00:00")
         assert {"job_id": failed, "state": "failed"} in receipt["jobs"]
@@ -96,15 +96,15 @@ def test_old_unterminal_job_settled_but_live_lease_untouched(isolated_repo):
         conn.close()
 
 
-def test_needs_review_job_and_candidates_untouched(isolated_repo):
+def test_retire_unmaterialized_review_preserves_card_receipts(isolated_repo):
     conn = jobs.connect(isolated_repo)
     try:
         review = _mk_job(conn, jobs.KIND_CAPTURE, state="needs_review", days_old=30)
         conn.execute(
             "INSERT INTO candidates(candidate_id, job_id, candidate_key, scope, body_json,"
-            " evidence_json, decision, created_at, updated_at)"
+            " evidence_json, decision, created_at, updated_at,materialization_state,payload_json)"
             " VALUES('C-x', ?, 'k1', 'knowbase', '{}', '[]', 'needs_review',"
-            " '2026-01-01', '2026-01-01')", (review,))
+            " '2026-01-01', '2026-01-01','needs_review','{\"body\":\"old\"}')", (review,))
         saved = _mk_job(conn, jobs.KIND_CAPTURE, state="succeeded", days_old=30)
         conn.execute(
             "INSERT INTO candidates(candidate_id, job_id, candidate_key, scope, body_json,"
@@ -113,14 +113,14 @@ def test_needs_review_job_and_candidates_untouched(isolated_repo):
             " '2026-01-01', '2026-01-01')", (saved,))
         conn.commit()
         receipt = jobs.retire_backlog(conn, cutoff="2026-11-01T00:00:00+00:00")
-        assert all(j["job_id"] != review for j in receipt["jobs"])
+        assert {j["job_id"] for j in receipt["jobs"]} == {review}
+        assert conn.execute("SELECT materialization_state,payload_json FROM candidates WHERE candidate_id='C-x'").fetchone() == ("discarded", "{}")
         kept = conn.execute(
             "SELECT COUNT(*) FROM candidates WHERE job_id IN (?, ?)",
             (review, saved)).fetchone()[0]
         assert kept == 2
-        # needs_review 不在终态 spool 清理范围，期内与否都不删其材料
         assert conn.execute(
-            "SELECT COUNT(*) FROM job_spool WHERE job_id=?", (review,)).fetchone()[0] == 1
+            "SELECT job_id FROM job_spool WHERE job_id IN (?,?)", (review,saved)).fetchall() == [(saved,)]
     finally:
         conn.close()
 
@@ -147,7 +147,7 @@ def test_stale_terminal_spool_pruned_recent_kept(isolated_repo):
 def test_dry_run_plan_is_readonly_and_idempotent_execute(isolated_repo):
     conn = jobs.connect(isolated_repo)
     try:
-        failed = _mk_job(conn, jobs.KIND_CHECKPOINT, state="failed", days_old=2)
+        failed = _mk_job(conn, jobs.KIND_CHECKPOINT, state="failed", days_old=30)
         before = conn.execute("SELECT state, result FROM jobs WHERE job_id=?",
                               (failed,)).fetchone()
         plan = jobs.retire_plan(conn, cutoff="2026-11-01T00:00:00+00:00")

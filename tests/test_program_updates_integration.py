@@ -5,6 +5,7 @@ No production interpreter/site-packages, user data, scheduler or company host is
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -34,9 +35,11 @@ def test_two_members_automatically_update_and_recover_without_host_reconnect():
     async def scenario(root):
         checkout=Path(__file__).resolve().parents[1];source=root/'program';source.mkdir();(source/'.gitignore').write_text('build/\n*.egg-info/\n__pycache__/\n')
         shutil.copytree(checkout/'knowbase',source/'knowbase',ignore=shutil.ignore_patterns('__pycache__'))
-        project=(checkout/'pyproject.toml').read_text().replace('version = "0.2.0rc9"','version = "0.2.0rc8"')
+        project=re.sub(r'(?m)^version = "[^"]+"$', 'version = "0.2.0rc8"',
+                       (checkout/'pyproject.toml').read_text(), count=1)
         (source/'pyproject.toml').write_text(project)
-        init=source/'knowbase/__init__.py';init.write_text(init.read_text().replace('0.2.0rc9','0.2.0rc8'))
+        init=source/'knowbase/__init__.py';init.write_text(re.sub(r'(?m)^__version__ = "[^"]+"$', '__version__ = "0.2.0rc8"',
+                               init.read_text(), count=1))
         git(source,'init','-q','-b','main');git(source,'add','-A');git(source,'commit','-qm','baseline')
         baseline=git(source,'rev-parse','HEAD')
         dist=root/'baseline-wheel';run(['uv','build','--wheel','--offline','--out-dir',dist,source])
@@ -59,7 +62,6 @@ def test_two_members_automatically_update_and_recover_without_host_reconnect():
             run([python,'-I','-m','knowbase','init','--non-interactive'],env=env)
             code="from knowbase.server import save_impl;print(save_impl('pitfall','Synthetic update fixture',"+repr(CARD)+",scope='fixture'))"
             saved=run([python,'-I','-c',code],env=env).stdout
-            import re
             mid=re.search(r'已保存 (P-[a-z0-9-]+)',saved).group(1)
             atomic(runtime/'active.json',{'source_commit':baseline,'version':'0.2.0rc8',
                 'build_id':module_hash(pure/'knowbase'),'project_sha256':__import__('hashlib').sha256((source/'pyproject.toml').read_bytes()).hexdigest()})

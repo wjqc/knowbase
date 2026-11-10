@@ -54,7 +54,7 @@ def promote_if_staged(r):
     人工激活（治理动作，等价审过的 git mv）。"""
     if "→ staging" in r:
         mid = r.split()[1]
-        assert cli.main(["promote", mid]) == 0, r
+        assert cli.main(["promote", mid, "--authority-ref", "测试审核 §1"]) == 0, r
 
 # 0. 幂等 init：跑两次
 check("init 第1次", cli.main(["init"]) == 0)
@@ -165,16 +165,16 @@ r = save_impl("pitfall", "EasyConnect 8.x 新版安装与验证方法", PITFALL_
 new_pid = r.split()[1]
 promote_if_staged(r)  # 统一生命周期：promote 后 active，供第 20 步矛盾裁决（staging 卡不裁决）
 meta, _, _ = store.load(rp, pid)
-check("supersedes → 旧条目 stale", meta["status"] == "stale", r)
+check("supersedes 草案不改旧条目", meta["status"] == "active", r)
 conn = index.connect(rp)
 row = conn.execute("SELECT status FROM meta WHERE id=?", (pid,)).fetchone()
 conn.close()
-check("supersedes 同步索引状态", row[0] == "stale", str(row))
+check("supersedes 不改变旧条目索引状态", row[0] == "active", str(row))
 
 # 14. update 修改内容（v2 卡更新仍强制八项结构）
 r = update_impl(new_pid, body=PITFALL_BODY.replace("Windows 平台行为未验证。",
                                                    "Windows 平台行为未验证；8.x 安装包校验流程另见验收记录。"))
-check("update 内容", "已更新" in r, r)
+check("update 内容进入待审", "修订已提交待审" in r or "已更新" in r, r)
 
 # 14b. v2 卡更新成旧三段式 → 拦截
 r = update_impl(new_pid, body="## 现象\n旧结构。\n\n## 原因\n旧。\n\n## 正确做法\n旧。\n")
@@ -182,7 +182,7 @@ check("v2 卡更新强制八项", r.startswith("错误：lint") and "缺少必�
 
 # 15. promote：staging 提案激活
 sid = [f.name[:-3] for f in (rp / "staging").glob("S-*.md")][0]
-cli.main(["promote", sid])
+cli.main(["promote", sid, "--authority-ref", "测试审核 §1"])
 check("promote 激活 standard", (rp / "standards" / f"{sid}.md").exists())
 
 # 16. INDEX.md 生成且含条目
@@ -212,10 +212,7 @@ for i, (t, dom) in enumerate(mods):
     ids.add(r.split()[1])
 check("并发 id 唯一", len(ids) == 5, str(ids))
 
-# 20. contradicts 双向回指 + 自动裁决（Phase 1：零证据打平 → 双方同时降 stale 并隔离，
-# 不再是旧的“状态不动”；回指本身保持不变）
-# 统一生命周期：裁决在保存时运行且 staging 卡不参与——声明卡用项目 scope+
-# 显式 source 直接发布 active（global 卡保存即 staging 无法当步裁决）。
+# 20. 矛盾关系必须先待审
 os.environ["XINHUO_AGENT_NAME"] = "claude-code"
 r = save_impl("pitfall", "EasyConnect 9.x 企业证书安装流程", PITFALL_BODY,
               scope="e2e-contradict", source="agent:claude-code:sess_c1",
@@ -223,12 +220,9 @@ r = save_impl("pitfall", "EasyConnect 9.x 企业证书安装流程", PITFALL_BOD
 c_pid = r.split()[1]
 meta_n, _, _ = store.load(rp, new_pid)
 rev = [x for x in (meta_n.get("relations") or []) if x.get("id") == c_pid and x.get("type") == "contradicts"]
-check("contradicts 反向回指", len(rev) == 1, str(meta_n.get("relations")))
-meta_c, _, _ = store.load(rp, c_pid)
-check("contradicts 零证据打平双隔离", meta_n["status"] == "stale" and meta_c["status"] == "stale"
-      and meta_n.get("contradiction_quarantine") is True and meta_c.get("contradiction_quarantine") is True,
-      f"new={meta_n['status']} new_quar={meta_n.get('contradiction_quarantine')} "
-      f"c={meta_c['status']} c_quar={meta_c.get('contradiction_quarantine')}")
+meta_c, _, c_path = store.load(rp, c_pid)
+check("矛盾候选保持待审且不回写已发布卡", not rev and c_path.parent.name == "staging"
+      and meta_n["status"] == "active", r)
 
 # 21. 负反馈沉底因子
 from knowbase.index import _feedback_factor

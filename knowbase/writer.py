@@ -60,7 +60,8 @@ def create(repo, dtype: str, title: str, body: str, *, scope: str, tags=None,
             if not current or path is None:
                 return {"error": "READBACK_FAILED", "entity_id": mid, "retryable": True}
             bases_out = []
-            notes, modified = _relation_side_effects(repo, current, conn, bases_out=bases_out)
+            notes, modified = ([], []) if path.parent.name == "staging" else _relation_side_effects(
+                repo, current, conn, bases_out=bases_out)
             if not result.get("idempotent"):
                 index.record_usage(conn, "save", mid, title)
             git_warning = _post_save(repo, cfg, current, saved_body, path,
@@ -85,7 +86,8 @@ def create(repo, dtype: str, title: str, body: str, *, scope: str, tags=None,
 
 
 def update(repo, mid: str, *, request_id="", expected_content_revision="",
-           expected_governance_revision="", push=True, **updates) -> dict:
+           expected_governance_revision="", push=True, review_published_changes=False,
+           **updates) -> dict:
     meta, old_body, path = store.load(repo, mid)
     if not meta:
         return {"error": "not_found"}
@@ -94,13 +96,12 @@ def update(repo, mid: str, *, request_id="", expected_content_revision="",
     # 清空验证与计数，verified 的帽子不会被改版后继续保留。治理字段仍由
     # 服务端状态机管理，调用方不可直接指定（MCP 层本就不暴露这些字段，
     # 这里再对直接调用做一道防线）。统一生命周期：防线覆盖全部类型。
-    if path.parent.name != "staging":
-        reserved = {"status", "confidence", "last_verified", "verified_content_revision",
-                    "helpful_count", "unhelpful_count"} & set(updates)
-        if reserved:
-            return {"error": "GOVERNANCE_FIELDS_RESERVED",
-                    "message": "confidence/status 等治理字段由服务端状态机管理，调用方不可指定",
-                    "fields": sorted(reserved)}
+    reserved = {"status", "confidence", "last_verified", "verified_content_revision",
+                "helpful_count", "unhelpful_count"} & set(updates)
+    if reserved:
+        return {"error": "GOVERNANCE_FIELDS_RESERVED",
+                "message": "confidence/status 等治理字段由服务端状态机管理，调用方不可指定",
+                "fields": sorted(reserved)}
     preview = {**meta, **{k: v for k, v in updates.items() if k != "body"}}
     errors = store.lint(preview, updates.get("body", old_body), repo)
     if errors:
@@ -108,6 +109,11 @@ def update(repo, mid: str, *, request_id="", expected_content_revision="",
     cfg = config.load_config()
     conn = index.connect(repo)
     try:
+        if review_published_changes:
+            result = _review_revision(repo, conn, cfg, mid, updates, request_id,
+                                      expected_content_revision, expected_governance_revision)
+            if result is not None:
+                return result
         # 裁决用证据口径：relations 计入内容修订号，声明矛盾的更新本身会改变
         # 修订号并清 last_verified，使新版本暂时无证据；裁决须用声明方更新前的
         # 修订号与 verified 日期比较，否则声明方永远先丢证据、必输。
@@ -127,8 +133,8 @@ def update(repo, mid: str, *, request_id="", expected_content_revision="",
             if not current:
                 return {"error": "READBACK_FAILED", "retryable": True}
             bases_out = []
-            notes, modified = _relation_side_effects(repo, current, conn,
-                                                     source_prior=source_prior, bases_out=bases_out)
+            notes, modified = ([], []) if path.parent.name == "staging" else _relation_side_effects(
+                repo, current, conn, source_prior=source_prior, bases_out=bases_out)
             if not result.get("idempotent"):
                 index.record_usage(conn, "update", mid)
             git_warning = _post_save(repo, cfg, current, body, path, path.parent.name == "staging",
@@ -146,6 +152,51 @@ def update(repo, mid: str, *, request_id="", expected_content_revision="",
     if push:
         result["push_warning"] = _push_after_write(repo, cfg, git_warning)
     return result
+
+def _review_revision(repo, conn, cfg, mid, updates, request_id, expected_content, expected_governance):
+    """Keep the published head visible while a substantive edit awaits review."""
+    from .knowledge_lifecycle import admission, changes
+    from .mutations import _compute_revision, _compute_governance_revision
+    from .materials import digest
+
+    with RepoLock(repo, cfg.get("lock_timeout", 10.0)):
+        meta, body, path = store.load(repo, mid)
+        if not meta:
+            return {"error": "not_found"}
+        if path.parent.name == "staging":
+            return None
+        current = _compute_revision(meta, body)
+        if ((expected_content and expected_content != current)
+                or (expected_governance and expected_governance != _compute_governance_revision(meta))):
+            return {"error": "REVISION_CONFLICT", "current_content_revision": current}
+        new_body = updates.get("body", body)
+        preview = {**meta, **{k: v for k, v in updates.items() if k != "body"}}
+        changed = {k for k in updates if k != "body" and preview[k] != meta.get(k)}
+        if new_body.strip() != body.strip():
+            changed.add("body")
+        if not changed or (meta.get("scope") != "global" and meta.get("status") == "active"
+                           and changed <= {"tags", "evidence", "code_refs", "source_refs"}
+                           and admission.has_content_basis(preview)):
+            return None
+        errors = store.lint(preview, new_body, repo)
+        if errors:
+            return {"error": "LINT_FAILED", "errors": errors}
+        claims = meta.get("claims") or [{"claim_id": "C-whole"}]
+        key = digest([mid, request_id] if request_id else [mid, current, updates])
+        result = changes.propose_change(
+            conn, repo, relation="CORRECT", risk=admission.classify_risk(meta.get("scope", ""), "CORRECT"),
+            scope=meta.get("scope", ""), change_id="CHG-EDIT-" + key[:24],
+            base_heads=[{"memory_id": mid, "revision_algo": "content-v1", "content_revision": current}],
+            outputs=[{"memory_id": mid, "disposition": "active", "meta": preview, "body": new_body}],
+            source_dispositions=[{"memory_id": mid, "action": "revise", "redirect_ids": []}],
+            old_claims=claims, claim_map=[{"old_claim_id": c["claim_id"],
+                                          "new_claim_ids": [c["claim_id"]], "mapping": "modified"}
+                                         for c in claims],
+            proposer=config.agent_name())
+        if result.get("error"):
+            return result
+        return {**result, "needs_review": True, "entity_id": mid, "content_revision": current}
+
 
 def _post_save(rp, cfg, meta, body, path, staging, commit_msg, modified=(), bases=None):
     """锁内本地事务：同步索引 → INDEX → git commit。远程 push 必须在锁外。"""

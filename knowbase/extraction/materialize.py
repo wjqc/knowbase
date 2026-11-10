@@ -235,6 +235,7 @@ def _apply_candidate(repo, conn, job_id, candidate, row):
         body = validator.build_card_body(candidate)
         if action == "update":
             result = writer.update(repo, candidate["target_id"], request_id=stable_key, push=False,
+                review_published_changes=True,
                 expected_content_revision=candidate["expected_content_revision"],
                 expected_governance_revision=candidate["expected_governance_revision"],
                 title=candidate["title"], body=body, **arguments)
@@ -246,6 +247,9 @@ def _apply_candidate(repo, conn, job_id, candidate, row):
             outcome = "saved"
     if result.get("error"):
         return {"candidate_id": cid, **result, "retryable": result.get("retryable", False)}
+    if result.get("needs_review"):
+        return {"candidate_id": cid, "outcome": "needs_review", "governance_status": "unconfirmed",
+                "change_id": result["change_id"]}
     return {"candidate_id": cid, "outcome": outcome, "memory_id": result["entity_id"],
             "content_revision": result["content_revision"], "governance_status": "staging" if result["staging"] else "active_once",
             "local_state": result["local_state"], "sync_state": result["sync_state"]}

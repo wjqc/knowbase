@@ -99,7 +99,7 @@ def test_update_and_revise_enforce_same_boundary(isolated_repo, tmp_path):
 
     governed = save_impl("standard", "人工修订也校验引用", STANDARD_CARD)
     governed_id = governed.split()[1]
-    assert cmd_promote(governed_id) == 0
+    assert cmd_promote(governed_id, authority_ref="测试审核 §1") == 0
     revision = tmp_path / "revision.md"
     revision.write_text(
         STANDARD_CARD.replace("写入前自查引用。", "参见 /Users/alice/knowledge/spec.md。"),

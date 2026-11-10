@@ -221,7 +221,7 @@ def test_legacy_card_update_keeps_old_rules(isolated_repo):
     path.write_text(store.render(meta, "## 现象\n旧。\n\n## 原因\n旧。\n\n## 正确做法\n旧。\n"),
                     encoding="utf-8")
     conn = index.connect(isolated_repo)
-    index.upsert(conn, meta, "旧", path, False)
+    index.upsert(conn, *store.load(isolated_repo, mid), False)
     conn.close()
     r = update_impl(mid, body="## 现象\n新。\n\n## 原因\n新。\n\n## 正确做法\n新。\n")
-    assert r.startswith("已更新"), r
+    assert r.startswith("修订已提交待审"), r

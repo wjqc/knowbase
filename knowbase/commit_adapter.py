@@ -36,6 +36,8 @@ def _routes_staging(meta: dict) -> bool:
     """统一生命周期路由（类型不参与）：项目内新增且有出处/依据直接发布；
     共享范围（global）或来源不足进入 staging 待审。"""
     from .knowledge_lifecycle.admission import classify_risk, has_content_basis
+    if any(r["type"] in {"supersedes", "contradicts"} for r in meta.get("relations", [])):
+        return True
     return classify_risk(str(meta.get("scope") or ""), "NEW",
                          has_basis=has_content_basis(meta)) != "R1"
 

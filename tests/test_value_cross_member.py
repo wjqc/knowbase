@@ -54,7 +54,7 @@ def test_created_revised_activated_events_follow_card_lifecycle(memory_repo):
     rule = save_impl("bizrule", "结算后禁止撤回工单规则", rule_body, scope="global",
                      provenance="PRD-ORDER §5")
     rule_id = __import__("re").search(r"\b([PB]-[0-9a-f]+)\b", rule).group(1)
-    assert main(["promote", rule_id]) == 0
+    assert main(["promote", rule_id, "--authority-ref", "测试审核 §1"]) == 0
     activated = outbox_rows(memory_repo, "knowledge.activated")
     assert len(activated) == 1 and activated[0]["source_key"] == f"knowledge:{rule_id}:activated"
     assert json.loads(activated[0]["payload"])["host"] == "cli"

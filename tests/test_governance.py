@@ -40,7 +40,7 @@ r=save_impl('standard','AlphaUnique 工程部署规范',CARD,scope='demo')
 mid=r.split()[1]
 assert '未命中' in search_impl('AlphaUnique',scope='demo')
 assert mid in search_impl('AlphaUnique',scope='demo',include_inactive=True)
-assert main(['promote',mid])==0
+assert main(["promote", mid, "--authority-ref", "测试审核 §1"])==0
 assert hooks.user_prompt('AlphaUnique 工程部署')==''  # once 未验证不注入（默认 verified 开关）
 assert main(['verify',mid])==0
 os.environ['CLAUDE_PROJECT_DIR']='/tmp/unrelated'

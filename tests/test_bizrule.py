@@ -56,7 +56,7 @@ r = save_impl("bizrule", "VIP 透支受理额度规则", BODY,
               source="human:文剑", domain="cmi-受理", rule_status="effective")
 check("global bizrule 落 staging", "staging" in r, r)
 bid_global = r.split()[1]
-check("人工 promote staging 卡", cli.main(["promote", bid_global]) == 0)
+check("人工 promote staging 卡", cli.main(["promote", bid_global, "--authority-ref", "测试审核 §1"]) == 0)
 
 # 4. 检索命中已发布业务规则
 r = search_impl("欠费停机 受理", scope="cmi")

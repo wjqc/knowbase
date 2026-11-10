@@ -37,9 +37,10 @@ def _seed_negative_evidence(conn, repo, mid):
     meta, body, _ = store.load(repo, mid)
     revision = _compute_revision(meta, body)
     report = validators.parse_pytest_text(
-        validators.stamp_report_text(FAIL_REPORT, memory_id=mid, content_revision=revision))
+        validators.stamp_report_text(FAIL_REPORT, memory_id=mid, content_revision=revision,
+                                     validator_id="pytest-text"))
     attribution.record_execution(conn, memory_id=mid, content_revision=revision,
-                                 artifact_hash=report["artifact_hash"])
+                                 artifact_hash=report["artifact_hash"], validator_id="pytest-text")
     report["target"] = {"memory_id": mid,
                         "content_revision": revision}
     result = attribution.verify_execution(conn, repo, run_id="",

@@ -47,29 +47,27 @@ def test_human_source_parameter_cannot_bypass_staging(isolated_repo):
     assert not (repo / "standards" / f"{mid}.md").exists()
 
 
-def test_agent_revision_of_active_governed_record_demotes(isolated_repo):
-    """Phase 0 自进化：Agent 修订已生效卡不再被 GOVERNANCE_DENIED 拒绝，
-    改版即降权（confidence 回 once、验证指针与计数清零），旧行为测试随之改写：
-    旧断言把"Agent 不可修订"固化为期望，与自进化定义冲突。"""
+def test_agent_revision_of_active_shared_record_waits_for_review(isolated_repo):
+    """An ordinary edit cannot overwrite the verified version of a shared card."""
     from knowbase import store
     repo, _ = isolated_repo
     result = save_impl("standard", "正式规则 Agent 修订即降权", STANDARD_CARD)
     mid = result.split()[1]
-    assert cmd_promote(mid) == 0
+    assert cmd_promote(mid, authority_ref="测试审核 §1") == 0
     assert cmd_verify(mid) == 0
     assert store.load(repo, mid)[0]["confidence"] == "verified"
     revised = update_impl(mid, body=STANDARD_CARD.replace("必须审核。", "必须复核并双签。"))
     assert not revised.startswith("错误："), revised
     meta = store.load(repo, mid)[0]
-    assert meta["confidence"] == "once" and meta["verified_content_revision"] == ""
-    assert meta["last_verified"] == "" and meta["status"] == "active"
-    assert "必须复核并双签。" in (repo / "standards" / f"{mid}.md").read_text(encoding="utf-8")
+    assert revised.startswith("修订已提交待审"), revised
+    assert meta["confidence"] == "verified" and meta["verified_content_revision"]
+    assert "必须复核并双签。" not in (repo / "standards" / f"{mid}.md").read_text(encoding="utf-8")
 
 
 def test_trusted_cli_can_revise_active_governed_record(isolated_repo, tmp_path):
     result = save_impl("standard", "人工修订正式标准", STANDARD_CARD)
     mid = result.split()[1]
-    assert cmd_promote(mid) == 0
+    assert cmd_promote(mid, authority_ref="测试审核 §1") == 0
     body_file = tmp_path / "revision.md"
     body_file.write_text(STANDARD_CARD.replace("必须审核。", "必须复核并双签。"), encoding="utf-8")
     assert cmd_revise(mid, str(body_file)) == 0

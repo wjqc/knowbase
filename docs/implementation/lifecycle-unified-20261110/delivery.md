@@ -1,6 +1,6 @@
 # 统一生命周期实施交付（T0–T4）——2026-11-10
 
-依据 [Trae MCP 主线与统一知识生命周期实施计划](../../plans/knowbase-trae-mcp-unified-lifecycle.md)（2026-11-09）。本交付完成全部代码与隔离验收；**生产清理、真实 Trae 复验、部署三项为人工审批件**（见 §6）。基线 1216→**1221 passed / 1 skipped**（一次性 editable venv 全量）。
+依据 [Trae MCP 主线与统一知识生命周期实施计划](../../plans/knowbase-trae-mcp-unified-lifecycle.md)（2026-11-09）。T0 生产清理与 rc10 安装见历史执行记录；真实 Trae 主线、无独立模型的真实 Trae 验收与前台性能对照仍未完成。下表区分隔离测试、生产协议验收和真实宿主验收。
 
 ## 1. 交付矩阵（按验收口径分别标明）
 
@@ -10,7 +10,7 @@
 | T0 隔离演练 | 合成（隔离库） | ✅ 通过 | §2.2（快照副本：2 失败补回执、spool 155→74、九项账本不变、二次执行全零） |
 | T0 生产执行 | 生产 | ✅ **已执行**（2026-11-10 01:14） | 备份 `~/.knowbase/backups/t0-retire-20261110-011127/`；8 条失败 checkpoint 补 retired 回执、spool 162→75（8+79）、candidates/feedback/evidence/task_outcomes 不变、二次执行全零 |
 | T1 基线链路 | 合成（stdio MCP 真实契约，隔离库） | ✅ 4/4 | tests/test_t1_trae_baseline_chain.py（分页/无候选/重放防重/无模型证据） |
-| T1 真实 Trae | 真实宿主 | ✅ **以替代口径关闭**（2026-11-10 裁决） | Trae 接线层在 rc10 实证（三 hook exit 0、探针检查点消化、桥→rc10）；真实宿主全链由 deploy-verify 在生产 rc10 完成同构两条任务（含查重门/本机路径 lint 实拦，P-b4506b0ae008）。Trae GUI 注入被环境守卫阻断（onscreen:false，四类路径全拒），GUI 补跑保留为开放加分项（提示词见对话记录） |
+| T1 真实 Trae | 真实宿主 | **未验收** | Trae 接线层：三 Hook exit 0、桥接到 rc10。deploy-verify 是另一客户端的生产协议验证，只能作支持证据，不能替代 Trae 的实际提炼、复用和更新。 |
 | T2 类型分流合并 | 代码+回归 | ✅ | §3.1；全量 1221 绿 |
 | T2 验证绑定修复 | 代码+回归 | ✅ | §3.2（执行戳+执行记录+三重校验） |
 | T3 宿主流程收敛 | 代码+文档 | ✅ | §4（有界尾持久化 4/4；trae-rules.md/MCP 描述已收敛） |
@@ -93,12 +93,14 @@
 >
 > **01:26 部署验收补充（deploy-verify 标识，非 Trae）**：rc10 生产全链两条任务通过——任务 A：capture→claim→查重门 NEEDS_REASSESSMENT→逐卡真读 10 张相似卡→duplicate_evaluation 重提交→succeeded（saved_active=1）→读回（P-b4506b0ae008）；任务 B：search 命中→context→read→use(adopted)→feedback(helpful, task_outcome_id=deploy-verify-task-b)→update 修订（修订清验证 once）。生产轨迹：knowledge_uses host=deploy-verify 两条；内容库自动提交 3b4ef0e/8645097。新语义防线（本机路径 lint 拒绝、NEEDS_REASSESSMENT 查重门）在真实链路中各拦截一次并按协议放行。
 >
-> **01:40 收口裁决（按用户指令文本列明的替代分支执行）**：接受 deploy-verify 生产全链证据替代 Trae GUI 复验，计划关闭。依据：①Trae 专属接线（三 hook/桥/worker 消化）已在 rc10 单独实证；②真实宿主行为验证由 deploy-verify 在生产 rc10 同构完成；③Trae GUI 注入为环境级硬阻断（onscreen:false，应用点击/底层事件/键盘/菜单 AX 四类全拒），非产品缺陷；④未伪造任何 host_profile=trae 轨迹。遗留开放项（不阻断）：用户日后在 Trae 界面补跑两条提示词作加分验证。
+> **01:40 收口记录**：当时以 deploy-verify 作为替代口径关闭交付。复核区分证据等级：该记录可证明生产 MCP 协议连通，Trae 专属接线证据可证明注册、启动和 Hook 消化；均未证明 Trae 在无独立模型条件下完成两项实际任务。GUI 输入受环境守卫阻断，仍记录为未验收。
 
 ### 6.1 T0 生产清理 runbook
 
 ```bash
-cp ~/knowbase/memory.db ~/.knowbase/backups/t0-retire-$(date +%Y%m%d-%H%M%S)/memory.db   # 1. 备份
+backup="$HOME/.knowbase/backups/t0-retire-$(date +%Y%m%d-%H%M%S)"
+mkdir -m 700 "$backup"
+sqlite3 -readonly "$HOME/knowbase/memory.db" ".backup '$backup/memory.db'"  # 1. SQLite 一致性备份
 knowbase jobs retire-backlog --cutoff 2026-11-09T06:00:00+00:00                            # 2. 只读清单复核
 knowbase jobs retire-backlog --cutoff 2026-11-09T06:00:00+00:00 --execute                  # 3. 执行
 knowbase jobs retire-backlog --cutoff 2026-11-09T06:00:00+00:00 --execute                  # 4. 二次执行应全零（幂等核对）
@@ -121,8 +123,12 @@ knowbase jobs retire-backlog --cutoff 2026-11-09T06:00:00+00:00 --execute       
 3. 验证：固定路径启动、MCP 桥接重连后 instructions 含"统一生命周期"、worker 加载新代码、`jobs retire-backlog` 干跑、hook 冒烟（含 transcript 删除回退）、golden 集。
 4. 生产 T0 清理（§6.1）与真实 Trae 复验（§6.2）在部署窗口内完成并回填台账。
 
-## 7. 边界与如实声明
+## 7. 复核发现与修正
 
-- 生产库当晚有并行会话活动（303 张卡治理投影未提交、34 张今晚 staging）：本交付未触碰内容库，未提交任何 Git 变更（含源码），未部署生产。
-- 报告新原件的"执行时"信任以受信 CLI 运行为界（操作者自律部分见 §3.2 末）；检索 golden 集与真实库语料漂移为既有信号（test_retrieval.py 重基线记录在案，非本次回归）。
-- T1 的"真实 Trae 任务"与 T4 的"真实宿主复验/部署"未执行，达到门槛前不宣称全计划闭环。
+- **版本登记**：本机可测得 rc10 安装包，实际模块哈希为 `34d24a7db7c2743c`，固定运行清单仍标记上一版本 `e753066 / 04d4b5c50500220d`。源码此前也出现分发版本 rc10、模块版本 rc9 的差异。已统一源码版本并修正升级集成测试；当前复核未改安装清单、未重新部署。
+- **统一治理**：MCP 与后台提炼的实质修订走同一待审提案，原发布版本保持；已确认的发布才会换版本并清空旧版本的验证镜像。普通使用反馈不充当高风险变更的可信验证。执行报告对齐运行 ID、验证器与卡片版本，失败命令不得产生正面证据。
+- **宿主恢复**：按项目查询可领、待审任务；按项目领取可发现到期重试和过期租约。可选 Hook 只持久化已脱敏的有界尾部，完整与兼容入口均可回退读取。修复以隔离回归为证，未验证 Trae 或 ZCode 的真实宿主操作。
+- **清理边界**：失败项也受截止水位约束；未完成提交和有效租约受保护。仅未成卡的旧待审材料纳入清理，保留回执。默认不删除其他已结算正文；显式传入 `--spool-days` 才运行已结算正文的保留期清理。本次未执行生产清理。
+- **尚未验收**：实际 Trae 无独立模型完成生成与复用、前台延迟/注入量对照，以及 MCP 不可用时真实主任务的正常结束。生产配置在复核时仍启用了独立执行器和采集；不能把当前生产协议样本记作关闭模型与采集的 Trae 样本。
+
+复核验证：全量回归 1229 通过、1 跳过；末轮针对生命周期、回退采集、清理、MCP 契约与两成员升级的定向回归 65 通过、1 跳过。真实 Trae 会话与前台对照仍未执行。本轮没有重新部署、更新生产配置或清理生产知识库。

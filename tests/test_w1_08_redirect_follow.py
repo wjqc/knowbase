@@ -10,6 +10,7 @@ from knowbase import index, store, writer
 from knowbase.knowledge_lifecycle import changes, publication, recall, validation
 from knowbase.migrations import apply_all
 from knowbase.mutations import _compute_revision
+from test_v2_06_07_08_content_loop import seed_evidence
 
 BODY = ("## 结论\nCRLF 读视图不一致需入口归一。\n## 解决的问题\n跨平台协作。\n"
         "## 适用条件\nWindows 编辑器。\n## 不适用条件\n纯 LF 仓库。\n"
@@ -18,6 +19,7 @@ BODY = ("## 结论\nCRLF 读视图不一致需入口归一。\n## 解决的问�
 
 
 def make_card(repo, title, body=BODY, **kw):
+    kw.setdefault("provenance", "受控回归样本 PR-7")
     result = writer.create(repo, "pitfall", title, body, scope="orders", **kw)
     assert not result.get("error"), result
     return result["entity_id"]
@@ -28,15 +30,6 @@ def head_of(conn, mid):
                         (mid,)).fetchone()[0]
 
 
-def seed_evidence(conn, mid, revision, count=2):
-    """绑定旧版本的成功证据（R2 验证的回归样本）。"""
-    for i in range(count):
-        conn.execute(
-            "INSERT INTO feedback_events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (f"rc-{mid}-{i}", "", "x", mid, revision, f"use-{i}", f"tk-{i}",
-             f"out-{i}", "seed", "helpful", "version_task", "applied",
-             "", "", "{}", "{}", "2026-01-01T00:00:00"))
-    conn.commit()
 
 
 def _merge_three(memory_repo, conn):

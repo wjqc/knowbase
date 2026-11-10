@@ -223,8 +223,8 @@ def test_t1_no_candidate_batch_settles_explicitly(t1_repo):
     assert _run_with_session(t1_repo, probe, timeout=30)
 
 
-def test_t1_ordinary_task_chain_and_revision_clears_validation(t1_repo):
-    """普通任务：save → search → use → feedback → update；修订后验证清零。"""
+def test_t1_ordinary_task_chain_and_revision_waits_for_review(t1_repo):
+    """普通任务：save → search → use → feedback → update；修订待审，不改已发布卡。"""
     from knowbase import store
     from knowbase.mutations import _compute_revision
 
@@ -271,10 +271,11 @@ def test_t1_ordinary_task_chain_and_revision_clears_validation(t1_repo):
         updated = await call("memory_update", {
             "id": mid, "expected_content_revision": _compute_revision(meta, body),
             "body": body + "\n\n## 补充\n心跳间隔 60 秒经受控样本复核。"})
-        assert "P-" in updated
-        meta2, _body2, _path2 = store.load(t1_repo, mid)
+        assert "修订已提交待审" in updated and mid in updated
+        meta2, body2, _path2 = store.load(t1_repo, mid)
+        assert body2 == body
         assert meta2["confidence"] == "once", meta2
-        assert meta2.get("helpful_count", 0) == 0
+        assert meta2.get("helpful_count", 0) == meta.get("helpful_count", 0)
         return mid
 
     assert _run_with_session(t1_repo, probe)

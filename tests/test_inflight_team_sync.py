@@ -44,7 +44,7 @@ def test_shared_rule_remains_staging_until_human_activation(memory_repo, tmp_pat
     assert store.load(clone, mid)[2].parent.name == "staging"
 
     # 仅隔离夹具模拟可信人工 CLI；生产规则不会被本测试激活。
-    assert cmd_promote(mid) == 0
+    assert cmd_promote(mid, authority_ref="测试审核 §1") == 0
     git(memory_repo, "add", "--", "staging/" + mid + ".md", "bizrules/" + mid + ".md")
     git(memory_repo, "commit", "-m", "fixture: reviewed activation")
     git(clone, "pull", "--ff-only")

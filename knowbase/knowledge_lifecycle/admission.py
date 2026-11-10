@@ -68,7 +68,15 @@ def evaluate_admission(conn, repo, memory_id: str, content_revision: str, *,
     admission_reports（幂等键：memory_id+revision+change_id+report 内容）。
     审核超时不默认批准：global 范围无 authority_ref 就是 fail，保持待审。
     """
+    authority_ref = authority_ref.strip()
     meta, body, path = store.load(repo, memory_id)
+    if change_id:
+        from .changes import get_change
+        change = get_change(conn, change_id)
+        output = next((out for out in change.get("outputs", []) if out["memory_id"] == memory_id), None)
+        if not output:
+            return {"error": "CHANGE_OUTPUT_NOT_FOUND", "memory_id": memory_id}
+        meta, body = output["meta"], output["body"]
     if not meta:
         return {"error": "NOT_FOUND", "memory_id": memory_id}
     from ..mutations import _compute_revision
@@ -88,13 +96,11 @@ def evaluate_admission(conn, repo, memory_id: str, content_revision: str, *,
     overall = "pass" if not lint_errors else "fail"
 
     # 来源可追溯。
-    has_source = bool(str(meta.get("source") or "").strip())
-    has_evidence = bool(meta.get("evidence") or meta.get("code_refs")
-                        or meta.get("source_refs"))
-    record("source_traceable", "pass" if (has_source or has_evidence) else "unknown",
-           "source/evidence present" if (has_source or has_evidence)
+    has_basis = has_content_basis(meta) or bool(authority_ref.strip())
+    record("source_traceable", "pass" if has_basis else "unknown",
+           "source/evidence present" if has_basis
            else "no source or evidence reference")
-    if not (has_source or has_evidence) and overall == "pass":
+    if not has_basis and overall == "pass":
         overall = "unknown"
 
     # 统一出处门：所有类型一致——有 provenance 记 pass，缺失记 unknown
@@ -114,10 +120,10 @@ def evaluate_admission(conn, repo, memory_id: str, content_revision: str, *,
         else:
             record("authority_confirmation", "pass", f"authority_ref={authority_ref}")
     else:
-        record("authority_confirmation", "pass" if (has_source or has_evidence) else "unknown",
+        record("authority_confirmation", "pass" if has_basis else "unknown",
                "project scope: explicit source via source/evidence")
 
-    risk = classify_risk(scope, "NEW", has_basis=has_content_basis(meta))
+    risk = classify_risk(scope, "NEW", has_basis=has_basis)
     report_id = "ADM-" + hashlib.sha256(contracts.canonical_json({
         "m": memory_id, "r": content_revision, "c": change_id, "a": authority_ref,
         "checks": checks}).encode("utf-8")).hexdigest()[:20]

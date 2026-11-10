@@ -52,6 +52,7 @@ def test_propose_admitted_publishes_staging_bizrule(memory_repo):
     assert not biz.get("error"), biz
     assert biz["staging"] is True, biz
     mid = biz["entity_id"]
+    assert writer.update(memory_repo, mid, provenance="测试依据 PRD-4")["staging"]
     conn = index.connect(memory_repo)
     apply_all(conn)
     staging_path = Path(memory_repo) / "staging" / f"{mid}.md"
@@ -107,6 +108,7 @@ def test_publish_new_rejects_moved_staging_source(memory_repo):
     assert not biz.get("error"), biz
     assert biz["staging"] is True, biz
     mid = biz["entity_id"]
+    assert writer.update(memory_repo, mid, provenance="测试依据 PRD-4")["staging"]
     conn = index.connect(memory_repo)
     apply_all(conn)
     proposal = changes.propose_new_card(conn, memory_repo, mid)
@@ -136,6 +138,7 @@ def test_cli_lifecycle_propose_and_propose_admitted(memory_repo):
     assert not biz.get("error"), biz
     assert biz["staging"] is True, biz
     mid = biz["entity_id"]
+    assert writer.update(memory_repo, mid, provenance="测试依据 PRD-4")["staging"]
     assert cli.main(["lifecycle", "propose", mid]) == 0
     assert cli.main(["lifecycle", "propose-admitted", "--publish"]) == 0
     assert not (Path(memory_repo) / "staging" / f"{mid}.md").exists()

@@ -164,6 +164,7 @@ def test_superseded_card_gets_stale_clock_and_manual_archive_in_ledger(memory_re
     winner = standard_card(memory_repo, "新版结算规则")
     loser = standard_card(memory_repo, "旧版退款流程")
     activate(memory_repo, loser, "sup")
+    activate(memory_repo, winner, "sup-winner")
     meta, body, _ = store.load(memory_repo, winner)
     result = writer.update(memory_repo, winner, request_id="req-sup",
                            expected_content_revision=_compute_revision(meta, body),
@@ -248,20 +249,16 @@ def test_staging_contradiction_skips_adjudication(memory_repo):
     assert "adjudication_note" not in store.load(memory_repo, newborn["entity_id"])[0]
 
 
-def test_newborn_active_card_loses_to_established(memory_repo):
+def test_newborn_conflict_stays_in_review(memory_repo):
     established = standard_card(memory_repo, "已生效卡二")
     activate(memory_repo, established, "est2")
-    # 统一生命周期：项目内 + 出处的新卡直接发布 active（不再进 staging），
-    # 发布即参与裁决，输给已验证卡后标 stale。
     newborn = writer.create(memory_repo, "pitfall", "新生陷阱卡", BODY, scope="orders",
                             provenance="PRD-4 §2",
                             relations=[{"id": established, "type": "contradicts"}])
-    assert not newborn.get("error"), newborn
-    assert newborn["staging"] is False
-    newborn_meta, _, _ = store.load(memory_repo, newborn["entity_id"])
-    assert newborn_meta["status"] == "stale"
-    assert established in newborn_meta.get("adjudication_note", "")
-    assert store.load(memory_repo, established)[0]["status"] == "active"
+    assert newborn["staging"] is True, newborn
+    meta = store.load(memory_repo, established)[0]
+    assert meta["status"] == "active"
+    assert not any(r["id"] == newborn["entity_id"] for r in meta["relations"])
 
 
 # ---------------- 1-C review 候选出口 ----------------
@@ -345,7 +342,7 @@ def test_review_resubmit_rejects_key_reuse_segment_mismatch_and_review(memory_re
     assert out.get("error") == "RESUBMIT_MUST_NOT_BE_REVIEW", out
 
 
-def test_review_resubmit_update_flips_job_to_succeeded(memory_repo):
+def test_review_resubmit_substantive_update_requires_publication(memory_repo):
     # 目标卡须与候选内容不相似，否则原提交会因 NEEDS_REASSESSMENT 被拒。
     target = standard_card(memory_repo, "库存补货提醒规则", provenance="仓库管理规范 W-9",
                            body=BODY2)
@@ -360,10 +357,11 @@ def test_review_resubmit_update_flips_job_to_succeeded(memory_repo):
     new["expected_content_revision"] = _compute_revision(tmeta, tbody)
     new["expected_governance_revision"] = _compute_governance_revision(tmeta)
     out = json.loads(job_resubmit_review_impl(job_id=job, candidate_key="review-1", candidate=new))
-    assert out.get("outcome") == "updated", out
-    assert out["governance_status"] == "active_once"
+    assert out.get("outcome") == "needs_review", out
+    assert out["change_id"]
+    assert store.load(memory_repo, target)[1] == tbody
     status = json.loads(job_status_impl(job_id=job, protocol_version=2))
-    assert status["state"] == "succeeded", status
+    assert status["state"] == "needs_review", status
 
 
 def test_review_resubmit_replay_is_idempotent(memory_repo):

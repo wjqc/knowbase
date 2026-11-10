@@ -244,6 +244,8 @@ def _materialize(repo: Path, conn, manifest: dict, outputs: list[dict]) -> None:
             meta["confidence"] = "once"  # 新版本不继承 verified（设计 §6.2）
             meta.pop("verified_content_revision", None)
             meta.pop("last_verified", None)
+            meta["helpful_count"] = 0
+            meta["unhelpful_count"] = 0
             target = store.mem_path(repo, meta.get("type", "pitfall"), mid, staging=False)
             target.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write(target, store.render(meta, out["body"]))

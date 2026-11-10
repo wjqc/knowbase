@@ -26,7 +26,7 @@ def save_global_active(title):
     assert "staging（待审" in out, out  # 统一路由：global 落 staging
     mid = re.search(r"已保存 ([PB]-[\w-]+)", out).group(1)
     from knowbase.__main__ import cmd_promote
-    assert cmd_promote(mid) == 0
+    assert cmd_promote(mid, authority_ref="测试审核 §1") == 0
     return mid
 
 BODY = ("## 结论\nEasyConnect 7.6.7 在 macOS 26.1 上启动即 Rosetta 死锁，内网 vpn 全部连不上。\n\n"
