@@ -20,6 +20,61 @@ def _time(value,naive_tz):
         return None
 
 
+def _feedback_funnel(conn, tables, lower, upper):
+    """Delivery cohort and call-attempt counts are separate units."""
+    cohort = None
+    if {"retrieval_deliveries", "use_retrieval_links", "knowledge_uses", "feedback_events"} <= tables:
+        rows = conn.execute("""
+          WITH stages AS (
+            SELECT d.delivery_id,d.host_profile,
+              MAX(CASE WHEN u.state='read' THEN 1 ELSE 0 END) AS is_read,
+              MAX(CASE WHEN u.state IN ('referenced','adopted') THEN 1 ELSE 0 END) AS used,
+              MAX(CASE WHEN u.state='adopted' THEN 1 ELSE 0 END) AS adopted,
+              MAX(CASE WHEN u.state IN ('referenced','adopted') AND f.receipt_id IS NOT NULL
+                       THEN 1 ELSE 0 END) AS feedback
+            FROM retrieval_deliveries d
+            LEFT JOIN use_retrieval_links l ON l.delivery_id=d.delivery_id
+            LEFT JOIN knowledge_uses u ON u.use_id=l.use_id AND metric_time(u.created_at)<?
+            LEFT JOIN feedback_events f ON f.use_id=u.use_id AND f.binding='version_task'
+              AND f.state='applied' AND metric_time(f.created_at)<?
+            WHERE metric_time(d.created_at)>=? AND metric_time(d.created_at)<?
+            GROUP BY d.delivery_id,d.host_profile
+          )
+          SELECT host_profile,COUNT(*),SUM(is_read),SUM(used),SUM(adopted),SUM(feedback)
+          FROM stages GROUP BY host_profile
+        """, (upper, upper, lower, upper)).fetchall()
+        keys = ("delivered", "read", "referenced_or_adopted", "adopted", "with_bound_feedback")
+        cohort = {}
+        for host, *counts in rows:
+            bucket = cohort.setdefault(telemetry.host_name(host), dict.fromkeys(keys, 0))
+            for key, count in zip(keys, counts):
+                bucket[key] += count
+    attempts = None
+    if "command_calls" in tables:
+        host = "h.host" if "command_call_hosts" in tables else "NULL"
+        reason = "r.reason" if "command_call_rejections" in tables else "NULL"
+        joins = (" LEFT JOIN command_call_hosts h ON h.call_id=c.call_id" if host != "NULL" else "")
+        joins += (" LEFT JOIN command_call_rejections r ON r.call_id=c.call_id" if reason != "NULL" else "")
+        attempts = {}
+        for host_name, command, status, code, count in conn.execute(
+            f"SELECT {host},c.command,c.status,{reason},COUNT(*) FROM command_calls c{joins} "
+            "WHERE c.transport='mcp' AND c.command IN ('memory_use','memory_feedback') "
+            f"AND metric_time(c.ts)>=? AND metric_time(c.ts)<? GROUP BY {host},c.command,c.status,{reason}",
+            (lower, upper)):
+            entry = attempts.setdefault(telemetry.host_name(host_name), {}).setdefault(
+                command, {"attempts": 0, "ok": 0, "rejected": 0, "reasons": {}})
+            entry["attempts"] += count
+            if status == "ok":
+                entry["ok"] += count
+            else:
+                entry["rejected"] += count
+                safe = code if code in telemetry.REJECTION_REASONS else "UNKNOWN"
+                entry["reasons"][safe] = entry["reasons"].get(safe, 0) + count
+    return {"linked_delivery_cohort": cohort, "call_attempts": attempts,
+            "basis": "distinct delivery receipts in window; linked follow-ups before window end. "
+                     "Reads are optional, attempts include retries, UNKNOWN means no recorded reason."}
+
+
 def export(repo,*,since="",until="",source_label="unknown",naive_timezone="local"):
     if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}",source_label):
         return {"error":"INVALID_SOURCE_LABEL"}
@@ -76,6 +131,7 @@ def export(repo,*,since="",until="",source_label="unknown",naive_timezone="local
             "feedback_log_observations":grouped("feedback_log","outcome",{"helpful","not_helpful","outdated","incorrect"}),
             "feedback_bindings":grouped("feedback_events","binding",{"version_task","legacy_unbound"},"created_at"),
             "feedback_receipt_states":grouped("feedback_events","state",{"applying","applied"},"created_at")}
+        counts["feedback_funnel"] = _feedback_funnel(conn, tables, lower, upper)
         counts["context_triggers"]=grouped("context_events","trigger",{"task_plan","subtask_start","new_failure",
             "decision","verified_result","checkpoint","before_compact","recover","observe"},"created_at")
         if "knowledge_uses" in tables:

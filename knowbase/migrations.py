@@ -645,6 +645,10 @@ MIGRATIONS: list[tuple[int, str]] = [
     CREATE INDEX IF NOT EXISTS idx_validator_exec_card
       ON validator_executions(memory_id, content_revision);
     """),
+    (36, """
+    CREATE TABLE command_call_rejections(
+      call_id TEXT PRIMARY KEY, reason TEXT NOT NULL);
+    """),
 ]
 
 

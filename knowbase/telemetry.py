@@ -19,6 +19,28 @@ CLI_COMMANDS=frozenset({"init","import","reindex","verify","archive","promote","
 # memory.db 保持只读，不因自身调用改变其报告的遥测口径（与 metrics 既有契约一致）。
 HOOK_EVENTS=frozenset({"session-start","user-prompt","stop","tool-before","tool-after","tool-failure","before-compact"})
 
+FEEDBACK_COMMANDS = frozenset({"memory_use", "memory_feedback"})
+REJECTION_REASONS = frozenset({
+    "INVALID_OUTCOME", "INVALID_TASK_RESULT", "INVALID_VERIFICATION_SOURCE",
+    "TASK_RESULT_REQUIRES_OUTCOME_ID", "INVALID_FEEDBACK_IDENTITY", "INCOMPLETE_FEEDBACK_BINDING",
+    "IDEMPOTENCY_CONFLICT", "VALIDATED_USE_REQUIRED", "TASK_OUTCOME_CONFLICT",
+    "FEEDBACK_RECOVERY_CONFLICT", "ACTIVATION_TARGET_CONFLICT", "FEEDBACK_READBACK_FAILED",
+    "NOT_FOUND", "REPOSITORY_UNAVAILABLE", "VALIDATION_RESULT_REQUIRED", "VALIDATION_NOT_COMPLETED",
+    "REVISION_CONFLICT", "KNOWLEDGE_NOT_ACTIVE", "TASK_OUTCOME_ID_CONFLICT",
+    "TASK_RESULT_REQUIRED", "AMBIGUOUS_TASK_OUTCOME", "INVALID_USE_STATE", "INVALID_USE_IDENTITY",
+    "CONTEXT_EVENT_NOT_FOUND", "CANDIDATE_NOT_DELIVERED", "CONTENT_REVISION_CONFLICT", "SCOPE_MISMATCH",
+    "UNKNOWN",
+})
+
+
+class RejectedText(str):
+    """Keep a legacy text response while exposing its stable code to local telemetry."""
+
+    def __new__(cls, text, reason):
+        reply = super().__new__(cls, text)
+        reply.reason = reason
+        return reply
+
 
 _INSTALLATION_CACHE: dict[str, str] = {}
 
@@ -52,7 +74,7 @@ def _installation_id(path) -> str:
     return value
 
 
-def record(transport,command,status,duration_ms):
+def record(transport,command,status,duration_ms,*,reason=""):
     allowed=MCP_COMMANDS if transport=="mcp" else CLI_COMMANDS|{f"hook.{e}" for e in HOOK_EVENTS}
     if command not in allowed or status not in {"ok","returned_error","raised"}:
         return
@@ -75,6 +97,13 @@ def record(transport,command,status,duration_ms):
             conn.execute("INSERT INTO command_call_hosts VALUES(?,?)", (call[0],host))
         except sqlite3.OperationalError:
             pass
+        if command in FEEDBACK_COMMANDS and status in {"returned_error", "raised"}:
+            try:
+                safe = reason.upper() if isinstance(reason, str) else "UNKNOWN"
+                conn.execute("INSERT INTO command_call_rejections VALUES(?,?)",
+                             (call[0], safe if safe in REJECTION_REASONS else "UNKNOWN"))
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
     except (sqlite3.Error,OSError,ValueError,TypeError):
         pass
@@ -87,20 +116,22 @@ def observe(function,command):
     @wraps(function)
     def observed(*args,**kwargs):
         import json
-        started=monotonic();status="raised"
+        started=monotonic();status="raised";reason=""
         try:
             result=function(*args,**kwargs)
             status="ok"
             if isinstance(result,str):
                 if result.startswith("错误"):
                     status="returned_error"
+                    reason=getattr(result,"reason","")
                 elif result.startswith("{"):
                     try:
-                        if json.loads(result).get("error"):
+                        reason=json.loads(result).get("error")
+                        if reason:
                             status="returned_error"
                     except (ValueError,AttributeError):
                         pass
             return result
         finally:
-            record("mcp",command,status,(monotonic()-started)*1000)
+            record("mcp",command,status,(monotonic()-started)*1000,reason=reason)
     return observed

@@ -31,7 +31,7 @@ def session_start() -> str:
         '[{"topic_id":"本阶段","queries":["具体技术词"],"status":"active"}]；简单检索用memory_search，传正确scope。'
         "只对相关候选memory_read；实际消费用memory_use绑定卡片版本与检索event_id，命中和阅读不等于有效帮助。\n"
         "2. 验证实际结果后再memory_feedback，outcome为helpful/not_helpful/outdated/incorrect，"
-        "携带expected_content_revision、use_id、稳定task_outcome_id和真实task_result；没有采纳则无需反馈。\n"
+        "通常只传已有use_id、明确outcome和实际task_result；没有可核对结果就不填。\n"
         "3. 高价值技术经验与业务规则可保存；业务规则须有出处，候选按实际验证反馈演进。"
         "一次性评估/状态数字和repo/docs已有事实留在项目文档。\n"
         "4. Hook自动采集入队，不阻断原任务；普通待办不要求本会话领取、分页或逐段处理，"

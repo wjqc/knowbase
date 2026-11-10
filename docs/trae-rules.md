@@ -6,7 +6,8 @@
 
 - 任务涉及具体项目/系统/报错时先 memory_search / memory_context（host_profile=trae，真实 session_id/scope）；检索命中先 memory_read 再动手；不整读 INDEX.md。
 - 有明确可复用结论时 memory_save（八项结构、来源与适用条件如实标注；无出处、不完整材料如实标注，不把原始文档或明文密钥入卡）。
-- 实际消费 memory_use；任务结果验证后 memory_feedback（携带当前 content_revision/use_id/稳定 task_outcome_id/task_result）。正文变化后旧反馈不能验证新版本；工具标签不代表真实人数。
+- 实际参考或采用时用 memory_use。已有可核对的任务结果时，可用 memory_feedback 提交 `use_id`、明确的 `outcome` 和实际 `task_result`。服务端从回执补卡 ID、内容版本和稳定结果标识；找不到可靠绑定时明确拒绝。没有实际结果就不补跑、不猜 helpful。旧版本反馈不能验证新版本。
+- memory_stats / memory_metrics 将递送、读卡、参考或采用、绑定反馈分开，并按宿主显示 `memory_use` / `memory_feedback` 的拒绝原因。历史未记录的原因显示 UNKNOWN，工具调用次数含重试。
 - **统一生命周期**：卡片类型只作分类。项目内有依据的新增可直接发布为 active+once；改变已发布结论、共享范围（global）或缺少依据的内容先待审。发布和可信晋升分开；普通 helpful 回填不会发布或晋升。
 - Hook 采集是可选项。Stop 不因待办/未反馈阻断，不催办、不等模型。**日常任务不要求领取、补材料或续租**；只有明确整理知识才查询项目内待办、领取和提交，最终读回。入队、待审、发布和验证分别报告。
 - `memory_update` 可能返回待审变更 ID，收到它时旧发布版本仍有效。授权人员使用 `lifecycle validate/publish` 审核发布；共享范围的变更需要权威确认。

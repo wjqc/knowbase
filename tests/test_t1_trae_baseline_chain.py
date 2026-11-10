@@ -261,11 +261,8 @@ def test_t1_ordinary_task_chain_and_revision_waits_for_review(t1_repo):
             "context_event_id": "phase-1", "id": mid,
             "content_revision": card["content_revision"], "state": "adopted"}))
         feedback = await call("memory_feedback", {
-            "id": mid, "outcome": "helpful",
-            "expected_content_revision": card["content_revision"],
-            "use_id": use["use_id"], "task_outcome_id": "t1-controlled-task",
-            "request_id": "t1-feedback-1"})
-        assert "已记录" in feedback
+            "use_id": use["use_id"], "outcome": "helpful", "task_result": "completed"})
+        assert "已记录" in feedback and "OUT-KB-" in feedback and card["content_revision"] in feedback
 
         meta, body, _path = store.load(t1_repo, mid)
         updated = await call("memory_update", {

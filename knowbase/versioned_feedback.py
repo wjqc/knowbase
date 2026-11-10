@@ -86,6 +86,34 @@ def _row(conn,where,params):
                         "FROM feedback_events WHERE "+where,params).fetchone()
 
 
+def _resolve_outcome(conn, use, use_id, task_key, task_result):
+    """Reuse an unambiguous recorded result, or key an explicit result to the receipt's task."""
+    if use[2] != use[1] or use[3]:
+        choices = conn.execute(
+            "SELECT DISTINCT task_outcome_id FROM feedback_events "
+            "WHERE memory_id=? AND content_revision=? AND task_key=? AND binding='version_task' LIMIT 2",
+            (use[4], use[5], task_key)).fetchall()
+        key = task_key
+    else:
+        # A session can contain multiple tasks. Without an explicit task identity,
+        # only deduplicate against the exact use receipt, not a sibling in the same chat.
+        choices = conn.execute(
+            "SELECT DISTINCT task_outcome_id FROM feedback_events WHERE use_id=? "
+            "AND binding='version_task' LIMIT 2", (use_id,)).fetchall()
+        key = materials.digest([use_id])
+    if len(choices) > 1:
+        return "", "", "AMBIGUOUS_TASK_OUTCOME"
+    task_outcome_id = choices[0][0] if choices else "OUT-KB-" + key
+    prior = conn.execute(
+        "SELECT task_id,host_profile,session_id,result FROM task_outcomes WHERE task_outcome_id=?",
+        (task_outcome_id,)).fetchone()
+    if prior and prior[:3] != (use[2], use[0], use[1]):
+        return "", "", "TASK_OUTCOME_ID_CONFLICT"
+    if prior and task_result and prior[3] != task_result:
+        return "", "", "TASK_OUTCOME_CONFLICT"
+    return task_outcome_id, task_result or (prior[3] if prior else ""), ""
+
+
 def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_governance_revision="",
           use_id="",task_outcome_id="",request_id="",lock_timeout=10.0,
           task_result="",verification_source="agent_report"):
@@ -97,31 +125,45 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
         return {"error":"INVALID_TASK_RESULT","allowed":sorted(TASK_RESULTS)}
     if verification_source not in VERIFICATION_SOURCES:
         return {"error":"INVALID_VERIFICATION_SOURCE","allowed":sorted(VERIFICATION_SOURCES)}
-    if task_result and not task_outcome_id:
+    if task_result and not (task_outcome_id or use_id):
         return {"error":"TASK_RESULT_REQUIRES_OUTCOME_ID"}
     if any(not isinstance(v,str) or len(v)>512 for v in
            (mid,by,expected_content_revision,expected_governance_revision,use_id,task_outcome_id,request_id)):
         return {"error":"INVALID_FEEDBACK_IDENTITY"}
-    bound=bool(use_id and task_outcome_id and expected_content_revision)
-    if any((use_id,task_outcome_id,expected_content_revision)) and not bound:
+    if not use_id and any((task_outcome_id,expected_content_revision)):
         return {"error":"INCOMPLETE_FEEDBACK_BINDING"}
-    phash=materials.digest([mid,outcome,by,expected_content_revision,use_id,task_outcome_id,
-                           task_result,verification_source])
     with RepoLock(repo,lock_timeout):
+        use=None
+        task_key=""
+        bound=bool(use_id)
+        if bound:
+            use=conn.execute("SELECT host_profile,session_id,task_id,task_revision,memory_id,content_revision,state "
+                             "FROM knowledge_uses WHERE use_id=?",(use_id,)).fetchone()
+            if (not use or (mid and use[4]!=mid)
+                    or (expected_content_revision and use[5]!=expected_content_revision)
+                    or use[6] not in ("adopted","referenced","read")):
+                return {"error":"VALIDATED_USE_REQUIRED"}
+            mid,expected_content_revision=use[4:6]
+            task_key=materials.digest(list(use[:4]))
+            if not task_outcome_id:
+                task_outcome_id,task_result,error=_resolve_outcome(
+                    conn,use,use_id,task_key,task_result)
+                if error:
+                    return {"error":error}
+                if not task_result:
+                    return {"error":"TASK_RESULT_REQUIRED",
+                            "hint":"明确提供实际 task_result；服务端不会从采纳推测结果"}
+        if not mid:
+            return {"error":"INVALID_FEEDBACK_IDENTITY"}
+        phash=materials.digest([mid,outcome,by,expected_content_revision,use_id,task_outcome_id,
+                               task_result,verification_source])
         if request_id:
             prior=conn.execute("SELECT payload_hash,receipt_id FROM feedback_requests WHERE request_id=?",(request_id,)).fetchone()
             if prior:
                 if prior[0]!=phash:
                     return {"error":"IDEMPOTENCY_CONFLICT"}
                 return _finish(repo,conn,_row(conn,"receipt_id=?",(prior[1],)),replaying=True)
-        use=None
-        task_key=""
         if bound:
-            use=conn.execute("SELECT host_profile,session_id,task_id,task_revision,memory_id,content_revision,state "
-                             "FROM knowledge_uses WHERE use_id=?",(use_id,)).fetchone()
-            if not use or use[4]!=mid or use[5]!=expected_content_revision or use[6] not in ("adopted","referenced","read"):
-                return {"error":"VALIDATED_USE_REQUIRED"}
-            task_key=materials.digest(list(use[:4]))
             prior=conn.execute("SELECT outcome FROM feedback_events WHERE memory_id=? AND content_revision=? "
                                "AND task_key=? AND task_outcome_id=? AND binding='version_task'",
                                (mid,expected_content_revision,task_key,task_outcome_id)).fetchone()
@@ -236,7 +278,7 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
                   "evidence_basis":("trusted_validation" if trusted else
                                     ("version_bound_agent_report" if bound else "legacy_unbound_observation")),
                   "policy_revision":decision.get("policy_revision") if bound else None}
-        result={"entity_id":mid,"receipt_id":receipt,"content_revision":current,
+        result={"entity_id":mid,"receipt_id":receipt,"content_revision":current,"task_outcome_id":task_outcome_id,
                 "governance_revision":_compute_governance_revision(after),"binding":binding,
                 "events":events,"governance_applied":governance_applied,"observed":observed}
         if bound and not trusted:

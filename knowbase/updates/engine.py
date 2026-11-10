@@ -219,6 +219,7 @@ LOG_TABLES=('usage_log','feedback_log','knowledge_uses','feedback_events','task_
             'jobs','job_spool','candidates','job_submissions','value_outbox','value_identity','command_calls',
             'context_sessions','context_events','job_segments','job_batches','segment_results',
             'applied_operations','entity_heads','write_intents','feedback_requests','command_call_hosts',
+            'command_call_rejections',
             'card_conflicts','retrieval_deliveries','use_retrieval_links','task_evidence','capture_gaps',
             'project_bindings','executor_runs','automation_budget')
 

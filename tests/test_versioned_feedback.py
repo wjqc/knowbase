@@ -103,7 +103,7 @@ def test_unbound_legacy_calls_are_observations_without_governance(memory_repo):
         assert r["binding"]=="legacy_unbound" and not r["governance_applied"]
     meta=store.load(memory_repo,args["mid"])[0]
     assert meta["confidence"]=="once" and meta["status"]=="active" and meta["helpful_count"]==0
-    assert feedback(memory_repo,args,use_id="unknown")["error"]=="INCOMPLETE_FEEDBACK_BINDING"
+    assert feedback(memory_repo,args,use_id="unknown")["error"]=="VALIDATED_USE_REQUIRED"
 
 
 def test_unverified_use_cannot_produce_validated_result_and_negative_is_observation(memory_repo):
