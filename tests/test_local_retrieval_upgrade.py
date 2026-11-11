@@ -8,8 +8,8 @@ import pytest
 from knowbase import config, hooks, index, store, context
 
 
-def seed(repo, title="HAR 压缩排查", scope="global", body="只看 HTTP 200 的 Content-Encoding，不把 304 当成压缩证据。"):
-    meta = store.new_meta("pitfall", title, scope, ["HAR"], "agent:test:fixture")
+def seed(repo, title="HAR 压缩排查", scope="global", body="只看 HTTP 200 的 Content-Encoding，不把 304 当成压缩证据。", tags=None):
+    meta = store.new_meta("pitfall", title, scope, ["HAR"] if tags is None else tags, "agent:test:fixture")
     meta["id"] = "P-" + hashlib.sha256((title+scope).encode()).hexdigest()[:12]
     meta["confidence"] = "verified"
     meta.pop("schema", None)
@@ -115,3 +115,45 @@ def test_real_stdio_mcp_search_keeps_signature_and_reports_local_mode(memory_rep
                 assert not result.isError
                 assert mid in result.content[0].text and 'L2 本地词法检索' in result.content[0].text
     asyncio.run(asyncio.wait_for(run(),timeout=20))
+
+
+def test_memory_search_requires_cmux_and_prioritizes_title_and_tags(memory_repo):
+    from knowbase.server import search_impl
+
+    noise = seed(memory_repo, "Feishu Agent Bridge", body="终端 agent 管理器和 cmuxd", tags=[])
+    query = "cmux 终端 agent 管理器"
+    assert "未命中" in search_impl(query, scope="global", limit=5)
+
+    body_match = seed(memory_repo, "终端 agent 管理器对比", scope="tools",
+                      body="备选方案包括 cmux。", tags=[])
+    title_match = seed(memory_repo, "cmux 终端工作区配置", tags=[])
+    tag_match = seed(memory_repo, "快捷键配置", body="配置工作区切换。", tags=["cmux"])
+    assert title_match in search_impl(query, scope="tools", limit=1)
+    top_two = search_impl(query, scope="tools", limit=2)
+    assert title_match in top_two and tag_match in top_two and body_match not in top_two
+    all_hits = search_impl(query, scope="tools", limit=5)
+    assert body_match in all_hits and noise not in all_hits
+
+
+def test_memory_search_accepts_registered_alias_and_keeps_chinese_expansion(memory_repo, tmp_path, monkeypatch):
+    from knowbase.server import search_impl
+
+    synonyms = tmp_path / "synonyms.json"
+    synonyms.write_text(json.dumps({"CMUX": ["终端复用工作台"]}))
+    monkeypatch.setenv("KNOWBASE_SYNONYMS", str(synonyms))
+    alias = seed(memory_repo, "终端复用工作台配置", body="配置工作区切换。", tags=[])
+    connection = seed(memory_repo, "企业内网连接失败的排查", body="检查客户端路由。", tags=[])
+    seed(memory_repo, "终端配置", scope="tools", body="详见连接失败和启动失败文档。", tags=[])
+    report = seed(memory_repo, "项目日报模板", body="写进展、风险和下一步。", tags=[])
+    assert alias in search_impl("cmux 终端 agent 管理器", scope="global")
+    assert connection in search_impl("内网连不上怎么办", scope="tools", limit=1)
+    assert report in search_impl("日报怎么写", scope="global", limit=1)
+
+
+def test_memory_search_keeps_exact_error_code(memory_repo):
+    from knowbase.server import search_impl
+
+    unauthorized = seed(memory_repo, "HTTP401 认证错误", body="检查访问令牌。", tags=[])
+    forbidden = seed(memory_repo, "HTTP 403 认证错误", body="检查访问权限。", tags=[])
+    hits = search_impl("HTTP 401 认证错误", scope="global")
+    assert unauthorized in hits and forbidden not in hits

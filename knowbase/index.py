@@ -416,17 +416,10 @@ def _load_aliases() -> dict[str, tuple[str, ...]]:
 def _expanded_lexical_ids(conn: sqlite3.Connection, query: str,
                           base: dict[str, float] | None, aliases=None) -> dict[str, float]:
     """原查询精确召回 + 受控同义短语扩展；扩展项使用 OR，不改变原词高优先级。"""
+    from .retrieval_policy import lexical_expansion_terms
+
     scores = dict(base or {})
-    terms = []
-    for phrase, values in (aliases if aliases is not None else _load_aliases()).items():
-        if phrase in query:
-            terms.extend(values)
-    # 长中文提问至少保留首个有信息量的 2~4 字片段，如“日报”。
-    for run in re.findall(r"[\u4e00-\u9fff]{2,}", query):
-        cleaned = re.sub(r"(怎么写|怎么办|如何|一下吗|一下)$", "", run)
-        if len(cleaned) >= 2:
-            terms.append(cleaned)
-    for term in list(dict.fromkeys(terms))[:6]:
+    for term in lexical_expansion_terms(query, aliases if aliases is not None else _load_aliases()):
         hit = _match_ids(conn, [term]) or _like_ids(conn, [term])
         for mid, score in hit.items():
             scores[mid] = max(scores.get(mid, 0.0), score * 0.7)
@@ -449,10 +442,12 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
     started=time.monotonic()
     deadline=deadline or started+1.2
     if diagnostics is None:diagnostics={}
-    from .retrieval_policy import local_policy
-    policy, aliases = local_policy()
-    if diagnostics is not None:
-        diagnostics.update(policy, origin=origin)
+    from . import retrieval_policy
+    policy, aliases = retrieval_policy.local_policy()
+    explicit = origin in {"mcp_search", "mcp_search_local"}
+    diagnostics.update(policy, origin=origin)
+    if explicit:
+        diagnostics["policy_revision"] = retrieval_policy.EXPLICIT_POLICY_VERSION
     if len(query or "") > 8192:
         if diagnostics is not None:
             diagnostics["reason"] = "query_too_large"
@@ -464,18 +459,24 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
     before_revision = None
     if origin in {"mcp_search","mcp_context"}:
         before_revision=list(conn.execute("SELECT m.id,m.title,m.scope,m.confidence,m.status,m.staging,h.content_revision FROM meta m LEFT JOIN entity_heads h ON h.entity_id=m.id ORDER BY m.id"))
+    core_terms = retrieval_policy.search_core_terms(query, aliases) if explicit else []
+    recall_terms = terms
+    if core_terms:
+        recall_terms = list(dict.fromkeys(
+            term.lower() for term in [*terms, *(value for group in core_terms for value in group)]
+        ))
     # ≥3 字词走 FTS5 MATCH（OR 召回 + 命中词数加权），None 表示不可用/无命中
-    lex = _match_ids(conn, terms) or {}
+    lex = _match_ids(conn, recall_terms) or {}
     # 2 字及以下短词（如「死锁」）trigram 无法命中，单独 LIKE 召回后并入词法分。
     # 原实现是在召回后再做「所有短词必须同时出现」的硬闸门，等价于 AND，
     # 会把「主体 + 现象/动作」型提问整体过滤成空结果。
-    short_terms = [t for t in terms if len(t) < 3]
+    short_terms = [t for t in recall_terms if len(t) < 3]
     if short_terms:
         for mid, score in _like_ids(conn, short_terms).items():
             lex[mid] = max(lex.get(mid, 0.0), score * 0.7)
     if not lex:
         # trigram 无命中时整体回退 LIKE（错别字/词形变化兜底）
-        lex = _like_ids(conn, terms)
+        lex = _like_ids(conn, recall_terms)
     if policy["level"] == "L2":
         lex = _expanded_lexical_ids(conn, query[:8192], lex, aliases)
     # 构建参数化 SQL WHERE，将 Python 侧后过滤推入数据库
@@ -504,7 +505,7 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
             "SELECT content_revision FROM entity_heads WHERE entity_id=?", (m["id"],)
         ).fetchone()
         m["content_revision"] = head[0] if head else ""
-        if origin in {"mcp_search", "mcp_context", "hook_prompt", "hook_inflight"} and not source_current(
+        if (explicit or origin in {"mcp_context", "hook_prompt", "hook_inflight"}) and not source_current(
             conn, m["id"], m
         ):
             continue
@@ -525,9 +526,23 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
         if before_revision!=after_revision:
             fresh={}
             results=search(conn,query,mtype=mtype,scope=scope,tag=tag,limit=limit,
-                           include_inactive=include_inactive,origin="local",diagnostics=fresh,deadline=deadline)
+                           include_inactive=include_inactive,
+                           origin="mcp_search_local" if explicit else "local",
+                           diagnostics=fresh,deadline=deadline)
             diagnostics.update(level=fresh["level"],channels=["lexical"],reason="index_changed",semantic_status="local_after_revision_change")
             return results
+    evidence = {}
+    if explicit:
+        support = list(dict.fromkeys(
+            term.lower() for term in [*terms, *retrieval_policy.chinese_phrases(query)] if len(term) >= 2
+        ))[:16]
+        expansions = (
+            [term.lower() for term in retrieval_policy.lexical_expansion_terms(query, aliases)
+             if term.lower() not in support] if policy["level"] == "L2" else []
+        )
+        evidence = retrieval_policy.explicit_lexical_evidence(conn, lex_all, core_terms, support, expansions)
+        lex = {mid: score for mid, score in lex.items() if mid in evidence}
+        lex_all = {mid: score for mid, score in lex_all.items() if mid in evidence}
     fused = _rrf_scores(lex,dense)
     if not fused:
         # 无直接命中时仍可跟随 archived 旧卡的重定向（MERGE 旧卡内容只在 archived 卡里）。
@@ -564,7 +579,7 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
         results.append({**m, "score": round(score, 6), "snippet": snippet,
                         "channels": channels})
 
-    results.sort(key=lambda x: -x["score"])
+    results.sort(key=lambda x: (evidence.get(x["id"], (0, 0, 0, 0)), x["score"]), reverse=True)
     # Automatic callers use positive lexical evidence, not an uncalibrated RRF threshold.
     if origin.startswith("hook"):
         from .retrieval_policy import automatic_match
