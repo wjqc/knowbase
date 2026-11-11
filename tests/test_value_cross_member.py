@@ -116,12 +116,19 @@ def test_task_outcome_ledger_and_events(memory_repo):
                                    task_outcome_id="OUT-78", task_result="success")
     conn.close()
     assert bad["error"] == "INVALID_TASK_RESULT"
-    conn = index.connect(memory_repo)
-    no_id = versioned_feedback.apply(memory_repo, conn, mid, "helpful", "pytest",
-                                     expected_content_revision=revision, use_id=use["use_id"],
-                                     task_result="completed")
-    conn.close()
-    assert no_id["error"] == "TASK_RESULT_REQUIRES_OUTCOME_ID"
+    with index.connect(memory_repo) as conn:
+        shortcut = versioned_feedback.apply(memory_repo, conn, "", "helpful", "pytest",
+                                             use_id=use["use_id"], task_result="completed")
+        assert shortcut["idempotent"] and shortcut["receipt_id"] == result["receipt_id"]
+        conflict = versioned_feedback.apply(memory_repo, conn, mid, "helpful", "pytest",
+                                             use_id=use["use_id"], task_outcome_id="OUT-77",
+                                             task_result="failed")
+        assert conflict["error"] == "TASK_OUTCOME_CONFLICT"
+        unbound = versioned_feedback.apply(memory_repo, conn, mid, "helpful", "pytest",
+                                            task_result="completed")
+        assert unbound["error"] == "TASK_RESULT_REQUIRES_OUTCOME_ID"
+        assert conn.execute("SELECT result FROM task_outcomes").fetchall() == [("completed",)]
+    assert len(outbox_rows(memory_repo, "task.completed")) == 1
 
 
 def _package(path, events_list, source):

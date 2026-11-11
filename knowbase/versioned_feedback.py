@@ -136,6 +136,7 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
         use=None
         task_key=""
         bound=bool(use_id)
+        shortcut=bound and not task_outcome_id
         if bound:
             use=conn.execute("SELECT host_profile,session_id,task_id,task_revision,memory_id,content_revision,state "
                              "FROM knowledge_uses WHERE use_id=?",(use_id,)).fetchone()
@@ -145,7 +146,7 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
                 return {"error":"VALIDATED_USE_REQUIRED"}
             mid,expected_content_revision=use[4:6]
             task_key=materials.digest(list(use[:4]))
-            if not task_outcome_id:
+            if shortcut:
                 task_outcome_id,task_result,error=_resolve_outcome(
                     conn,use,use_id,task_key,task_result)
                 if error:
@@ -164,6 +165,14 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
                     return {"error":"IDEMPOTENCY_CONFLICT"}
                 return _finish(repo,conn,_row(conn,"receipt_id=?",(prior[1],)),replaying=True)
         if bound:
+            if task_result and not shortcut:
+                prior_outcome=conn.execute("SELECT task_id,host_profile,session_id,result FROM task_outcomes "
+                                           "WHERE task_outcome_id=?",(task_outcome_id,)).fetchone()
+                if prior_outcome:
+                    if prior_outcome[:3] != (use[2],use[0],use[1]):
+                        return {"error":"TASK_OUTCOME_ID_CONFLICT"}
+                    if prior_outcome[3] != task_result:
+                        return {"error":"TASK_OUTCOME_CONFLICT"}
             prior=conn.execute("SELECT outcome FROM feedback_events WHERE memory_id=? AND content_revision=? "
                                "AND task_key=? AND task_outcome_id=? AND binding='version_task'",
                                (mid,expected_content_revision,task_key,task_outcome_id)).fetchone()
@@ -205,11 +214,6 @@ def apply(repo,conn,mid,outcome,by,*,expected_content_revision="",expected_gover
             return {"error":"REVISION_CONFLICT","current_governance_revision":gov}
         if bound and ((staged and not validation) or meta.get("status")=="archived"):
             return {"error":"KNOWLEDGE_NOT_ACTIVE"}
-        if bound and task_result:
-            prior_outcome=conn.execute("SELECT task_id,host_profile,session_id FROM task_outcomes "
-                                       "WHERE task_outcome_id=?",(task_outcome_id,)).fetchone()
-            if prior_outcome and prior_outcome != (use[2],use[0],use[1]):
-                return {"error":"TASK_OUTCOME_ID_CONFLICT"}
         after=copy.deepcopy(meta)
         events=[]
         auto_activation=False

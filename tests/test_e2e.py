@@ -241,11 +241,11 @@ r = save_impl("workflow", "Phase 3 收尾实测记录样本", card(
     verified="2026-09-21 本机执行确认。", unknown="回归范围边界未定。"))
 check("任务日志特征 warn", r.startswith("已保存 W-") and "任务执行记录" in r, r)
 
-# 24. read/search 回填强提示（feedback 闭环）
+# 24. 普通阅读和搜索没有验证回执，不催促反馈
 r = read_impl(pid)
-check("read 回填强提示", "memory_feedback" in r and "晋升" in r, r[:140])
+check("普通阅读返回卡版本，不催反馈", "content_revision=" in r and "memory_feedback" not in r, r[:140])
 r = search_impl("镜像仓库切换")
-check("search 回填提示", "memory_feedback" in r, r[-160:])
+check("搜索返回候选，不催反馈", "命中不等于使用" in r and "memory_feedback" not in r, r[-160:])
 
 # 25. 本机路径拒绝入库；代码证据使用项目相对路径
 r = save_impl("pitfall", "家目录路径可移植性样例", card(

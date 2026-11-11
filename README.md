@@ -97,7 +97,7 @@ Claude Code（`~/.claude/settings.json`）与 ZCode（`~/.zcode/cli/config.json`
 
 1. 任务涉及具体项目/系统/报错 → 先 `memory_search`（≥3 字技术词），命中先 `memory_read`；
 2. 日常任务以完整的业务答复直接结束。已启用的 Hook 静默入队，主会话不等待、不补写、不重试或报告入库回执。仅在用户明确要求保存或维护经验时用 `memory_save` / `memory_update`；新卡正文须含八项小节：**结论 / 解决的问题 / 适用条件 / 不适用条件 / 可执行动作 / 关键证据 / 验证情况 / 未知与待确认**；
-3. 实际参考/采纳先用 `memory_use` 关联递送事件、任务和卡版本；验证结果后 `memory_feedback` 回填 helpful / not_helpful / outdated / incorrect，并传 `expected_content_revision/use_id/task_outcome_id`。同任务结果重试只应用一次；旧调用仅记录未绑定观察，不改变治理状态。正文变更会清除旧版本的验证；可信人工确认仍走 CLI `verify`，工具名不是人工身份；
+3. 实际参考或采用时用 `memory_use` 关联递送事件、任务和卡版本。已有可核对的任务结果时，可用 `memory_feedback` 提交 `use_id`、明确的 `outcome` 和实际 `task_result`；服务端从回执补齐卡、版本和稳定结果标识。重放不重复计数，旧回执不能验证新版本。不为回填延长会话；
 4. stale / once 的记忆采信前先验证；检索走 `memory_search`，不要整读 INDEX.md；
 5. 标准/偏好类保存先进入staging，按授权策略和证据流转，不绕过治理；
 6. body 里禁止明文密钥；经验卡禁止本机路径和仓外文档引用。文档结论必须正文自足或使用 knowbase 仓内相对路径；代码证据写成 `code:<项目>/<仓库相对路径>`（可带行号，lint 会拦违规写入）。**整篇文档等原始材料不入 memory_save**，走 `knowbase import` 导入为 source（见下节）。
