@@ -427,8 +427,11 @@ def _h_lifecycle_recompute(repo, conn, cfg) -> dict:
     """W1-4：全库治理重算投影（apply_decision 条件写入，无变化零写盘）。"""
     if not _lifecycle_gate(cfg, "recompute"):
         return {"skipped": "lifecycle_recompute_disabled"}
-    from ..knowledge_lifecycle import reconcile
-    result = reconcile.materialize_and_recompute(repo, conn)
+    from ..knowledge_lifecycle import governance, reconcile
+    try:
+        result = reconcile.materialize_and_recompute(repo, conn, cfg=cfg)
+    except governance.GovernanceWorktreeDirty:
+        return {"blocked": "governance_worktree_dirty"}
     by_decision: dict = {}
     for d in result.get("decisions") or []:
         by_decision[d.get("decision", "?")] = by_decision.get(d.get("decision", "?"), 0) + 1

@@ -18,8 +18,10 @@ status→stale（隔离）；治理字段不产生新 content revision。
 import hashlib
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
-from .. import index, store
+from .. import config, gitops, index, store
+from ..locking import RepoLock
 from . import contracts
 
 POLICY_REVISION = "lifecycle-governance-v1"
@@ -107,17 +109,11 @@ def decide(conn, memory_id: str, revision: str) -> dict:
             "evidence_watermark": max((e["occurred_at"] for e in events), default="")}
 
 
-def apply_decision(repo, conn, memory_id: str) -> dict:
-    """重算并落地治理投影（兼容镜像字段；治理字段不动 content revision）。
-
-    verified 晋升从本函数走（V2-01 已关反馈旁路）；隔离映射 status=stale +
-    quarantine_reason，不删内容。"""
+def _project(conn, meta, body):
+    """计算兼容镜像；治理字段不改变内容版本。"""
     from ..mutations import _compute_revision
-    meta, body, path = store.load(repo, memory_id)
-    if not meta:
-        return {"error": "NOT_FOUND"}
     revision = _compute_revision(meta, body)
-    decision = decide(conn, memory_id, revision)
+    decision = decide(conn, meta["id"], revision)
     quality_state = {"unverified": "unverified", "validated": "validated",
                      "verified": "verified", "quarantine": "disputed"}[decision["decision"]]
     changed = False
@@ -146,19 +142,62 @@ def apply_decision(repo, conn, memory_id: str) -> dict:
     meta["quality_state"] = quality_state
     meta["evidence_set_digest"] = decision["input_set_digest"][:32]
     meta["policy_revision"] = POLICY_REVISION
-    if changed:
-        from ..commit_adapter import _atomic_write
-        _atomic_write(path, store.render(meta, body))
-        index.upsert(conn, *store.load(repo, memory_id), commit=False)
-        conn.commit()
     decision["quality_state"] = quality_state
     decision["applied"] = True
-    return decision
+    return decision, changed
 
 
-def recompute_all(repo, conn) -> list[dict]:
+class GovernanceWorktreeDirty(RuntimeError):
+    """已有未提交修改，推迟自动投影。"""
+
+
+def _apply(repo, conn, memory_id=None, *, cfg=None):
+    from ..commit_adapter import _atomic_write
+
+    repo = Path(repo).resolve()
+    cfg = config.load_config() if cfg is None else cfg
+    auto_commit = cfg.get("git", {}).get("auto_commit", True) and gitops.is_repo(repo)
+    with RepoLock(repo, cfg.get("lock_timeout", 10.0)):
+        if auto_commit and gitops._has_user_changes(gitops._run(repo, "status", "--porcelain", timeout=3)):
+            raise GovernanceWorktreeDirty("治理重算已推迟：工作区有未提交内容")
+        cards = (store.load(repo, memory_id),) if memory_id else store.iter_all(repo, include_staging=True)
+        decisions, updates = [], []
+        for meta, body, path in cards:
+            if not meta:
+                decisions.append({"error": "NOT_FOUND"})
+                continue
+            decision, changed = _project(conn, meta, body)
+            decisions.append(decision)
+            if changed:
+                updates.append((meta, body, path))
+        if not updates:
+            return decisions
+
+        paths = [path for _, _, path in updates]
+        try:
+            for meta, body, path in updates:
+                _atomic_write(path, store.render(meta, body))
+            if auto_commit:
+                warning = gitops.commit_paths(repo, "lifecycle: update governance projections", paths)
+                if warning:
+                    raise RuntimeError(warning)
+        except (OSError, RuntimeError):
+            if auto_commit:
+                # Only restore paths owned by this pass, starting from a clean worktree.
+                gitops._run(repo, "restore", "--source=HEAD", "--staged", "--worktree", "--",
+                            *(str(path.relative_to(repo)) for path in paths))
+            raise
+        for meta, body, path in updates:
+            index.upsert(conn, meta, body, path, staging=path.parent.name == "staging", commit=False)
+        conn.commit()
+        return decisions
+
+
+def apply_decision(repo, conn, memory_id: str) -> dict:
+    """重算并落地单张卡的治理投影。"""
+    return _apply(repo, conn, memory_id)[0]
+
+
+def recompute_all(repo, conn, *, cfg=None) -> list[dict]:
     """全库重算（worker 调度/导入证据后调用）。"""
-    decisions = []
-    for meta, body, _path in store.iter_all(repo, include_staging=True):
-        decisions.append(apply_decision(repo, conn, meta["id"]))
-    return decisions
+    return _apply(repo, conn, cfg=cfg)

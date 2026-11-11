@@ -79,9 +79,9 @@ def sync_state(conn) -> dict:
             "note": "local watermark; remote convergence requires exchange + recompute"}
 
 
-def materialize_and_recompute(repo, conn) -> dict:
+def materialize_and_recompute(repo, conn, *, cfg=None) -> dict:
     """导入证据后的本地治理重算（幂等入口；V2-14 流程第 4 步）。"""
-    decisions = governance.recompute_all(repo, conn)
+    decisions = governance.recompute_all(repo, conn, cfg=cfg)
     return {"recomputed": len(decisions),
             "decisions": [{"memory_id": d.get("memory_id"),
                            "decision": d.get("decision"),
