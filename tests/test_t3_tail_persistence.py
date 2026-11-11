@@ -65,6 +65,27 @@ def test_missing_file_without_tail_fails_honestly(memory_repo, tmp_path, monkeyp
         conn.close()
 
 
+def test_zcode_stop_queues_each_distinct_final_reply(memory_repo, tmp_path, monkeypatch, capsys):
+    replies = ("布尔开关不能直接用 bool 转换字符串。", "代理的 TLS 终止位置决定证书部署点。")
+    conn = index.connect(memory_repo)
+    try:
+        payloads = []
+        for i, text in enumerate((*replies, replies[0])):
+            transcript = tmp_path / f"turn-{i}.jsonl"
+            transcript.write_text(json.dumps({"message": {"role": "assistant", "content": [
+                {"type": "text", "text": text}]}}, ensure_ascii=False) + "\n", encoding="utf-8")
+            _stop_enqueue(monkeypatch, "zcode-two-turns", transcript)
+            transcript.unlink()
+            processed = checkpoint_queue.run_due(memory_repo, conn, config.load_config(), lambda: True)
+            payloads.extend(materials.payload_for_job(conn, job_id)
+                            for job_id in processed["results"][0]["job_ids"])
+        assert capsys.readouterr() == ("", "")
+        assert [p["segments"][0]["text"] for p in payloads] == list(replies)
+        assert [(p["capture_range"]["start"], p["capture_range"]["end"]) for p in payloads] == [(0, 1), (1, 2)]
+    finally:
+        conn.close()
+
+
 def test_oversized_tail_aligned_to_complete_lines(memory_repo, tmp_path, monkeypatch, capsys):
     transcript = tmp_path / "big.jsonl"
     with transcript.open("w", encoding="utf-8") as out:

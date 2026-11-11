@@ -126,17 +126,18 @@ def _mark_distiller_session(repo, host: str, session_id: str) -> None:
         pass
 
 
-def _save_capture_checkpoint(conn, host, session_id, scope, coverage, events, source_kind):
+def _save_capture_checkpoint(conn, host, session_id, scope, coverage, events, source_kind, *, offset=0):
     event_count = conn.execute("SELECT COUNT(*) FROM context_events WHERE host_profile=? AND session_id=? "
                                "AND trigger IN ('observe','new_failure')", (host, session_id)).fetchone()[0]
-    coverage["_hook_capture"] = {"cursor": len(events), "prefix_hash": materials.digest([e.text for e in events]),
+    end = offset + len(events)
+    coverage["_hook_capture"] = {"cursor": end, "prefix_hash": materials.digest([e.text for e in events]),
                                   "event_count": event_count, "source_kind": source_kind}
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     conn.execute("INSERT INTO context_sessions(host_profile,session_id,scope,coverage_json,last_checkpoint_at,updated_at,observed_cursor) "
                  "VALUES(?,?,?,?,?,?,?) ON CONFLICT(host_profile,session_id) DO UPDATE SET "
                  "coverage_json=excluded.coverage_json,last_checkpoint_at=excluded.last_checkpoint_at,"
                  "updated_at=excluded.updated_at,observed_cursor=excluded.observed_cursor",
-                 (host, session_id, scope, json.dumps(coverage), now, now, f"{source_kind}:{len(events)}"))
+                 (host, session_id, scope, json.dumps(coverage), now, now, f"{source_kind}:{end}"))
     conn.commit()
 
 
@@ -156,7 +157,7 @@ def _capture_chunks(events):
         yield chunk
 
 
-def capture_increment(repo, session_id, transcript_path, scope, host, *, automatic=True):
+def capture_increment(repo, session_id, transcript_path, scope, host, *, automatic=True, zcode_reply=False):
     """只从显式宿主 transcript 引用采集未入队增量，不扫描聊天目录。"""
     path = Path(transcript_path or "")
     events = (normalizer.parse_transcript_auto(str(path), default_session_id=session_id, default_scope=scope, strict=True)
@@ -171,14 +172,22 @@ def capture_increment(repo, session_id, transcript_path, scope, host, *, automat
             return {"error": "SCOPE_MISMATCH"}
         coverage = json.loads(row[0]) if row else {}
         checkpoint = coverage.get("_hook_capture", {})
-        source_kind = "transcript" if events is not None else "observations"
-        if events is None:
-            events = _observed_events(conn, session_id, scope, host)
-        cursor = checkpoint.get("cursor", 0) if checkpoint.get("source_kind", "transcript") == source_kind else 0
-        prefix_hash = materials.digest([e.text for e in events[:cursor]])
-        if cursor > len(events) or (cursor and prefix_hash != checkpoint.get("prefix_hash")):
-            events = _observed_events(conn, session_id, scope, host)
-            source_kind, cursor = "observations", 0
+        offset = 0
+        if zcode_reply:
+            if not events or len(events) != 1 or events[0].role != "assistant":
+                return {"job_ids": [], "capture_status": "no_delta"}
+            source_kind, cursor = "zcode_reply", 0
+            if checkpoint.get("source_kind") == source_kind:
+                offset = checkpoint["cursor"]
+        else:
+            source_kind = "transcript" if events is not None else "observations"
+            if events is None:
+                events = _observed_events(conn, session_id, scope, host)
+            cursor = checkpoint.get("cursor", 0) if checkpoint.get("source_kind", "transcript") == source_kind else 0
+            prefix_hash = materials.digest([e.text for e in events[:cursor]])
+            if cursor > len(events) or (cursor and prefix_hash != checkpoint.get("prefix_hash")):
+                events = _observed_events(conn, session_id, scope, host)
+                source_kind, cursor = "observations", 0
         if not automatic:
             # Explicit observation capture may revisit auto-filtered material;
             # queued text hashes below still prevent duplicate extraction jobs.
@@ -191,7 +200,8 @@ def capture_increment(repo, session_id, transcript_path, scope, host, *, automat
             coverage["_hook_capture_filter"] = filtered
         if not delta:
             # 增量全被过滤（自身调用/提炼会话回声）：推进游标避免每次钩子重算。
-            _save_capture_checkpoint(conn, host, session_id, scope, coverage, events, source_kind)
+            if not zcode_reply:
+                _save_capture_checkpoint(conn, host, session_id, scope, coverage, events, source_kind)
             return {"job_ids": [], "capture_status": "no_delta"}
         seen = _enqueued_text_hashes(conn, host, session_id)
         job_ids = []
@@ -201,7 +211,7 @@ def capture_increment(repo, session_id, transcript_path, scope, host, *, automat
             payload["total_segments"] = len(payload["segments"])
             if not payload["segments"]:
                 continue
-            payload.update(host_profile=host, capture_range={"source_kind": source_kind, "start": cursor, "end": len(events)},
+            payload.update(host_profile=host, capture_range={"source_kind": source_kind, "start": offset + cursor, "end": offset + len(events)},
                            coverage_scope="observed_host_events" if source_kind == "observations" else "provided_transcript",
                            hook_capture=automatic)
             hashes = [segment["text_hash"] for segment in payload["segments"]]
@@ -216,7 +226,8 @@ def capture_increment(repo, session_id, transcript_path, scope, host, *, automat
             job_ids.append(queued["job_id"])
             seen.update(hashes)
         # 这里只推进已持久入队游标；settled 仍由物化服务维护。
-        _save_capture_checkpoint(conn, host, session_id, scope, coverage, events, source_kind)
+        if job_ids or not zcode_reply:
+            _save_capture_checkpoint(conn, host, session_id, scope, coverage, events, source_kind, offset=offset)
         return {"job_ids": job_ids, "capture_status": "queued" if job_ids else "no_delta", "captured_events": len(delta)}
     finally:
         conn.close()
