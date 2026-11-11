@@ -96,6 +96,7 @@ def _capture(repo, conn, scope, payload, cfg):
     transcript, session, host = (payload[k] for k in ("transcript_path", "session_id", "host_profile"))
     flag = None
     tail_tmp = None
+    zcode_reply = False
     try:
         if transcript and not Path(transcript).is_file():
             tail = payload.get("transcript_tail") or ""
@@ -118,7 +119,9 @@ def _capture(repo, conn, scope, payload, cfg):
                     return {"capture_status": "no_delta", "job_ids": []}
             stats = _transcript_stats(transcript)
             threshold = cfg["hooks"].get("mid_session_threshold", 5) if flag else 1
-            if stats["work_ops"] < threshold or stats["memory_write"]:
+            # ZCode Stop can provide only the final assistant message, without the turn's tools.
+            zcode_reply = host == "zcode" and not payload.get("mid_session") and not stats["work_ops"]
+            if stats["memory_write"] or (stats["work_ops"] < threshold and not zcode_reply):
                 return {"capture_status": "no_delta", "job_ids": []}
             project = payload["project"]
             scope = _infer_scope(conn, project) if project else "global"
@@ -127,7 +130,7 @@ def _capture(repo, conn, scope, payload, cfg):
             conn.execute("INSERT OR IGNORE INTO context_sessions(host_profile,session_id,scope,updated_at) VALUES(?,?,?,?)",
                          (host, session, scope, datetime.now(timezone.utc).isoformat(timespec="seconds")))
             conn.commit()
-        result = host_events.capture_increment(repo, session, transcript, scope, host)
+        result = host_events.capture_increment(repo, session, transcript, scope, host, zcode_reply=zcode_reply)
         if flag and result.get("job_ids") and not result.get("error"):
             flag.write_text("1", encoding="utf-8")
         return result
