@@ -24,7 +24,7 @@ def test_stop_never_blocks_for_new_job_or_pending_feedback(memory_repo,monkeypat
     for _ in range(3):
         monkeypatch.setattr(hooks.sys,'stdin',io.StringIO('{"session_id":"s"}'))
         hooks.cmd_stop(style)
-        assert capsys.readouterr().out==''
+        assert capsys.readouterr() == ("", "")
 
 
 def test_legacy_stop_silently_queues_and_does_not_demand_feedback(memory_repo,tmp_path,monkeypatch):
@@ -165,6 +165,9 @@ def test_formal_cli_two_stops_do_not_resume_model_but_persist_rule(memory_repo,t
     for _ in range(2):
         result=subprocess.run(args,input=json.dumps(payload),text=True,capture_output=True,env=env,timeout=15)
         assert result.returncode==0 and result.stdout=='' and result.stderr==''
+    bad_env = {**env, 'KNOWBASE_REPO_PATH': str(tmp_path / 'missing-repo')}
+    result = subprocess.run(args, input=json.dumps(payload), text=True, capture_output=True, env=bad_env, timeout=15)
+    assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
     conn=index.connect(memory_repo)
     assert conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='capture'").fetchone()[0]==0
     assert checkpoint_queue.run_due(memory_repo, conn, config.load_config(), lambda: True)["processed"] >= 1

@@ -5,7 +5,7 @@
 现行规则（以 MCP 初始化说明为准，此处为摘要）：
 
 - 任务涉及具体项目/系统/报错时先 memory_search / memory_context（host_profile=trae，真实 session_id/scope）；检索命中先 memory_read 再动手；不整读 INDEX.md。
-- 有明确可复用结论时 memory_save（八项结构、来源与适用条件如实标注；无出处、不完整材料如实标注，不把原始文档或明文密钥入卡）。
+- 日常任务以完整的业务答复直接结束。已启用的 Hook 静默采集入队；主会话不等待、不补写、不重试或报告回执。仅在用户明确要求保存或维护经验时用 memory_save / memory_update（八项结构、来源与适用条件如实标注，不把原始文档或明文密钥入卡）。
 - 实际参考或采用时用 memory_use。已有可核对的任务结果时，可用 memory_feedback 提交 `use_id`、明确的 `outcome` 和实际 `task_result`。服务端从回执补卡 ID、内容版本和稳定结果标识；找不到可靠绑定时明确拒绝。没有实际结果就不补跑、不猜 helpful。旧版本反馈不能验证新版本。
 - memory_stats / memory_metrics 将递送、读卡、参考或采用、绑定反馈分开，并按宿主显示 `memory_use` / `memory_feedback` 的拒绝原因。历史未记录的原因显示 UNKNOWN，工具调用次数含重试。
 - **统一生命周期**：卡片类型只作分类。项目内有依据的新增可直接发布为 active+once；改变已发布结论、共享范围（global）或缺少依据的内容先待审。发布和可信晋升分开；普通 helpful 回填不会发布或晋升。
@@ -24,7 +24,7 @@
 | MCP 17 工具 | 支持 | 支持 | 支持 |
 | 会话开始规则注入 | ✅ hook | ✅ hook | ✅ 原生 hooks.json（16 天零流量已修复：设置→Conversation→本地自动运行） |
 | 每条输入自动检索注入 | ✅ hook（本地检索） | ✅ hook（本地检索） | ✅ UserPromptSubmit hook |
-| 会话结束漏存再判断 | ✅ Stop hook | ✅ Stop hook（含有界尾持久化） | ✅ Stop hook |
+| 会话结束静默入队 | ✅ Stop hook | ✅ Stop hook（含有界尾持久化） | ✅ Stop hook |
 | 来源标识 | claude-code | zcode | trae |
 | 独立执行器（无兜底） | 复用宿主 CLI | 复用宿主 CLI | 同机其他宿主 CLI 执行 |
 
