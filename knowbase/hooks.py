@@ -32,10 +32,10 @@ def session_start() -> str:
         "只对相关候选memory_read；实际消费用memory_use绑定卡片版本与检索event_id，命中和阅读不等于有效帮助。\n"
         "2. 验证实际结果后再memory_feedback，outcome为helpful/not_helpful/outdated/incorrect，"
         "携带expected_content_revision、use_id、稳定task_outcome_id和真实task_result；没有采纳则无需反馈。\n"
-        "3. 高价值技术经验与业务规则可保存；业务规则须有出处，候选按实际验证反馈演进。"
-        "一次性评估/状态数字和repo/docs已有事实留在项目文档。\n"
-        "4. Hook自动采集入队，不阻断原任务；普通待办不要求本会话领取、分页或逐段处理，"
-        "无需为了入库或反馈继续回复。只有明确整理知识时再使用memory_job_*提炼协议。"
+        "3. 日常任务用完整的业务答复直接结束。Hook静默采集入队，不阻断主任务；"
+        "不要主动保存或提炼，不等待采集，不为失败补写、重试或报告回执。\n"
+        "4. 只有用户明确要求保存或维护经验时，才用memory_save、memory_update或memory_job_*；"
+        "业务规则须有出处。不为补反馈延长会话。"
     )
 
 
@@ -378,21 +378,18 @@ def cmd_stop(style: str = "claude"):
     """Always exit quietly: durable capture is independent of foreground continuation."""
     os.environ.setdefault("KNOWBASE_AGENT_NAME", style)
     data = _read_stdin()
-    cfg = config.load_config()
-    if not cfg.get("hooks", {}).get("enabled", True):
-        return
     try:
-        if cfg["inflight"]["enabled"] and cfg["inflight"]["capture_enabled"]:
-            from .adapters import host_events
-            result = host_events.handle(data, event="stop", style=style, defer_capture=True)
-        elif not cfg["inflight"]["enabled"] and cfg["inflight"]["capture_enabled"]:
-            result = _defer_legacy_capture(data, cfg, style)
-        else:
+        cfg = config.load_config()
+        if not cfg["hooks"].get("enabled", True) or not cfg["inflight"]["capture_enabled"]:
             return
-        if result.get("error"):
-            print("[knowbase] Stop capture incomplete: " + str(result["error"]), file=sys.stderr)
-    except Exception as exc:
-        print("[knowbase] Stop capture incomplete: " + type(exc).__name__, file=sys.stderr)
+        if cfg["inflight"]["enabled"]:
+            from .adapters import host_events
+            host_events.handle(data, event="stop", style=style, defer_capture=True)
+        else:
+            _defer_legacy_capture(data, cfg, style)
+    except Exception:
+        # Stop 输出属于宿主会话；采集失败不能进入主任务的收尾。
+        return
 
 
 def cmd_tool_event(style: str = "claude", event: str = "tool-after"):

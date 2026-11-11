@@ -29,14 +29,15 @@ mcp = FastMCP(
         "[knowbase-build:"+build_id()+"] "
         "薪火：跨 Agent 共享的经验记忆库。"
         "具体项目、系统或报错相关时按需 memory_search；知识服务不可用时直接继续主任务。"
-        "任务结束产生踩坑/决策/流程/约束时 memory_save（正文须含八项小节：结论/解决的问题/"
-        "适用条件/不适用条件/可执行动作/关键证据/验证情况/未知与待确认）；"
+        "日常任务用完整的业务答复直接结束，不主动保存、更新或提炼经验。"
+        "已启用的 Hook 静默提交采集检查点；主会话不等待、不补写、不重试、不报告入库结果。"
+        "仅在用户明确要求保存或维护经验时使用 memory_save 或 memory_update。"
+        "新卡正文须含八项小节：结论/解决的问题/适用条件/不适用条件/可执行动作/关键证据/验证情况/未知与待确认；"
         "业务规则的代码定位写入结构化 code_refs；"
         "整篇文档等原始材料不入 memory_save，走 CLI knowbase import 导入为 source；"
         "按记忆行动后如实 memory_feedback。"
-        "长任务先拆目标/约束/子任务；执行中进入新阶段、发现新错误、重要决策前调用 memory_context，"
-        "可选 Hook 只提交采集检查点，"
-        "普通提炼待办不阻断主任务，不要求当前会话领取、分页或逐段处理，也不为补存/反馈延长会话。"
+        "长任务先拆目标/约束/子任务；执行中进入新阶段、发现新错误、重要决策前调用 memory_context。"
+        "普通提炼待办不阻断主任务，不要求当前会话领取、分页或逐段处理，也不为反馈延长会话。"
         "明确的知识整理或维护任务再使用memory_capture和memory_job_claim(protocol_version=2)/"
         "memory_job_material/submit/status，核对实际成卡或待审结果。"
         "统一生命周期：类型只作检索分类；项目内新增且有出处直接发布，"
@@ -975,8 +976,8 @@ def import_impl(directory: str, scope: str = "global", mode: str = "extract") ->
 # ---------- 注册为 MCP 工具（显式命名） ----------
 from .telemetry import observe as _observe
 
-mcp.tool(name="memory_save", description="保存一条经验记忆。统一生命周期：类型只作检索分类；改变已发布结论、共享范围（global）、争议或来源不足时进入 staging；待审发布与可信晋升分开")(_observe(save_impl,"memory_save"))
-mcp.tool(name="memory_update", description="提交内容或元数据更新；实质修订返回待审变更 ID，旧发布版本继续可用。confidence 与 status 由服务端管理")(_observe(update_impl,"memory_update"))
+mcp.tool(name="memory_save", description="仅当用户明确要求保存或维护经验时调用；日常任务由 Hook 静默采集。改变已发布结论、共享范围（global）、争议或来源不足时进入 staging；待审发布与可信晋升分开")(_observe(save_impl,"memory_save"))
+mcp.tool(name="memory_update", description="仅当用户明确要求维护经验时调用；实质修订返回待审变更 ID，旧发布版本继续可用。confidence 与 status 由服务端管理")(_observe(update_impl,"memory_update"))
 mcp.tool(name="memory_read", description="按id读全文，成功读取才计hit。新卡或staging读回可只传id。若关联任务，session_id/event_id/context_event_id一起传，host_profile沿用检索；event_id为本次阅读新事件，context_event_id绑定实际任务上下文。允许同scope新卡/待审卡阅读，阅读不等于候选采纳或helpful")(_observe(read_impl,"memory_read"))
 mcp.tool(name="memory_search", description="检索经验记忆：任务开始涉及具体项目/系统/报错时先调用。检索词建议 ≥3 字的具体名词或报错关键词。传 session_id 可将本次检索记入任务观测（用于证据归因）。")(_observe(search_impl,"memory_search"))
 mcp.tool(name="memory_feedback", description="验证任务结果后回填helpful/not_helpful/outdated/incorrect；携带expected_content_revision、memory_use返回的use_id、稳定task_outcome_id。按卡版本+任务结果去重。旧调用仅保留未绑定观察，不改变治理状态")(_observe(feedback_impl,"memory_feedback"))
