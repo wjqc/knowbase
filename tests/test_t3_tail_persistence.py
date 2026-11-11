@@ -69,6 +69,9 @@ def test_zcode_stop_queues_each_distinct_final_reply(memory_repo, tmp_path, monk
     replies = ("布尔开关不能直接用 bool 转换字符串。", "代理的 TLS 终止位置决定证书部署点。")
     conn = index.connect(memory_repo)
     try:
+        conn.execute("INSERT INTO context_sessions(host_profile,session_id,scope,updated_at) "
+                     "VALUES('zcode','zcode-two-turns','','2026-11-11')")
+        conn.commit()
         payloads = []
         for i, text in enumerate((*replies, replies[0])):
             transcript = tmp_path / f"turn-{i}.jsonl"

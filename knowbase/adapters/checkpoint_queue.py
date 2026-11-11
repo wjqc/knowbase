@@ -127,7 +127,9 @@ def _capture(repo, conn, scope, payload, cfg):
             scope = _infer_scope(conn, project) if project else "global"
             if not scope:
                 return {"error": "SCOPE_UNRESOLVED"}
-            conn.execute("INSERT OR IGNORE INTO context_sessions(host_profile,session_id,scope,updated_at) VALUES(?,?,?,?)",
+            conn.execute("INSERT INTO context_sessions(host_profile,session_id,scope,updated_at) VALUES(?,?,?,?) "
+                         "ON CONFLICT(host_profile,session_id) DO UPDATE SET scope=excluded.scope,updated_at=excluded.updated_at "
+                         "WHERE context_sessions.scope=''",
                          (host, session, scope, datetime.now(timezone.utc).isoformat(timespec="seconds")))
             conn.commit()
         result = host_events.capture_increment(repo, session, transcript, scope, host, zcode_reply=zcode_reply)
