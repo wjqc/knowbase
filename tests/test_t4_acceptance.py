@@ -79,20 +79,10 @@ def _trusted_l3(conn, repo, mid, revision, *, task, group, outcome="pass"):
                              [{"native_key": f"n-{task}", "kind": "note", "payload": {}}],
                              project_key="repo:t4", native_task_key=task,
                              native_run_key=task)
-    artifact = f"{task}-{outcome}".ljust(64, "0")
-    attribution.record_execution(conn, memory_id=mid, content_revision=revision,
-                                 artifact_hash=artifact, run_id=run["run_id"],
-                                 validator_id="tv")
-    result = attribution.verify_execution(
-        conn, repo, run_id=run["run_id"], validator_id="tv",
-        report={"target": {"memory_id": mid, "content_revision": revision,
-                           "claim_id": "C-whole"},
-                "artifact_hash": artifact,
-                "execution_stamp": {"memory_id": mid, "content_revision": revision,
-                                    "run_id": run["run_id"], "validator_id": "tv"},
-                "checks": [{"check_id": "c1", "claim_id": "C-whole",
-                            "observed_result": outcome}]})
-    assert not result.get("error"), result
+    from lifecycle_verifier_fixture import run_verifier
+    result, _ = run_verifier(conn, repo, mid, revision, run_id=run["run_id"],
+                             validator_id="tv", group=group, case=task, outcome=outcome, project="repo:t4")
+    assert result["outcome"] == outcome, result
     return result
 
 

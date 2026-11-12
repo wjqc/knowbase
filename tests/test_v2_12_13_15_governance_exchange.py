@@ -40,27 +40,16 @@ def seed_validator(cfg_path):
 
 
 def trusted_l3(conn, repo, mid, revision, *, run_key, task_key, outcome="pass",
-               validator="tv", check="c1"):
+               validator="tv", check="c1", case=None):
     run = observation.ingest(conn, "zcode", f"s-{run_key}",
                              [{"native_key": f"n-{run_key}", "kind": "note", "payload": {}}],
                              project_key="repo:orders", native_task_key=task_key,
                              native_run_key=run_key)
-    from knowbase.knowledge_lifecycle import validators as lc_validators
-    artifact_hash = __import__("hashlib").sha256(f"{run_key}:{check}:{outcome}".encode()).hexdigest()
-    # 统一生命周期绑定：执行时打戳 + 登记 validator_executions。
-    attribution.record_execution(conn, memory_id=mid, content_revision=revision,
-                                 artifact_hash=artifact_hash, run_id=run["run_id"],
-                                 validator_id=validator)
-    result = attribution.verify_execution(
-        conn, repo, run_id=run["run_id"], validator_id=validator,
-        report={"target": {"memory_id": mid, "content_revision": revision,
-                           "claim_id": "C-whole"},
-                "artifact_hash": artifact_hash, "expected_hash": "e" * 64,
-                "execution_stamp": {"memory_id": mid, "content_revision": revision,
-                                    "run_id": run["run_id"], "validator_id": validator},
-                "checks": [{"check_id": check, "claim_id": "C-whole",
-                            "observed_result": outcome}]})
-    assert not result.get("error"), result
+    from lifecycle_verifier_fixture import run_verifier
+    group = "primary" if task_key in ("t1", "t2") else "secondary"
+    result, _ = run_verifier(conn, repo, mid, revision, run_id=run["run_id"],
+                             validator_id=validator, group=group, case=case or run_key, outcome=outcome)
+    assert result["outcome"] == outcome, result
     return result, run
 
 
@@ -80,6 +69,9 @@ def test_governance_promotes_on_three_independent_tasks_and_revokes(memory_repo)
         trusted_l3(conn, memory_repo, mid, rev, run_key=run_key, task_key=task)
     d2 = governance.decide(conn, mid, rev)
     assert d2["decision"] == "validated" and d2["independent_tasks"] == 2
+    trusted_l3(conn, memory_repo, mid, rev, run_key="r-copy", task_key="t-copy", case="r2")
+    copied = governance.decide(conn, mid, rev)
+    assert copied["independent_tasks"] == 2 and copied["independence_groups"] == 1
     # 第三个独立任务 + 第二独立组 → verified。
     trusted_l3(conn, memory_repo, mid, rev, run_key="r3", task_key="t3")
     d3 = governance.decide(conn, mid, rev)

@@ -152,12 +152,20 @@ def resolve_binding(conn, path, cfg: dict | None = None) -> dict:
                 "reason": "ambiguous",
                 "detail": "多条同等具体的已确认绑定指向不同 scope，需显式映射裁决",
                 "path": str(norm)}
+    if best is not None and best["source"] in ("auto_remote", "auto_path"):
+        for candidate in (norm, *norm.parents):
+            if candidate == Path(best["project_path"]):
+                break
+            if (candidate / ".git").exists():
+                best = None
+                break
     if best is not None:
         return {"status": "resolved", "scope": best["scope"],
                 "source": best["source"] if best["source"] == "explicit" else "confirmed",
                 "reason": "", "path": str(norm)}
     ident = git_identity(path)
     if ident:
+        scopes = set()
         for b in bindings:
             # 同一项目判定：toplevel 相同（同一 checkout），或 remote 相同
             # （不同 checkout 的同一仓库）。两者任一成立即为同一项目；
@@ -166,8 +174,13 @@ def resolve_binding(conn, path, cfg: dict | None = None) -> dict:
             same_remote = bool(b.get("git_remote")) and bool(ident.get("remote")) \
                 and b["git_remote"] == ident["remote"]
             if same_checkout or same_remote:
-                return {"status": "resolved", "scope": b["scope"],
-                        "source": "git_identity", "reason": "", "path": str(norm)}
+                scopes.add(b["scope"])
+        if len(scopes) == 1:
+            return {"status": "resolved", "scope": scopes.pop(),
+                    "source": "git_identity", "reason": "", "path": str(norm)}
+        if scopes:
+            return {"status": "scope_unresolved", "scope": None, "source": "",
+                    "reason": "ambiguous", "path": str(norm)}
     return {"status": "scope_unresolved", "scope": None, "source": "",
             "reason": "no_mapping",
             "detail": "无显式 scope_map、无已确认绑定、无匹配的 Git 身份；"
@@ -273,7 +286,7 @@ def _name_occupied(conn, name: str, remote: str) -> bool:
 
     同 remote 已绑此名不算占用（同一项目的另一处 checkout）。
     """
-    own = conn.execute(
+    own = remote and conn.execute(
         "SELECT 1 FROM project_bindings WHERE confirmed=1 AND scope=? AND git_remote=? LIMIT 1",
         (name, remote)).fetchone()
     if own:
@@ -323,6 +336,9 @@ def auto_bind(conn, path) -> dict:
             name, how = _derive_auto_name(conn, remote)
         else:
             name, how = _sanitize_scope(Path(bind_path).name), "path_basename"
+            if _name_occupied(conn, name, ""):
+                suffix = hashlib.sha256(bind_path.encode("utf-8")).hexdigest()[:12]
+                name, how = f"{name[:51]}-{suffix}", "path_hash"
         record_binding(conn, bind_path, name, source, True, ident=ident)
         conn.commit()
     except sqlite3.Error:
@@ -332,3 +348,15 @@ def auto_bind(conn, path) -> dict:
                 "reason": "bind_failed", "path": str(norm)}
     return {"status": "resolved", "scope": name, "source": source, "reason": "",
             "path": str(norm), "detail": f"auto:{how}"}
+
+
+def resolve_project(conn, project_dir=None, cfg=None) -> dict:
+    project_dir = project_dir or os.environ.get("CLAUDE_PROJECT_DIR") or os.environ.get("ZCODE_PROJECT_DIR")
+    if not project_dir:
+        return {"scope": None, "reason": "missing_project", "source": ""}
+    if not Path(project_dir).expanduser().is_dir():
+        return {"scope": None, "reason": "project_path_missing", "source": ""}
+    result = resolve_binding(conn, project_dir, cfg)
+    if result["reason"] == "no_mapping":
+        return auto_bind(conn, project_dir)
+    return result

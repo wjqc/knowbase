@@ -144,14 +144,13 @@ def test_config_scope_map_wins(repo, tmp_path):
     assert len(scope_binding.list_bindings(repo)) == 0
 
 
-def test_name_exact_match_beats_autobind(repo, tmp_path):
+def test_same_name_without_binding_does_not_reuse_existing_scope(repo, tmp_path):
     repo.execute("INSERT INTO meta(id,type,title,scope,tags,confidence,status,path,staging) "
                  "VALUES('T-1','pitfall','t','knowbase','[]','once','active','',0)")
     repo.commit()
     path = _git_repo(tmp_path, "knowbase", "http://git.internal/product/common/knowbase.git")
-    assert hooks._infer_scope(repo, str(path)) == "knowbase"
-    # 目录名精确等值优先于自动绑定：不产生绑定行
-    assert len(scope_binding.list_bindings(repo)) == 0
+    assert hooks._infer_scope(repo, str(path)) == "common-knowbase"
+    assert scope_binding.list_bindings(repo)[0]["scope"] == "common-knowbase"
 
 
 def test_ambiguous_resolution_not_autobound(repo, tmp_path, monkeypatch):

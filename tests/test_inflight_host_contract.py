@@ -209,18 +209,16 @@ def test_persisted_source_capture_rejects_different_scope(memory_repo, tmp_path)
     conn.close()
 
 
-def test_unmapped_project_hint_can_bind_session_without_global_fallback(memory_repo, tmp_path):
+def test_existing_project_is_automatically_bound_without_global_fallback(memory_repo, tmp_path):
     enable(memory_repo, tmp_path)
-    unknown = tmp_path / "new-project"
-    request = {"session_id": "new-scope", "tool_name": "Read", "cwd": str(unknown), "tool_use_id": "r1"}
+    cfg = json.loads(config.CONFIG_PATH.read_text())
+    cfg["scope_map"] = {}
+    config.CONFIG_PATH.write_text(json.dumps(cfg))
+    project = tmp_path / "new-project"
+    project.mkdir()
+    request = {"session_id": "new-scope", "tool_name": "Read", "cwd": str(project), "tool_use_id": "r1"}
     first = host_events.handle(request, event="tool-before", style="zcode")
-    assert first["error"] == "SCOPE_UNRESOLVED"
-    assert "memory_context" in host_events.render(first)
-    assert "new-scope" in host_events.render(first)
-    from knowbase.server import context_impl
-    binding = json.loads(context_impl(**first["planning_context"], scope="new-project",
-        current_goal="本项目校验", topics=[{"topic_id":"checks","queries":["校验"],"status":"active"}]))
-    assert binding["scope"] == "new-project" and not binding.get("error")
+    assert first["scope"] == "new-project" and not first.get("error")
     later = host_events.handle({**request, "tool_use_id":"r2"}, event="tool-before", style="zcode")
     assert later["scope"] == "new-project" and not later.get("error")
 

@@ -17,7 +17,7 @@ os.environ["KNOWBASE_HOOK_STATE"] = str(TMP)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from knowbase import __main__ as cli  # noqa: E402
-from knowbase import config, hooks  # noqa: E402
+from knowbase import config, hooks, index, scope_binding  # noqa: E402
 from knowbase.server import save_impl  # noqa: E402
 
 PASS = 0
@@ -129,8 +129,10 @@ out = subprocess.run(
 parsed = _json.loads(out)
 check("zcode 风格 additionalContext", "additionalContext" in parsed and pid in parsed["additionalContext"], out[:100])
 
-# 7c. 项目感知：目录名推断 scope → 注入本项目优先且带标注
+# 7c. 项目感知：已知项目绑定优先且带标注
 proj_dir = TMP / "proj07"; proj_dir.mkdir(exist_ok=True)
+with index.connect(config.repo_path()) as scope_conn:
+    scope_binding.bind_explicit(scope_conn, proj_dir, "proj07")
 os.environ["CLAUDE_PROJECT_DIR"] = str(proj_dir)
 out = hooks.user_prompt("部署 出问题了 怎么办")
 check("scope 推断+标注", "scope=" in out and "proj07" in out, out[:150])

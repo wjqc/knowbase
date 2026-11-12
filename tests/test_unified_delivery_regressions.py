@@ -24,14 +24,10 @@ def test_mcp_revision_waits_for_review_and_keeps_published_head(memory_repo):
         assert changes.get_change(conn, change_id)["risk"] == "R2"
         assert publication.publish(memory_repo, conn, change_id)["error"] == "NOT_READY"
         assert validation.validate_change(conn, memory_repo, change_id)["result"] == "fail"
-        report = validators.parse_pytest_text(validators.stamp_report_text(
-            "PASSED tests/sample.py::test_example", memory_id=mid, content_revision=base,
-            validator_id="pytest-text"))
-        report["target"] = {"memory_id": mid, "content_revision": base}
-        attribution.record_execution(conn, memory_id=mid, content_revision=base,
-                                     artifact_hash=report["artifact_hash"], validator_id="pytest-text")
-        assert attribution.verify_execution(conn, memory_repo, run_id="", validator_id="pytest-text",
-                                            report=report)["outcome"] == "pass"
+        from lifecycle_verifier_fixture import run_verifier
+        result, _ = run_verifier(conn, memory_repo, mid, base)
+        assert result["outcome"] == "pass"
+
         result = validation.validate_change(conn, memory_repo, change_id)
         assert result["result"] == "pass", result
         assert publication.publish(memory_repo, conn, change_id)["local_published"]
@@ -109,7 +105,7 @@ def test_registered_report_cannot_be_replayed_under_another_run(memory_repo):
                                             validator_id="pytest-text", report=report)["error"] == "EXECUTION_IDENTITY_MISMATCH"
         assert conn.execute("SELECT count(*) FROM evidence_events").fetchone()[0] == 0
         assert attribution.verify_execution(conn, memory_repo, run_id="run-a",
-                                            validator_id="pytest-text", report=report)["outcome"] == "pass"
+                                            validator_id="pytest-text", report=report)["error"] == "VALIDATOR_BINDING_REQUIRED"
 
 
 def test_retirement_respects_cutoff_and_unfinished_submission(memory_repo):

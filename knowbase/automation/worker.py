@@ -34,7 +34,7 @@ TASK_DEFS = (
     ("capture_checkpoint", 5, "读取宿主检查点并入队采集材料"),
     ("distillation", 60, "自动提炼（授权与探针条件满足时运行）"),
     ("hook_capture", 10, "Hook 实时成卡（Path B 第一批，检查点后短时处理）"),
-    ("lifecycle_correlate", 300, "待归因 run 自动归因（W1-2，默认开）"),
+    ("lifecycle_correlate", 10, "任务观察归因与预登记的验证"),
     ("lifecycle_recompute", 3600, "治理重算投影（W1-4，默认开，条件写入）"),
     ("lifecycle_propose", 900, "staging 卡自动提案（W1-7，默认关）"),
 )
@@ -403,9 +403,12 @@ def _h_lifecycle_correlate(repo, conn, cfg) -> dict:
     """W1-2：待归因 run → correlate 产 L0/L1/L2 证据（幂等，逐 run 容错）。"""
     if not _lifecycle_gate(cfg, "correlate"):
         return {"skipped": "lifecycle_correlate_disabled"}
-    from ..knowledge_lifecycle import attribution, observation
+    from .. import store
+    from ..knowledge_lifecycle import attribution, observation, validators
     pending = observation.pending_runs(conn, limit=20)
-    out = {"correlated": 0, "L0": 0, "L1": 0, "L2": 0, "errors": []}
+    out = {"correlated": 0, "L0": 0, "L1": 0, "L2": 0, "validated": 0, "errors": []}
+    auto_validators = [v["validator_id"] for v in cfg["knowledge_lifecycle"].get("validators", [])
+                       if any(b.get("auto") for b in v.get("bindings", []))]
     for item in pending:
         try:
             result = attribution.correlate(conn, repo, item["run_id"])
@@ -420,6 +423,31 @@ def _h_lifecycle_correlate(repo, conn, cfg) -> dict:
         out["L0"] += len(result.get("L0") or [])
         out["L1"] += len(result.get("L1") or [])
         out["L2"] += len(result.get("L2") or [])
+        if auto_validators and result["adopted_revisions"]:
+            run = observation.run_summary(conn, item["run_id"])
+            for mid, revision in result["adopted_revisions"]:
+                meta, body, _ = store.load(repo, mid)
+                if not meta or run["identity_basis"] not in ("native", "host_prompt"):
+                    continue
+                for validator_id in auto_validators:
+                    binding = validators.binding_for(validator_id, meta, body, revision)
+                    if not binding or not binding.get("auto") or binding.get("project_key") != run["project_key"]:
+                        continue
+                    if not attribution.verification_workspace_matches(run, binding):
+                        continue
+                    if conn.execute("SELECT 1 FROM validator_executions WHERE run_id=? AND memory_id=? "
+                                    "AND content_revision=? AND binding_hash=?",
+                                    (item["run_id"], mid, revision, binding["binding_hash"])).fetchone():
+                        continue
+                    result, _ = attribution.run_verification(
+                        conn, repo, memory_id=mid, revision=revision, validator_id=validator_id,
+                        binding=binding, run_id=item["run_id"], timeout=60)
+                    if result.get("error"):
+                        out["errors"].append(f"{item['run_id']}:{result['error']}")
+                    out["validated"] += int(bool(result.get("event_id")))
+        conn.execute("INSERT INTO lifecycle_run_progress VALUES(?,?) ON CONFLICT(run_id) "
+                     "DO UPDATE SET input_digest=excluded.input_digest", (item["run_id"], item["input_digest"]))
+        conn.commit()
     return out
 
 

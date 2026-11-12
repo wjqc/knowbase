@@ -70,6 +70,7 @@ def report(repo):
         tier_triples=[]
         if 'retrieval_observations' in tables:
             shadow_reasons={}
+            hook_opportunities = {}
             for origin,level,reason,raw in conn.execute('SELECT origin,level,reason,detail_json FROM retrieval_observations'):
                 d=json.loads(raw)
                 if origin=='shadow_eval':
@@ -86,11 +87,24 @@ def report(repo):
                     continue
                 if origin=='embedding_worker':
                     result['remote_network_calls']+=d.get('remote_calls',0);continue
+                if origin == 'hook_prompt':
+                    host = d.get('host_profile') or 'legacy'
+                    build = d.get('runtime_build') or 'legacy'
+                    cohort = hook_opportunities.setdefault(host, {}).setdefault(build, Counter())
+                    skipped = d.get('query_class') or ''
+                    if skipped.startswith('skipped:'):
+                        cohort[skipped] += 1
+                    else:
+                        cohort['eligible'] += 1
+                        cohort['with_delivery'] += bool(d.get('delivered_count'))
+                        cohort['scope:' + (d.get('scope_source') or d.get('scope_reason') or 'legacy')] += 1
                 if (d.get('query_class') or '').startswith('skipped:'):continue
                 levels[level]+=1
                 if reason:reasons[reason]+=1
                 result['remote_network_calls']+=d.get('remote_calls',0)
             result.update(levels=dict(levels),degradation_reasons=dict(reasons),executed_queries=sum(levels.values()))
+            result['hook_opportunities'] = {host: {build: dict(counts) for build, counts in builds.items()}
+                                            for host, builds in hook_opportunities.items()}
             if shadow_reasons:
                 result['shadow']={'observations':sum(shadow_reasons.values()),'reasons':dict(shadow_reasons),
                                   'delivered':0,'note':'shadow observations never inject or govern'}
@@ -114,8 +128,28 @@ def report(repo):
                 total=conn.execute('SELECT COUNT(*) FROM knowledge_uses').fetchone()[0]
                 result['use_receipts_delivery_linked']=linked
                 result['use_receipts_unlinked']=max(0,total-linked)
+                if 'retrieval_deliveries' in tables:
+                    rows = conn.execute("SELECT d.host_profile,count(DISTINCT d.delivery_id),"
+                        "count(DISTINCT CASE WHEN u.state='read' THEN d.delivery_id END) "
+                        "FROM retrieval_deliveries d LEFT JOIN use_retrieval_links l ON d.delivery_id=l.delivery_id "
+                        "LEFT JOIN knowledge_uses u ON u.use_id=l.use_id GROUP BY d.host_profile")
+                    result['read_attribution'] = {host: {'delivered': total, 'with_linked_read': reads}
+                                                  for host, total, reads in rows}
         if 'task_outcomes' in tables:
             result['task_results']=dict(conn.execute('SELECT result,COUNT(*) FROM task_outcomes GROUP BY result'))
+        if {'evidence_events', 'task_runs'} <= tables:
+            rows = conn.execute(
+                "WITH adopted AS (SELECT DISTINCT run_id,subject_revision FROM evidence_events "
+                "WHERE event_type='knowledge.adopted' AND level='L2' AND import_state='local' "
+                "AND trust_basis IN ('bound_action','exact_action_match','explicit_adoption')) "
+                "SELECT r.host_profile,count(*),sum(EXISTS(SELECT 1 FROM evidence_events v "
+                "WHERE v.run_id=a.run_id AND v.subject_revision=a.subject_revision "
+                "AND v.event_type='validation.completed' AND v.level='L3' "
+                "AND v.trust_basis='registered-adapter' AND v.import_state='local' "
+                "AND NOT EXISTS(SELECT 1 FROM evidence_events x WHERE x.revokes_event_id=v.event_id))) "
+                "FROM adopted a JOIN task_runs r ON r.run_id=a.run_id GROUP BY r.host_profile")
+            result['validation_conversion'] = {host: {'adopted_run_cards': total, 'with_trusted_verification': validated}
+                                               for host, total, validated in rows}
         if {'knowledge_uses','task_outcomes','feedback_events'} <= tables:
             denominator=conn.execute("SELECT count(DISTINCT o.task_outcome_id) FROM task_outcomes o JOIN knowledge_uses u ON o.use_id=u.use_id "
                 "WHERE u.current_version=1 AND u.state IN ('adopted','referenced') AND o.result IN ('completed','failed','abandoned')").fetchone()[0]

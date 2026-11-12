@@ -33,16 +33,9 @@ PASSED tests/test_ev.py::test_rule
 def _seed_l3(conn, repo, mid):
     meta, body, _ = store.load(repo, mid)
     revision = _compute_revision(meta, body)
-    report = validators.parse_pytest_text(
-        validators.stamp_report_text(PASS_REPORT, memory_id=mid, content_revision=revision,
-                                     validator_id="pytest-text"))
-    attribution.record_execution(conn, memory_id=mid, content_revision=revision,
-                                 artifact_hash=report["artifact_hash"], validator_id="pytest-text")
-    report["target"] = {"memory_id": mid,
-                        "content_revision": revision}
-    result = attribution.verify_execution(conn, repo, run_id="",
-                                          validator_id="pytest-text", report=report)
-    assert not result.get("error"), result
+    from lifecycle_verifier_fixture import run_verifier
+    result, _ = run_verifier(conn, repo, mid, revision, outcome="pass")
+    assert result["outcome"] == "pass", result
 
 
 def _registry_for(public_pem: str, key_id: str, installation_id: str) -> dict:

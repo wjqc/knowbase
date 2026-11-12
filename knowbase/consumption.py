@@ -1,17 +1,18 @@
 """本机任务与知识版本的消费回执；不把检索、阅读或采纳换算成有效反馈。"""
 
 import json
+import sqlite3
 from datetime import datetime, timezone
 
 from . import config, delivery, index, materials, store
-from .locking import RepoLock
+from .locking import LockTimeout, RepoLock
 from .mutations import _compute_revision
 
 STATES = {"referenced", "adopted", "irrelevant", "unverified"}
 
 
 def record(repo, *, session_id, event_id, context_event_id, memory_id,
-           content_revision, state, host_profile="", reading=False):
+           content_revision, state, host_profile="", reading=False, delivery_id=""):
     if state not in (STATES | ({"read"} if reading else set())):
         return {"error":"INVALID_USE_STATE"}
     fields = (session_id,event_id,context_event_id,memory_id,content_revision,host_profile)
@@ -20,10 +21,12 @@ def record(repo, *, session_id, event_id, context_event_id, memory_id,
         return {"error":"INVALID_USE_IDENTITY","missing_fields":[name for name,value in zip(names,fields) if not value],
                 "required_fields":list(names),"hint":"event_id为本次使用新事件，context_event_id指向实际返回该候选的检索事件；host_profile沿用检索"}
     host = host_profile or config.load_config()["inflight"].get("host_profile") or config.agent_name()
-    phash = materials.digest([context_event_id,memory_id,content_revision,state])
+    phash = materials.digest([context_event_id,memory_id,content_revision,state,delivery_id]
+                             if delivery_id else [context_event_id,memory_id,content_revision,state])
     conn = index.connect(repo)
     try:
-        with RepoLock(repo,timeout=config.load_config().get("lock_timeout",10)):
+        timeout = 0.05 if reading and delivery_id else config.load_config().get("lock_timeout",10)
+        with RepoLock(repo,timeout=timeout):
             conn.execute("BEGIN IMMEDIATE")
             old=conn.execute("SELECT payload_hash,use_id,current_version FROM knowledge_uses WHERE "
                              "host_profile=? AND session_id=? AND event_id=?",(host,session_id,event_id)).fetchone()
@@ -31,14 +34,25 @@ def record(repo, *, session_id, event_id, context_event_id, memory_id,
                 conn.rollback()
                 return ({"use_id":old[1],"state":state,"current_version":bool(old[2]),"idempotent":True}
                         if old[0]==phash else {"error":"IDEMPOTENCY_CONFLICT"})
-            row=conn.execute("SELECT task_id,result_json FROM context_events WHERE host_profile=? AND "
-                             "session_id=? AND event_id=?",(host,session_id,context_event_id)).fetchone()
-            if not row:
-                return {"error":"CONTEXT_EVENT_NOT_FOUND"}
-            receipt=json.loads(row[1])
-            if not reading and not any(c.get("id")==memory_id and c.get("content_revision")==content_revision
-                                       for c in receipt.get("candidates",[])):
-                return {"error":"CANDIDATE_NOT_DELIVERED"}
+            delivered = (delivery.by_id(conn, delivery_id) if delivery_id else
+                         delivery.find_delivery(conn, context_event_id, memory_id, content_revision,
+                                                host_profile=host, session_id=session_id))
+            if delivery_id and (not delivered or any(
+                delivered[key] != value for key, value in {
+                    "host_profile":host, "session_id":session_id, "context_event_id":context_event_id,
+                    "memory_id":memory_id, "content_revision":content_revision}.items())):
+                return {"error":"DELIVERY_MISMATCH"}
+            if delivered:
+                receipt = delivered
+            else:
+                row=conn.execute("SELECT task_id,result_json FROM context_events WHERE host_profile=? AND "
+                                "session_id=? AND event_id=?",(host,session_id,context_event_id)).fetchone()
+                if not row:
+                    return {"error":"CONTEXT_EVENT_NOT_FOUND"}
+                receipt=json.loads(row[1])
+                if not reading and not any(c.get("id")==memory_id and c.get("content_revision")==content_revision
+                                           for c in receipt.get("candidates",[])):
+                    return {"error":"CANDIDATE_NOT_DELIVERED"}
             meta,body,path=store.load(repo,memory_id)
             current=bool(meta and _compute_revision(meta,body)==content_revision)
             if state in ("adopted","referenced","read"):
@@ -49,20 +63,19 @@ def record(repo, *, session_id, event_id, context_event_id, memory_id,
                 if reading and meta.get("scope") not in (receipt["scope"],"global"):
                     return {"error":"SCOPE_MISMATCH"}
             use_id="USE-"+materials.digest([host,session_id,event_id])[:24]
-            task=receipt.get("task_id") or row[0] or session_id
+            task=receipt.get("task_id") or session_id
             task_revision=receipt.get("task_revision","")
             conn.execute("INSERT INTO knowledge_uses VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          (use_id,host,session_id,event_id,phash,context_event_id,task,task_revision,
                           receipt["scope"],memory_id,content_revision,state,int(current),
-                          datetime.now(timezone.utc).isoformat(timespec="seconds")))
+                          datetime.now(timezone.utc).isoformat(timespec="microseconds")))
             # P0：同事务追加 search→delivery→use 关联。解析不到递送的旧观察
             # 保留未关联——不按时间/标题猜测，也不因此拒绝回执；未关联的
             # 采用不晋升为有效采用证据（派生与验收只认 link）。
-            delivered = delivery.find_delivery(conn, context_event_id, memory_id, content_revision,
-                                                host_profile=host, session_id=session_id)
             if delivered is not None:
                 delivery.record_use_link(conn, use_id=use_id, delivery_id=delivered["delivery_id"],
-                                         search_id=delivered["search_id"])
+                                         search_id=delivered["search_id"],
+                                         link_basis="delivery_id" if delivery_id else delivery.LINK_BASIS_CONTEXT_CANDIDATE)
             # 价值事件与业务回执同事务：append 失败则整体回滚，不允许"回执在、事件丢"。
             value_event=None
             if config.load_config().get("value",{}).get("events_enabled"):
@@ -90,3 +103,15 @@ def record(repo, *, session_id, event_id, context_event_id, memory_id,
             return result
     finally:
         conn.close()
+
+
+def record_delivered_read(repo, delivered):
+    if not delivered["session_id"]:
+        return {"error": "DELIVERY_HAS_NO_SESSION"}
+    try:
+        return record(repo, session_id=delivered["session_id"], event_id=f'read:{delivered["delivery_id"]}',
+                      context_event_id=delivered["context_event_id"], memory_id=delivered["memory_id"],
+                      content_revision=delivered["content_revision"], state="read", reading=True,
+                      host_profile=delivered["host_profile"], delivery_id=delivered["delivery_id"])
+    except (LockTimeout, sqlite3.Error):
+        return {"error": "DELIVERY_TELEMETRY_UNAVAILABLE"}

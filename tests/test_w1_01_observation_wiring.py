@@ -62,14 +62,15 @@ def test_hook_tool_events_land_in_observation(memory_repo, tmp_path):
     conn.close()
 
 
-def test_hook_tool_event_recorded_even_when_scope_unresolved(memory_repo, tmp_path):
+def test_hook_tool_event_uses_explicit_ancestor_scope(memory_repo, tmp_path):
     enable(memory_repo, tmp_path)
+    (tmp_path / "unmapped").mkdir()
     result = host_events.handle(
         {"session_id": "obs-unresolved", "tool_name": "Read",
          "tool_use_id": "call-u1", "cwd": str(tmp_path / "unmapped"),
          "tool_input": {"file_path": "x.py"}},
         event="tool-before", style="zcode")
-    assert result.get("error") == "SCOPE_UNRESOLVED"
+    assert result.get("scope") == "orders"
     conn = index.connect(memory_repo)
     assert len(_native_rows(conn, "zcode", "obs-unresolved")) == 1
     conn.close()

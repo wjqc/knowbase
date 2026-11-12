@@ -20,12 +20,12 @@ EVENT_KINDS = ("tool_call", "tool_result", "task_start", "task_end", "note")
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def ingest(conn, host_profile: str, session_id: str, events: list[dict], *,
            project_key: str, native_task_key: str = "", native_run_key: str = "",
-           environment_fingerprint: str = "", task_revision: str = "") -> dict:
+           environment_fingerprint: str = "", task_revision: str = "", identity_basis: str = "") -> dict:
     """落一批原生事件并维护 task_runs。幂等：重复同批零增量。
 
     events 每项：{native_key, kind, tool_call_id?, tool_name?, payload,
@@ -35,6 +35,12 @@ def ingest(conn, host_profile: str, session_id: str, events: list[dict], *,
     if not host_profile or not session_id:
         return {"error": "host_and_session_required"}
     host, session = str(host_profile)[:512], str(session_id)[:512]
+    basis = identity_basis or ("native" if native_task_key else "local_segment")
+    logical = contracts.logical_task_key(project_key, native_task_key)
+    origin = contracts.origin_run_key(project_key, native_run_key or session_id)
+    run_id = "RUN-" + hashlib.sha256(
+        contracts.canonical_json({"h": host, "s": session, "o": origin,
+                                  "t": logical}).encode("utf-8")).hexdigest()[:24]
     inserted = idempotent = conflicts = 0
     artifacts = set()
     for event in events:
@@ -49,30 +55,30 @@ def ingest(conn, host_profile: str, session_id: str, events: list[dict], *,
         if artifact:
             artifacts.add(artifact)
         row = conn.execute(
-            "SELECT payload_hash FROM native_events WHERE host_profile=? AND "
+            "SELECT payload_hash,run_id FROM native_events WHERE host_profile=? AND "
             "session_id=? AND native_key=?", (host, session, native_key)).fetchone()
         if row:
-            if row[0] != phash:
+            if row != (phash, run_id):
                 conflicts += 1
                 continue
             idempotent += 1
             continue
         conn.execute(
-            "INSERT INTO native_events VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO native_events VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (host, session, native_key, kind,
              str(event.get("tool_call_id") or "")[:256],
              str(event.get("tool_name") or "")[:128],
              phash, artifact,
              json.dumps(payload, ensure_ascii=False)[:16384],
-             event.get("occurred_at") or _now()))
+             event.get("occurred_at") or _now(), run_id))
         inserted += 1
     # 配对质量：会话内 tool_call/tool_result 按 tool_call_id 配对。
     calls = {r[0] for r in conn.execute(
-        "SELECT tool_call_id FROM native_events WHERE host_profile=? AND session_id=? "
-        "AND event_kind='tool_call' AND tool_call_id!=''", (host, session))}
+        "SELECT tool_call_id FROM native_events WHERE run_id=? "
+        "AND event_kind='tool_call' AND tool_call_id!=''", (run_id,))}
     results = {r[0] for r in conn.execute(
-        "SELECT tool_call_id FROM native_events WHERE host_profile=? AND session_id=? "
-        "AND event_kind='tool_result' AND tool_call_id!=''", (host, session))}
+        "SELECT tool_call_id FROM native_events WHERE run_id=? "
+        "AND event_kind='tool_result' AND tool_call_id!=''", (run_id,))}
     unpaired_calls = sorted(calls - results)
     unpaired_results = sorted(results - calls)
     gap_flags = []
@@ -80,18 +86,10 @@ def ingest(conn, host_profile: str, session_id: str, events: list[dict], *,
         gap_flags.append("unpaired_tool_calls")
     if unpaired_results:
         gap_flags.append("unpaired_tool_results")
-    # 任务身份。
-    basis = "native" if native_task_key else "local_segment"
-    logical = contracts.logical_task_key(project_key, native_task_key)
-    origin = contracts.origin_run_key(project_key, native_run_key or session_id)
-    run_id = "RUN-" + hashlib.sha256(
-        contracts.canonical_json({"h": host, "s": session, "o": origin,
-                                  "t": logical}).encode("utf-8")).hexdigest()[:24]
     completion = ""
     for kind, value in conn.execute(
-            "SELECT event_kind, event_json FROM native_events WHERE host_profile=? "
-            "AND session_id=? AND event_kind='task_end' ORDER BY occurred_at DESC "
-            "LIMIT 1", (host, session)):
+            "SELECT event_kind, event_json FROM native_events WHERE run_id=? "
+            "AND event_kind='task_end' ORDER BY occurred_at DESC LIMIT 1", (run_id,)):
         try:
             completion = str((json.loads(value) or {}).get("completion") or "")
         except ValueError:
@@ -103,10 +101,10 @@ def ingest(conn, host_profile: str, session_id: str, events: list[dict], *,
                             (run_id,)).fetchone()
     if existing:
         conn.execute(
-            "UPDATE task_runs SET completion=?, gap_flags_json=?, artifact_set_hash=?, "
-            "environment_fingerprint=? WHERE run_id=?",
-            (completion, json.dumps(gap_flags), artifact_set_hash,
-             environment_fingerprint, run_id))
+            "UPDATE task_runs SET completion=?, gap_flags_json=?, "
+            "artifact_set_hash=coalesce(nullif(?,''),artifact_set_hash), "
+            "environment_fingerprint=coalesce(nullif(?,''),environment_fingerprint) WHERE run_id=?",
+            (completion, json.dumps(gap_flags), artifact_set_hash, environment_fingerprint, run_id))
     else:
         conn.execute(
             "INSERT INTO task_runs VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -133,6 +131,7 @@ def run_summary(conn, run_id: str) -> dict:
     if not row:
         return {"error": "NOT_FOUND"}
     return {"run_id": row[0], "project_key": row[1], "logical_task_key": row[2],
+            "task_id": row[2].removeprefix(f"task:{row[1]}:") if row[2].startswith("task:") else "",
             "origin_run_key": row[3], "task_revision": row[4], "host_profile": row[5],
             "session_id": row[6], "identity_basis": row[7],
             "environment_fingerprint": row[8], "artifact_set_hash": row[9],
@@ -140,19 +139,17 @@ def run_summary(conn, run_id: str) -> dict:
 
 
 def pending_runs(conn, limit: int = 50) -> list[dict]:
-    """待归因 run（W1-2）：有卡递送但尚无任何证据事件的 run。
-
-    - 只看 (host,session) 存在 retrieval_deliveries 的 run：无递送的会话对
-      归因无产出，排除以免每轮空转重扫（correlate 对它们恒零事件）。
-    - 已归因判定 = evidence_events 中存在该 run_id 的行（correlate 对每张
-      递送卡至少落一条 L0 knowledge.exposed，天然消除 pending）。
-    - 按 rowid 倒序（最新会话优先），limit 截断。
-    """
+    """只在运行观察、递送或使用回执追加后重新归因。"""
     rows = conn.execute(
-        "SELECT r.run_id, r.host_profile, r.session_id, r.logical_task_key "
-        "FROM task_runs r WHERE EXISTS (SELECT 1 FROM retrieval_deliveries d "
-        "WHERE d.host_profile=r.host_profile AND d.session_id=r.session_id) "
-        "AND NOT EXISTS (SELECT 1 FROM evidence_events e WHERE e.run_id=r.run_id) "
-        "ORDER BY r.rowid DESC LIMIT ?", (int(limit),)).fetchall()
-    return [{"run_id": r[0], "host_profile": r[1], "session_id": r[2],
-             "logical_task_key": r[3]} for r in rows]
+        "WITH inputs AS (SELECT r.run_id, r.rowid AS ordering, "
+        "coalesce(max(d.rowid),0) AS deliveries, coalesce(max(u.rowid),0) AS uses, "
+        "coalesce((SELECT max(n.rowid) FROM native_events n WHERE n.run_id=r.run_id),0) AS events "
+        "FROM task_runs r JOIN retrieval_deliveries d ON d.host_profile=r.host_profile "
+        "AND d.session_id=r.session_id AND r.logical_task_key='task:'||r.project_key||':'||d.task_id "
+        "LEFT JOIN use_retrieval_links l ON l.delivery_id=d.delivery_id "
+        "LEFT JOIN knowledge_uses u ON u.use_id=l.use_id GROUP BY r.run_id) "
+        "SELECT i.run_id, i.deliveries||':'||i.uses||':'||i.events AS input_digest FROM inputs i "
+        "LEFT JOIN lifecycle_run_progress p ON p.run_id=i.run_id "
+        "WHERE p.input_digest IS NULL OR p.input_digest!=i.deliveries||':'||i.uses||':'||i.events "
+        "ORDER BY i.ordering LIMIT ?", (int(limit),)).fetchall()
+    return [{"run_id": run_id, "input_digest": digest} for run_id, digest in rows]

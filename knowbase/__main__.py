@@ -1188,13 +1188,14 @@ def _parse_args(argv=None):
     p_lc_verify.add_argument("--report-file", default="",
                              help="报告文件（与 --run 二选一；须含 --run 写入的执行戳）")
     p_lc_verify.add_argument("--run", default="",
-                             help="直接执行验证命令（如 \"pytest -ra tests/...\"），执行时打戳并登记 validator_executions")
+                             help="仅接受与当前卡片版本预登记完全一致的验证命令")
+    p_lc_verify.add_argument("--registered", action="store_true", help="执行私有配置中登记的验证计划")
     p_lc_verify.add_argument("--run-timeout", type=int, default=600,
                              help="--run 命令超时秒数（默认 600）")
-    p_lc_verify.add_argument("--format", default="pytest-text", choices=["pytest-text"],
+    p_lc_verify.add_argument("--format", default="pytest-text",
                              help="报告格式，同时是已登记 validator_id")
     p_lc_verify.add_argument("--run-id", default="", help="关联任务运行（缺省卡级验证，不参与独立性计数）")
-    p_lc_verify.add_argument("--claim-map", default="", help="JSON 文件：pytest nodeid → 卡 claim_id")
+    p_lc_verify.add_argument("--claim-map", default="", help="旧调用参数，验证映射以预登记配置为准")
     p_lc_recompute = lc_sub.add_parser("recompute", help="全库治理重算投影（W1-4 手动触发；同 worker 幂等）")
     p_lc_keygen = lc_sub.add_parser("keygen", help="生成设备证据密钥对到 ~/.knowbase/team-keys/（W1-5；已存在则读回）")
     p_lc_ev_export = lc_sub.add_parser("evidence-export", help="导出本地可信 L3 事件为签名证据包（W1-5）")
@@ -1566,60 +1567,33 @@ def _dispatch(args):
                     meta, _body, _ = store.load(repo, args.memory_id)
                     if not meta:
                         result = {"error": "NOT_FOUND"}
-                    elif not args.run and not args.report_file:
-                        result = {"error": "INPUT_REQUIRED",
-                                  "detail": "--run CMD 或 --report-file 二选一"}
+                    elif not args.run and not args.registered and not args.report_file:
+                        result = {"error": "INPUT_REQUIRED"}
                     else:
-                        claim_map = {}
-                        if args.claim_map:
-                            claim_map = json.loads(Path(args.claim_map)
-                                                   .expanduser().read_text(encoding="utf-8"))
+                        import shlex
                         revision = _compute_revision(meta, _body)
-                        if args.run:
-                            import shlex as _shlex
-                            import subprocess as _subprocess
-                            from datetime import datetime as _dt, timezone as _tz
-                            proc = _subprocess.run(
-                                _shlex.split(args.run), capture_output=True, text=True,
-                                timeout=max(1, args.run_timeout))
-                            executed_at = _dt.now(_tz.utc).isoformat(timespec="seconds")
-                            raw = proc.stdout
-                            if proc.stderr.strip():
-                                raw += "\n" + proc.stderr
-                            raw = lc_validators.stamp_report_text(
-                                raw, memory_id=args.memory_id, content_revision=revision,
-                                run_id=args.run_id or "", validator_id=args.format,
-                                executed_at=executed_at)
-                            report = lc_validators.parse_pytest_text(raw, claim_map=claim_map)
-                            if proc.returncode != 0 and not any(
-                                    check["observed_result"] == "fail" for check in report["checks"]):
-                                print(json.dumps({"error": "VALIDATOR_COMMAND_FAILED",
-                                                  "executed_command_exit": proc.returncode}))
-                                return 1
-                            # 统一生命周期：执行时登记（版本+原件指纹），投喂侧据此核对。
-                            attribution.record_execution(
-                                conn, memory_id=args.memory_id, content_revision=revision,
-                                artifact_hash=report["artifact_hash"],
-                                run_id=args.run_id or "", validator_id=args.format,
-                                executed_at=executed_at)
-                            if args.report_file:
-                                # 带戳原件落盘：审计与重放都以同一份为准。
-                                out_path = Path(args.report_file).expanduser()
-                                out_path.parent.mkdir(parents=True, exist_ok=True)
-                                out_path.write_text(raw, encoding="utf-8")
-                            exit_code = proc.returncode
+                        binding = lc_validators.binding_for(args.format, meta, _body, revision)
+                        if args.run or args.registered:
+                            if not binding:
+                                result = {"error": "VALIDATOR_BINDING_REQUIRED"}
+                            elif args.claim_map or (args.run and shlex.split(args.run) != binding["argv"]):
+                                result = {"error": "VALIDATOR_COMMAND_NOT_REGISTERED"}
+                            else:
+                                result, raw = attribution.run_verification(
+                                    conn, repo, memory_id=args.memory_id, revision=revision,
+                                    validator_id=args.format, binding=binding, run_id=args.run_id,
+                                    timeout=max(1, args.run_timeout))
+                                if args.report_file and raw is not None:
+                                    out_path = Path(args.report_file).expanduser()
+                                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                                    out_path.write_text(raw, encoding="utf-8")
                         else:
-                            report = lc_validators.parse_pytest_text(
-                                Path(args.report_file).expanduser()
-                                .read_text(encoding="utf-8"), claim_map=claim_map)
-                            exit_code = None
-                        report["target"] = {"memory_id": args.memory_id,
-                                            "content_revision": revision}
-                        result = attribution.verify_execution(
-                            conn, repo, run_id=args.run_id or "",
-                            validator_id=args.format, report=report)
-                        if exit_code is not None:
-                            result["executed_command_exit"] = exit_code
+                            report = lc_validators.parse_execution_report(
+                                Path(args.report_file).expanduser().read_text(encoding="utf-8"),
+                                claim_map=binding["claim_map"] if binding else None)
+                            report["target"] = {"memory_id": args.memory_id, "content_revision": revision}
+                            result = attribution.verify_execution(conn, repo, run_id=args.run_id,
+                                                                  validator_id=args.format, report=report)
                 elif args.lifecycle_cmd == "recompute":
                     from .knowledge_lifecycle import reconcile
                     result = reconcile.materialize_and_recompute(repo, conn)

@@ -6,6 +6,8 @@ L3（negative polarity）；trusted fail 经治理重算把卡打成 stale（反
 未登记 validator 拒绝；空报告按 EMPTY_REPORT 不放行。
 """
 import json
+import shlex
+import sys
 from pathlib import Path
 
 from knowbase import __main__ as cli, index, store, writer
@@ -13,6 +15,7 @@ from knowbase.knowledge_lifecycle import attribution, governance
 from knowbase.knowledge_lifecycle import validators
 from knowbase.migrations import apply_all
 from knowbase.mutations import _compute_revision
+from lifecycle_verifier_fixture import configure_verifier
 
 BODY = ("## 结论\n结算规则以脚本为准。\n## 解决的问题\nx。\n"
         "## 适用条件\ny。\n## 不适用条件\nz。\n## 可执行动作\n运行 scripts/settle.py。\n"
@@ -74,13 +77,22 @@ def test_parse_pytest_text_real_output():
     assert mapped["checks"][0]["claim_id"] == "C-disc"
 
 
+def test_unregistered_command_cannot_print_its_way_to_trusted_evidence(memory_repo, tmp_path):
+    mid = _make_card(memory_repo)
+    meta, body, _ = store.load(memory_repo, mid)
+    configure_verifier(memory_repo, mid, _compute_revision(meta, body))
+    marker = tmp_path / "untrusted-command-ran"
+    command = shlex.join([sys.executable, "-c", f"open({str(marker)!r}, 'w').close(); print('PASSED test_claim.py::test_claim')"])
+    out = _cap(lambda: cli.main(["lifecycle", "verify", "--memory-id", mid, "--run", command]))
+    assert json.loads(out)["error"] == "VALIDATOR_COMMAND_NOT_REGISTERED"
+    assert not marker.exists()
+
+
 def test_cli_verify_fail_path_quarantines_via_recompute(memory_repo, tmp_path):
     mid = _make_card(memory_repo)
-    report_file = tmp_path / "pytest-fail.txt"
-    report_file.write_text(PYTEST_TEXT, encoding="utf-8")
-    # --run：真实执行时打戳并登记 validator_executions（统一生命周期绑定）。
-    assert cli.main(["lifecycle", "verify", "--memory-id", mid,
-                     "--run", f"cat {report_file}"]) == 0
+    meta, body, _ = store.load(memory_repo, mid)
+    configure_verifier(memory_repo, mid, _compute_revision(meta, body), outcome="fail")
+    assert cli.main(["lifecycle", "verify", "--memory-id", mid, "--registered"]) == 0
     conn = index.connect(memory_repo)
     apply_all(conn)
     rows = conn.execute(
@@ -100,10 +112,9 @@ def test_cli_verify_fail_path_quarantines_via_recompute(memory_repo, tmp_path):
 
 def test_cli_verify_pass_path_honest_unverified_without_task_identity(memory_repo, tmp_path):
     mid = _make_card(memory_repo)
-    report_file = tmp_path / "pytest-pass.txt"
-    report_file.write_text(PYTEXT_ALL_PASS, encoding="utf-8")
-    assert cli.main(["lifecycle", "verify", "--memory-id", mid,
-                     "--run", f"cat {report_file}"]) == 0
+    meta, body, _ = store.load(memory_repo, mid)
+    configure_verifier(memory_repo, mid, _compute_revision(meta, body))
+    assert cli.main(["lifecycle", "verify", "--memory-id", mid, "--registered"]) == 0
     conn = index.connect(memory_repo)
     apply_all(conn)
     row = conn.execute(
@@ -135,11 +146,11 @@ def test_stale_execution_record_cannot_validate_edited_card(memory_repo, tmp_pat
     """执行后卡片改版 → 旧执行记录/旧戳不再验证新正文。"""
     from knowbase.mutations import _compute_revision
     mid = _make_card(memory_repo)
-    report_file = tmp_path / "pytest-pass.txt"
-    report_file.write_text(PYTEXT_ALL_PASS, encoding="utf-8")
+    meta, body, _ = store.load(memory_repo, mid)
+    configure_verifier(memory_repo, mid, _compute_revision(meta, body))
+    report_file = tmp_path / "pytest-pass.stamped"
     assert cli.main(["lifecycle", "verify", "--memory-id", mid,
-                     "--run", f"cat {report_file}",
-                     "--report-file", str(report_file) + ".stamped"]) == 0
+                     "--registered", "--report-file", str(report_file)]) == 0
     # 执行后修订卡内容（新版本）。
     meta, body, _path = store.load(memory_repo, mid)
     updated = writer.update(memory_repo, mid, expected_content_revision=_compute_revision(meta, body),
@@ -147,7 +158,7 @@ def test_stale_execution_record_cannot_validate_edited_card(memory_repo, tmp_pat
     assert not updated.get("error"), updated
     # 重放带戳原件（旧版本戳）→ STALE_EXECUTION_RECORD，不产新 L3。
     out = _cap(lambda: cli.main(["lifecycle", "verify", "--memory-id", mid,
-                                 "--report-file", str(report_file) + ".stamped"]))
+                                 "--report-file", str(report_file)]))
     assert '"error": "STALE_EXECUTION_RECORD"' in out, out
     conn = index.connect(memory_repo)
     apply_all(conn)

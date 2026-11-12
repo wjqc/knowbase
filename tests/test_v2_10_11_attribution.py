@@ -2,7 +2,7 @@
 L3 只认已登记验证器的真实报告。S4 核心路径。"""
 import json
 
-from knowbase import config, index, store, writer
+from knowbase import consumption, delivery, index, store
 from knowbase.knowledge_lifecycle import attribution, observation
 from knowbase.migrations import apply_all
 
@@ -10,7 +10,7 @@ BODY_A = ("## 结论\nA：只读未用。\n## 解决的问题\nx。\n## 适用�
           "## 不适用条件\nz。\n## 可执行动作\n编辑 docs/a-guide.md 后校验。\n"
           "## 关键证据\nPR-1。\n## 验证情况\nv。\n## 未知与待确认\n无。\n")
 BODY_B = ("## 结论\nB：修复脚本被执行。\n## 解决的问题\nx。\n## 适用条件\ny。\n"
-          "## 不适用条件\nz。\n## 可执行动作\n运行 scripts/fix_crlf.py 全量修复。\n"
+          "## 不适用条件\nz。\n## 可执行动作\n运行 `python scripts/fix_crlf.py --all` 全量修复。\n"
           "## 关键证据\nPR-2。\n## 验证情况\nv。\n## 未知与待确认\n无。\n")
 BODY_C = ("## 结论\nC：无关卡。\n## 解决的问题\nx。\n## 适用条件\ny。\n"
           "## 不适用条件\nz。\n## 可执行动作\n查看 runbook.md。\n"
@@ -33,7 +33,6 @@ def seed_card(repo, title, body, scope="orders", dtype="pitfall"):
 
 
 def deliver(conn, host, session, mid, revision, rank=1):
-    from knowbase import delivery
     return delivery.record_delivery(
         conn, search_id=f"search-{session}-{mid[:6]}", host_profile=host,
         session_id=session, context_event_id=f"ctx-{session}", task_id=f"task-{session}",
@@ -54,14 +53,10 @@ def test_s4_exposure_read_adoption_separated(memory_repo):
             "SELECT content_revision FROM entity_heads WHERE entity_id=?", (mid,)).fetchone()[0]
     # 会话：三卡递送；read A、B；工具执行命中 B 的独有动作；任务 completed。
     host, session = "zcode", "s-s4"
-    for mid in (a_id, b_id, c_id):
-        deliver(conn, host, session, mid, revs[mid])
+    tokens = {mid: deliver(conn, host, session, mid, revs[mid]) for mid in (a_id, b_id, c_id)}
+    conn.commit()
     for mid in (a_id, b_id):
-        conn.execute(
-            "INSERT INTO knowledge_uses VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (f"use-{mid[:8]}", host, session, f"ev-{mid[:8]}", "h", f"ctx-{session}",
-             f"task-{session}", "", "orders", mid, revs[mid], "read", 1,
-             "2026-11-05T00:00:00"))
+        assert consumption.record_delivered_read(memory_repo, delivery.by_id(conn, tokens[mid]))["delivery_linked"]
     run = observation.ingest(conn, host, session, [
         {"native_key": "t1", "kind": "tool_call", "tool_call_id": "tc-1",
          "tool_name": "Bash", "payload": {"command": "python scripts/fix_crlf.py --all"}},
@@ -73,7 +68,7 @@ def test_s4_exposure_read_adoption_separated(memory_repo):
          "payload": {"exit_code": 0}},
         {"native_key": "t5", "kind": "task_end",
          "payload": {"completion": "completed"}},
-    ], project_key="repo:orders", native_task_key="s4-task", native_run_key="s4-run")
+    ], project_key="repo:orders", native_task_key=f"task-{session}", native_run_key="s4-run")
     conn.commit()
     result = attribution.correlate(conn, memory_repo, run["run_id"])
     assert result["L0"] and set(result["L0"]) == {a_id, b_id, c_id}
@@ -102,13 +97,15 @@ def test_ambiguous_action_not_awarded(memory_repo):
     for mid in (x_id, y_id):
         rev = conn.execute("SELECT content_revision FROM entity_heads WHERE entity_id=?",
                            (mid,)).fetchone()[0]
-        deliver(conn, host, session, mid, rev)
+        token = deliver(conn, host, session, mid, rev)
+        conn.commit()
+        assert consumption.record_delivered_read(memory_repo, delivery.by_id(conn, token))["delivery_linked"]
     run = observation.ingest(conn, host, session, [
         {"native_key": "t1", "kind": "tool_call", "tool_call_id": "tc-1",
-         "tool_name": "Bash", "payload": {"command": "python scripts/fix_crlf.py"}},
+         "tool_name": "Bash", "payload": {"command": "python scripts/fix_crlf.py --all"}},
         {"native_key": "t2", "kind": "tool_result", "tool_call_id": "tc-1",
          "payload": {"exit_code": 0}},
-    ], project_key="repo:orders", native_task_key="amb", native_run_key="amb-run")
+    ], project_key="repo:orders", native_task_key=f"task-{session}", native_run_key="amb-run")
     conn.commit()
     result = attribution.correlate(conn, memory_repo, run["run_id"])
     assert result["L2"] == []  # 歧义不发奖
@@ -137,57 +134,19 @@ def test_l3_requires_registered_validator_and_real_report(memory_repo):
                 "artifact_hash": "h" * 64,
                 "checks": [{"check_id": "c1", "observed_result": "pass"}]})
     assert unregistered["error"] == "VALIDATOR_NOT_REGISTERED"
-    # 登记 validator。
-    cfg = json.loads(config.CONFIG_PATH.read_text())
-    cfg["knowledge_lifecycle"] = {**(cfg.get("knowledge_lifecycle") or {}),
-                                  "validators": [{"validator_id": "test-report-adapter",
-                                                  "kind": "pytest-json"}]}
-    config.CONFIG_PATH.write_text(json.dumps(cfg))
-    # 空报告（无 artifact）→ unknown，不 pass。
-    empty = attribution.verify_execution(
-        conn, memory_repo, run_id=run["run_id"], validator_id="test-report-adapter",
-        report={"target": {"memory_id": mid, "content_revision": rev},
-                "artifact_hash": "", "checks": []})
-    assert empty["error"] == "EMPTY_REPORT"
-    # 真实报告全 pass → L3 trusted（执行时打戳+登记，统一生命周期绑定）。
+    # 旧的执行戳和直接登记不足以产生 L3。
+    artifact = "a" * 64
     attribution.record_execution(conn, memory_id=mid, content_revision=rev,
-                                 artifact_hash="a" * 64, run_id=run["run_id"],
-                                 validator_id="test-report-adapter")
-    good = attribution.verify_execution(
-        conn, memory_repo, run_id=run["run_id"], validator_id="test-report-adapter",
-        report={"target": {"memory_id": mid, "content_revision": rev, "claim_id": "C-whole"},
-                "artifact_hash": "a" * 64, "expected_hash": "e" * 64,
-                "execution_stamp": {"memory_id": mid, "content_revision": rev,
-                                    "run_id": run["run_id"],
-                                    "validator_id": "test-report-adapter"},
-                "checks": [{"check_id": "crlf-roundtrip", "claim_id": "C-whole",
-                            "observed_result": "pass"}]})
-    assert good["outcome"] == "pass", good
-    summary = attribution.evidence_summary(conn, mid, rev)
-    assert summary["trusted_L3"] == 1 and summary["untrusted_L3"] == 0
-    # 引用不存在 claim → unknown。
-    ghost = attribution.verify_execution(
-        conn, memory_repo, run_id=run["run_id"], validator_id="test-report-adapter",
-        report={"target": {"memory_id": mid, "content_revision": rev},
-                "artifact_hash": "a" * 64,
-                "execution_stamp": {"memory_id": mid, "content_revision": rev,
-                                    "run_id": run["run_id"],
-                                    "validator_id": "test-report-adapter"},
-                "checks": [{"check_id": "c", "claim_id": "C-ghost",
-                            "observed_result": "pass"}]})
-    assert ghost["outcome"] == "unknown"
-    # fail 报告 → negative L3（可触发 S2 隔离链）。
-    failed = attribution.verify_execution(
-        conn, memory_repo, run_id=run["run_id"], validator_id="test-report-adapter",
-        report={"target": {"memory_id": mid, "content_revision": rev, "claim_id": "C-whole"},
-                "artifact_hash": "a" * 64,
-                "execution_stamp": {"memory_id": mid, "content_revision": rev,
-                                    "run_id": run["run_id"],
-                                    "validator_id": "test-report-adapter"},
-                "checks": [{"check_id": "c2", "claim_id": "C-whole",
-                            "observed_result": "fail"}]})
-    assert failed["outcome"] == "fail"
-    summary = attribution.evidence_summary(conn, mid, rev)
-    assert summary["polarity_fail"] == 1
-    assert summary["trusted_L3"] == 3  # pass + unknown + fail 三条事件
+                                 artifact_hash=artifact, run_id=run["run_id"], validator_id="pytest-text")
+    report = {"target": {"memory_id": mid, "content_revision": rev},
+              "artifact_hash": artifact, "execution_stamp": {"memory_id": mid, "content_revision": rev,
+               "run_id": run["run_id"], "validator_id": "pytest-text"},
+              "checks": [{"check_id": "unrelated", "observed_result": "pass"}]}
+    assert attribution.verify_execution(conn, memory_repo, run_id=run["run_id"], validator_id="pytest-text",
+                                        report=report)["error"] == "VALIDATOR_BINDING_REQUIRED"
+    from lifecycle_verifier_fixture import run_verifier
+    good, _ = run_verifier(conn, memory_repo, mid, rev, run_id=run["run_id"])
+    assert good["outcome"] == "pass" and good["governance"]["decision"] == "validated"
+    failed, _ = run_verifier(conn, memory_repo, mid, rev, run_id=run["run_id"], case="counterexample", outcome="fail")
+    assert failed["outcome"] == "fail" and failed["governance"]["decision"] == "quarantine"
     conn.close()

@@ -181,18 +181,10 @@ def test_s2_self_report_does_not_overwrite_verified_knowledge(memory_repo):
         {"native_key": "n2", "kind": "tool_result", "tool_call_id": "t1",
          "payload": {"exit_code": 1}}], project_key="repo:orders",
         native_task_key="s2-task", native_run_key="s2-run")
-    attribution.record_execution(conn, memory_id=mid, content_revision=base,
-                                 artifact_hash="b" * 64, run_id=run["run_id"],
-                                 validator_id="tv")
-    attribution.verify_execution(
-        conn, memory_repo, run_id=run["run_id"], validator_id="tv",
-        report={"target": {"memory_id": mid, "content_revision": base,
-                           "claim_id": "C-whole"},
-                "artifact_hash": "b" * 64,
-                "execution_stamp": {"memory_id": mid, "content_revision": base,
-                                    "run_id": run["run_id"], "validator_id": "tv"},
-                "checks": [{"check_id": "regression-1x", "claim_id": "C-whole",
-                            "observed_result": "fail"}]})
+    from lifecycle_verifier_fixture import run_verifier
+    result, _ = run_verifier(conn, memory_repo, mid, base, run_id=run["run_id"],
+                             validator_id="tv", outcome="fail")
+    assert result["outcome"] == "fail"
     decision = governance.apply_decision(memory_repo, conn, mid)
     assert decision["decision"] == "quarantine"
     meta_q, _, _ = store.load(memory_repo, mid)

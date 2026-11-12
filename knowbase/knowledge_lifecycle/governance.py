@@ -17,6 +17,7 @@ status→stale（隔离）；治理字段不产生新 content revision。
 """
 import hashlib
 import json
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from .. import config, gitops, index, store
 from ..locking import RepoLock
 from . import contracts
 
-POLICY_REVISION = "lifecycle-governance-v1"
+POLICY_REVISION = "lifecycle-governance-v2"
 MIN_INDEPENDENT_TASKS = 3
 MIN_INDEPENDENCE_GROUPS = 2
 
@@ -39,22 +40,31 @@ def _revoked_ids(conn) -> set[str]:
         "AND revokes_event_id!=''")}
 
 
-def effective_evidence(conn, memory_id: str, revision: str) -> list[dict]:
+def effective_evidence(conn, memory_id: str, revision: str, *, contract_fingerprint="") -> list[dict]:
     """当前版本的有效证据集合：trusted L3/L4、未撤销、未本地隔离。"""
     revoked = _revoked_ids(conn)
     rows = conn.execute(
         "SELECT event_id,level,polarity,logical_task_key,independence_group,claim_id,"
         "trust_basis,payload_json,occurred_at FROM evidence_events WHERE "
-        "subject_revision=? AND level IN ('L3','L4') AND import_state IN ('local','imported')",
+        "subject_revision=? AND level IN ('L3','L4') AND import_state IN ('local','imported') "
+        "AND trust_basis='registered-adapter'",
         (f"{memory_id}@content-v1:{revision}",)).fetchall()
+    parsed = [(row, json.loads(row[7] or "{}")) for row in rows]
+    revoked_sources = {payload["validation_source_key"] for row, payload in parsed
+                       if row[0] in revoked and payload.get("validation_source_key")}
     out = []
-    for row in rows:
-        if row[0] in revoked:
+    for row, payload in parsed:
+        if row[0] in revoked or payload.get("validation_source_key") in revoked_sources:
+            continue
+        if payload.get("validator_kind") and not payload.get("binding_hash"):
+            continue
+        fingerprint = payload.get("contract_fingerprint")
+        if contract_fingerprint and fingerprint and fingerprint != contract_fingerprint:
             continue
         out.append({"event_id": row[0], "level": row[1], "polarity": row[2],
                     "logical_task_key": row[3], "independence_group": row[4],
                     "claim_id": row[5], "trust_basis": row[6],
-                    "payload": json.loads(row[7] or "{}"), "occurred_at": row[8]})
+                    "payload": payload, "occurred_at": row[8]})
     return out
 
 
@@ -71,18 +81,34 @@ def _counts_toward_independence(event: dict) -> bool:
         and not group.startswith("unknown:")
 
 
-def decide(conn, memory_id: str, revision: str) -> dict:
+def decide(conn, memory_id: str, revision: str, *, contract_fingerprint="") -> dict:
     """确定性决策（纯函数式，只读）。相同输入集合 digest 输出一致。"""
-    events = effective_evidence(conn, memory_id, revision)
+    events = effective_evidence(conn, memory_id, revision, contract_fingerprint=contract_fingerprint)
     basis = contracts.canonical_json(
         {"m": memory_id, "r": revision, "p": POLICY_REVISION,
          "e": sorted((e["event_id"], e["polarity"], e["logical_task_key"]) for e in events)})
     input_set_digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()
-    pass_tasks = {e["logical_task_key"] for e in events
-                  if e["polarity"] == "positive" and _counts_toward_independence(e)}
-    pass_groups = {e["independence_group"] for e in events
-                   if e["polarity"] == "positive" and e["independence_group"]
-                   and _counts_toward_independence(e)}
+    groups_by_source = {}
+    for event in events:
+        source = event["payload"].get("validation_source_key")
+        if source and event["polarity"] == "positive" and _counts_toward_independence(event):
+            groups_by_source.setdefault(source, set()).add(event["independence_group"])
+    pass_tasks, pass_groups, seen_sources, seen_runs = set(), set(), set(), set()
+    for event in sorted(events, key=lambda e: (e["occurred_at"], e["event_id"])):
+        if event["polarity"] != "positive" or not _counts_toward_independence(event):
+            continue
+        task, group = event["logical_task_key"], event["independence_group"]
+        source = event["payload"].get("validation_source_key")
+        origin = event["payload"].get("origin_run_key")
+        if task in pass_tasks or source in seen_sources or origin in seen_runs:
+            continue
+        pass_tasks.add(task)
+        if group and len(groups_by_source.get(source, {group})) == 1:
+            pass_groups.add(group)
+        if source:
+            seen_sources.add(source)
+        if origin:
+            seen_runs.add(origin)
     unresolved_negative = [e for e in events if e["polarity"] == "negative"]
     if unresolved_negative:
         decision = "quarantine"
@@ -113,7 +139,8 @@ def _project(conn, meta, body):
     """计算兼容镜像；治理字段不改变内容版本。"""
     from ..mutations import _compute_revision
     revision = _compute_revision(meta, body)
-    decision = decide(conn, meta["id"], revision)
+    decision = decide(conn, meta["id"], revision,
+                      contract_fingerprint=contracts.content_v2_hash(meta, body))
     quality_state = {"unverified": "unverified", "validated": "validated",
                      "verified": "verified", "quarantine": "disputed"}[decision["decision"]]
     changed = False
@@ -196,6 +223,16 @@ def _apply(repo, conn, memory_id=None, *, cfg=None):
 def apply_decision(repo, conn, memory_id: str) -> dict:
     """重算并落地单张卡的治理投影。"""
     return _apply(repo, conn, memory_id)[0]
+
+
+def project_after_evidence(repo, conn, memory_id: str) -> dict:
+    if not config.load_config()["knowledge_lifecycle"]["worker"].get("recompute"):
+        return {"pending": True, "reason": "recompute_disabled"}
+    try:
+        return apply_decision(repo, conn, memory_id)
+    except (RuntimeError, OSError, sqlite3.Error) as exc:
+        conn.rollback()
+        return {"pending": True, "reason": type(exc).__name__}
 
 
 def recompute_all(repo, conn, *, cfg=None) -> list[dict]:

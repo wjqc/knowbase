@@ -859,14 +859,14 @@ def build_index_md(repo: Path, cfg: dict | None = None) -> Path:
 
 
 def record_search(conn, query, scope, results, tool="search", *,
-                  query_class=None, raw_len=None, retrieval=None):
+                  query_class=None, raw_len=None, retrieval=None, search_id=None):
     """一条事件保存整次查询及最终返回列表，包括零命中；分数不是概率。
 
     可选字段（Phase 1 遥测扩展，旧事件按缺失读）：query_class=
     raw/distilled/skipped:<原因>；raw_len=进入卫生层前的原始长度。
     """
     from uuid import uuid4
-    payload = {"search_id": str(uuid4()), "query": query, "scope": scope,
+    payload = {"search_id": search_id or str(uuid4()), "query": query, "scope": scope,
                "hits": [{"id": h["id"], "title": h["title"], "rank": i + 1,
                          "score": h["score"], "confidence": h["confidence"],
                          "status": h["status"]} for i, h in enumerate(results)]}

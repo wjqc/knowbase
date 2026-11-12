@@ -38,6 +38,9 @@ def export_package(conn, *, team_id, issuer_installation_id, project_key,
     envelopes = []
     for (event_id, event_type, subject, run_id, logical, group, payload_json,
          occurred_at, scope, polarity, level, claim_id) in rows:
+        payload = json.loads(payload_json or "{}")
+        if payload.get("validator_kind") and not payload.get("binding_hash"):
+            continue
         memory_id, _, revision = (subject.partition("@")[0],
                                   *subject.partition("@")[2].partition(":"))[0], "", ""
         parts = subject.split("@", 1)
@@ -47,7 +50,7 @@ def export_package(conn, *, team_id, issuer_installation_id, project_key,
             event_type=event_type, team_id=team_id,
             issuer_installation_id=issuer_installation_id, project_key=project_key,
             scope=scope or "global", occurred_at=occurred_at or _now(),
-            payload={**json.loads(payload_json or "{}"),
+            payload={**payload,
                      "level": level, "polarity": polarity,
                      "logical_task_key": logical or "",
                      "independence_group": group or "",

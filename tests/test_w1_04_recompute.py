@@ -39,17 +39,9 @@ def _card_path(repo, mid):
 def _seed_negative_evidence(conn, repo, mid):
     meta, body, _ = store.load(repo, mid)
     revision = _compute_revision(meta, body)
-    report = validators.parse_pytest_text(
-        validators.stamp_report_text(FAIL_REPORT, memory_id=mid, content_revision=revision,
-                                     validator_id="pytest-text"))
-    attribution.record_execution(conn, memory_id=mid, content_revision=revision,
-                                 artifact_hash=report["artifact_hash"], validator_id="pytest-text")
-    report["target"] = {"memory_id": mid,
-                        "content_revision": revision}
-    result = attribution.verify_execution(conn, repo, run_id="",
-                                          validator_id="pytest-text", report=report)
-    assert not result.get("error"), result
-    assert result["outcome"] == "fail"
+    from lifecycle_verifier_fixture import run_verifier
+    result, _ = run_verifier(conn, repo, mid, revision, outcome="fail")
+    assert result["outcome"] == "fail", result
 
 
 def test_recompute_is_conditional_write(memory_repo):

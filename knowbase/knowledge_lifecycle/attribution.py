@@ -16,6 +16,7 @@
 import hashlib
 import json
 import re
+import shlex
 from datetime import datetime, timezone
 
 from . import contracts
@@ -26,7 +27,7 @@ GENERIC_COMMANDS = re.compile(
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _record_event(conn, *, event_type, memory_id, revision_algo, content_revision,
@@ -53,105 +54,118 @@ def _record_event(conn, *, event_type, memory_id, revision_algo, content_revisio
     return event_id
 
 
-def correlate(conn, repo, run_id: str, *, matcher_version="attribution-v1") -> dict:
-    """把一个任务运行的观测关联为 L0/L1/L2 证据事件。
+def _actions(conn, run_id, result):
+    rows = conn.execute(
+        "SELECT c.tool_name,c.event_json,c.occurred_at,c.tool_call_id,r.event_json "
+        "FROM native_events c JOIN native_events r ON r.run_id=c.run_id "
+        "AND r.tool_call_id=c.tool_call_id AND r.event_kind='tool_result' AND r.rowid>c.rowid "
+        "WHERE c.run_id=? AND c.event_kind='tool_call' AND c.tool_call_id!=''",
+        (run_id,)).fetchall()
+    for tool, raw_args, occurred, call_id, raw_result in rows:
+        args, observed = json.loads(raw_args), json.loads(raw_result)
+        if observed.get("succeeded") is False or observed.get("exit_code") not in (0, "0", None):
+            continue
+        command = args.get("command", "")
+        if GENERIC_COMMANDS.match(command):
+            result["generic_rejected"].append(command[:80])
+            continue
+        action = ""
+        if tool.casefold() in ("edit", "write", "multiedit", "replace", "write_file", "edit_file"):
+            if observed.get("succeeded") is not True:
+                continue
+            if args.get("delivery_id"):
+                action = args.get("file_path") or args.get("filePath") or args.get("path") or ""
+        elif tool.casefold() in ("bash", "shell", "terminal", "run_command", "exec_command") and command:
+            if observed.get("exit_code") not in (0, "0") or re.search(r"[;|<>\n`$()]|(?<!&)&(?!&)", command):
+                continue
+            try:
+                argv = shlex.split(command.split("&&", 1)[0])
+            except ValueError:
+                continue
+            if argv and argv[0] in ("python", "python3", "bash", "sh") and len(argv) >= 2:
+                if argv[1].endswith((".py", ".sh")):
+                    action = shlex.join(argv)
+        if action:
+            yield action, occurred, call_id, args.get("delivery_id", "")
 
-    输入：task_runs 行 + 同 (host,session) 的 native_events + 递送记录
-    （retrieval_deliveries 按 session 关联）。卡的动作签名取自正文
-    「可执行动作」小节的 code: 引用、文件路径与命令首词。
-    """
+
+def correlate(conn, repo, run_id: str, *, matcher_version="attribution-v2") -> dict:
+    """关联任务内实际递送、链接的读取以及读取后的成功动作。"""
+    from .. import store
+    from ..mutations import _compute_revision
     from .observation import run_summary
+
     summary = run_summary(conn, run_id)
     if summary.get("error"):
         return summary
-    host, session = summary["host_profile"], summary["session_id"]
+    host, session, task = summary["host_profile"], summary["session_id"], summary["task_id"]
+    logical = summary["logical_task_key"]
     issuer = f"local:{matcher_version}"
-    # 该会话的递送（search → delivery → memory_id@revision）。
+    results = {"L0": [], "L1": [], "L2": [], "ambiguous": [], "generic_rejected": [],
+               "adopted_revisions": []}
+    if not task:
+        return {"run_id": run_id, "logical_task_key": logical, **results}
     deliveries = conn.execute(
-        "SELECT d.delivery_id,d.memory_id,d.content_revision FROM retrieval_deliveries d "
-        "WHERE d.host_profile=? AND d.session_id=?", (host, session)).fetchall()
-    reads = {r[0] for r in conn.execute(
-        "SELECT memory_id FROM knowledge_uses WHERE host_profile=? AND session_id=? "
-        "AND state IN ('read','referenced')", (host, session))}
-    results = {"L0": [], "L1": [], "L2": [], "ambiguous": [], "generic_rejected": []}
-    group = summary["logical_task_key"]
-    # 工具调用负载（脱敏后）里的可匹配 token。
-    tool_tokens = set()
-    for payload_json, tool_name in conn.execute(
-            "SELECT event_json,tool_name FROM native_events WHERE host_profile=? AND "
-            "session_id=? AND event_kind='tool_call'", (host, session)):
-        try:
-            payload = json.loads(payload_json)
-        except ValueError:
+        "SELECT delivery_id,memory_id,content_revision,created_at,scope FROM retrieval_deliveries "
+        "WHERE host_profile=? AND session_id=? AND task_id=?", (host, session, task)).fetchall()
+    actions = list(_actions(conn, run_id, results))
+    matches = {}
+    for delivery_id, mid, revision, delivered_at, scope in deliveries:
+        key = (mid, revision)
+        fields = dict(memory_id=mid, revision_algo="content-v1", content_revision=revision,
+                      run_id=run_id, logical_task_key=logical, independence_group="", issuer_id=issuer)
+        payload = {"delivery_id": delivery_id, "scope": scope}
+        _record_event(conn, event_type="knowledge.exposed", level="L0", polarity="neutral",
+                      payload=payload, **fields)
+        if mid not in results["L0"]:
+            results["L0"].append(mid)
+        uses = conn.execute(
+            "SELECT u.use_id,u.state,u.created_at FROM use_retrieval_links l "
+            "JOIN knowledge_uses u ON u.use_id=l.use_id WHERE l.delivery_id=? AND u.task_id=? "
+            "AND u.memory_id=? AND u.content_revision=? AND u.current_version=1 "
+            "AND u.host_profile=? AND u.session_id=?",
+            (delivery_id, task, mid, revision, host, session)).fetchall()
+        references = [u for u in uses if u[1] in ("read", "referenced") and u[2] >= delivered_at]
+        if references:
+            _record_event(conn, event_type="knowledge.referenced", level="L1", polarity="neutral",
+                          payload={**payload, "use_id": references[0][0]}, **fields)
+            if mid not in results["L1"]:
+                results["L1"].append(mid)
+        meta, body, path = store.load(repo, mid)
+        if not meta or meta.get("status") != "active" or path.parent.name == "staging":
             continue
-        text = json.dumps(payload, ensure_ascii=False)
-        tool_tokens |= set(re.findall(r"[\w./-]{4,}", text))
-        if GENERIC_COMMANDS.match(str(payload.get("command") or "")):
-            results["generic_rejected"].append(str(payload.get("command"))[:80])
-    from .. import store
-    matched_tokens_by_card = {}
-    for delivery_id, memory_id, revision in deliveries:
-        _record_event(conn, event_type="knowledge.exposed", memory_id=memory_id,
-                      revision_algo="content-v1", content_revision=revision,
-                      level="L0", polarity="neutral", run_id=run_id,
-                      logical_task_key=group, independence_group=group,
-                      payload={"delivery_id": delivery_id, "run_id": run_id,
-                               "scope": (store.load(repo, memory_id)[0] or {}).get("scope", "")},
-                      issuer_id=issuer)
-        results["L0"].append(memory_id)
-        if memory_id in reads:
-            _record_event(conn, event_type="knowledge.referenced", memory_id=memory_id,
-                          revision_algo="content-v1", content_revision=revision,
-                          level="L1", polarity="neutral", run_id=run_id,
-                          logical_task_key=group, independence_group=group,
-                          payload={"read": True, "run_id": run_id,
-                               "scope": (store.load(repo, memory_id)[0] or {}).get("scope", "")},
-                      issuer_id=issuer)
-            results["L1"].append(memory_id)
-        meta, body, _ = store.load(repo, memory_id)
-        if not meta:
+        if _compute_revision(meta, body) != revision:
             continue
-        # 卡的动作签名：code: 引用、code_refs 路径、正文文件路径 token。
-        signatures = set()
-        for ref in meta.get("code_refs") or []:
-            if isinstance(ref, dict) and ref.get("path"):
-                signatures.add(ref["path"])
-        for m in re.finditer(r"code:[\w.-]+/([\w./-]+)", body or ""):
-            signatures.add(m.group(1))
-        # 动作签名：含路径分隔的文件路径（带或不带反引号）。纯文件名过短
-        # 易误命中，要求带 / 或至少 8 字符。
-        for m in re.finditer(r"`?([\w][\w./-]*?/[\w./-]+\.(?:py|ts|js|java|md|json))`?",
-                             body or ""):
-            path_sig = m.group(1)
-            if "/" in path_sig or len(path_sig) >= 8:
-                signatures.add(path_sig)
-        hits = {s for s in signatures if s in tool_tokens or
-                any(s in t or t in s for t in tool_tokens if len(t) >= 6)}
-        if hits:
-            matched_tokens_by_card[memory_id] = hits
-    # 歧义裁决：同一 token 命中多张已递送卡 → 不发奖。
-    token_owners = {}
-    for memory_id, hits in matched_tokens_by_card.items():
-        for hit in hits:
-            token_owners.setdefault(hit, set()).add(memory_id)
-    for memory_id, hits in sorted(matched_tokens_by_card.items()):
-        ambiguous = any(len(token_owners[h]) > 1 for h in hits)
-        if ambiguous:
-            results["ambiguous"].append(memory_id)
+        explicit = next((u for u in uses if u[1] == "adopted" and u[2] >= delivered_at), None)
+        if explicit:
+            matches.setdefault(key, []).append((fields, {**payload, "use_id": explicit[0],
+                "association_basis": "explicit_adoption"}, ""))
+        if not references:
             continue
-        revision = next(d[2] for d in deliveries if d[1] == memory_id)
-        _record_event(conn, event_type="knowledge.adopted", memory_id=memory_id,
-                      revision_algo="content-v1", content_revision=revision,
-                      level="L2", polarity="positive", run_id=run_id,
-                      logical_task_key=group, independence_group=group,
-                      payload={"action_tokens": sorted(hits)[:10],
-                               "matcher_version": matcher_version,
-                               "association_basis": "exact_action_match",
-                               "scope": (store.load(repo, memory_id)[0] or {}).get("scope", "")},
-                      issuer_id=issuer, trust_basis="deterministic_matcher")
-        results["L2"].append(memory_id)
+        section = re.search(r"^## +可执行动作[^\n]*\n(.*?)(?=^## +|\Z)", body, re.M | re.S)
+        signatures = set(re.findall(r"`((?:python3?|bash|sh) [^`\n]+)`", section[1] if section else ""))
+        for action, at, call_id, token in actions:
+            if (at > min(u[2] for u in references)
+                    and ((token == delivery_id) if token else action in signatures)):
+                matches.setdefault(key, []).append((fields, {**payload, "tool_call_id": call_id,
+                    "action": action, "association_basis": "bound_action" if token else "exact_action_match"}, call_id))
+    owners = {}
+    for key, candidates in matches.items():
+        for _, _, call_id in candidates:
+            if call_id:
+                owners.setdefault(call_id, set()).add(key)
+    for (mid, revision), candidates in matches.items():
+        match = next((item for item in candidates if not item[2] or len(owners[item[2]]) == 1), None)
+        if not match:
+            results["ambiguous"].append(mid)
+            continue
+        fields, payload, _ = match
+        _record_event(conn, event_type="knowledge.adopted", level="L2", polarity="neutral",
+                      payload=payload, trust_basis=payload["association_basis"], **fields)
+        results["L2"].append(mid)
+        results["adopted_revisions"].append((mid, revision))
     conn.commit()
-    return {"run_id": run_id, "logical_task_key": group, **results}
+    return {"run_id": run_id, "logical_task_key": logical, **results}
 
 
 # ---------- V2-11 可信 L3 ----------
@@ -167,127 +181,130 @@ def registered_validators() -> dict:
 
 
 def record_execution(conn, *, memory_id: str, content_revision: str,
-                     artifact_hash: str, run_id: str = "",
-                     validator_id: str = "", executed_at: str = "") -> str:
-    """登记一次真实执行（lifecycle verify --run 在执行时调用）。
-
-    execution_id 由 memory_id+artifact_hash 派生，重复投喂同一原件幂等。
-    """
-    execution_id = hashlib.sha256(
-        f"{memory_id}:{artifact_hash}".encode("utf-8")).hexdigest()[:20]
+                     artifact_hash: str, run_id: str = "", validator_id: str = "",
+                     executed_at: str = "", binding=None, report=None, result=None) -> str:
+    """登记原件及可信执行计划的指纹。旧式执行戳本身没有治理效力。"""
+    execution_id = hashlib.sha256(f"{memory_id}:{artifact_hash}".encode()).hexdigest()[:20]
     conn.execute(
-        "INSERT OR IGNORE INTO validator_executions"
-        "(execution_id,memory_id,content_revision,artifact_hash,run_id,validator_id,executed_at)"
-        " VALUES(?,?,?,?,?,?,?)",
-        (execution_id, memory_id, content_revision, artifact_hash,
-         run_id or "", validator_id or "", executed_at or _now()))
+        "INSERT OR IGNORE INTO validator_executions "
+        "(execution_id,memory_id,content_revision,artifact_hash,run_id,validator_id,executed_at,"
+        "binding_hash,checks_hash,independence_group,source_key,verdict) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        (execution_id, memory_id, content_revision, artifact_hash, run_id or "", validator_id or "",
+         executed_at or _now(), binding["binding_hash"] if binding else "",
+         _checks_hash(report["checks"]) if binding else "",
+         binding["independence_group"] if binding else "", result["source_key"] if binding else "",
+         result["verdict"] if binding else ""))
     conn.commit()
     return execution_id
 
 
-def verify_execution(conn, repo, *, run_id, validator_id, report) -> dict:
-    """核对一份真实执行报告，产出 L3 或 unknown。
+def _checks_hash(checks):
+    return hashlib.sha256(contracts.canonical_json(checks).encode()).hexdigest()
 
-    report：{artifact_hash, expected_hash, execution_stamp, checks:[...],
-    target:{memory_id, content_revision, claim_id?}}。
-    硬门：
-    - validator 已登记；
-    - 报告含非空 artifact_hash 与至少一个 check（空报告/自报不能过）；
-    - 执行绑定（统一生命周期）：报告必须带执行戳，且 validator_executions
-      存在 (memory_id, artifact_hash) 的执行记录，戳内版本、记录版本与目标
-      版本三方一致——卡片改版后旧报告不再绑定新正文；
-    - observed_result 全为 pass 才 pass；任何 fail → fail；缺失 → unknown；
-    - claim 级核对：checks 引用的 claim_id 必须存在于卡（防“跑过测试但没
-      测该卡的断言”）。
-    """
-    validators = registered_validators()
-    if validator_id not in validators:
-        return {"error": "VALIDATOR_NOT_REGISTERED",
-                "detail": "only registered adapters produce trusted L3 evidence"}
+
+def verify_execution(conn, repo, *, run_id, validator_id, report) -> dict:
+    """校验预登记计划、执行原件、检查项与当前知识版本后才入账。"""
+    from .. import store
+    from ..mutations import _compute_revision
+    from . import governance, validators
+    from .observation import run_summary
+
+    if validator_id not in registered_validators():
+        return {"error": "VALIDATOR_NOT_REGISTERED"}
     target = report.get("target") or {}
-    memory_id = target.get("memory_id", "")
-    revision = target.get("content_revision", "")
+    memory_id, revision = target.get("memory_id"), target.get("content_revision")
     if not memory_id or not revision:
         return {"error": "TARGET_REQUIRED"}
     stamp = report.get("execution_stamp") or {}
-    artifact_hash = str(report.get("artifact_hash") or "")
+    artifact_hash = report.get("artifact_hash")
     checks = report.get("checks") or []
     if not artifact_hash or not checks:
-        return {"error": "EMPTY_REPORT", "detail": "no artifact or no checks: unknown, not pass"}
+        return {"error": "EMPTY_REPORT"}
     if not stamp:
-        return {"error": "EXECUTION_STAMP_REQUIRED",
-                "detail": "reports must be stamped at execution time "
-                          "(lifecycle verify --run); unstamped artifacts "
-                          "cannot validate a specific card version"}
-    if stamp.get("memory_id") != memory_id or stamp.get("content_revision") != revision:
-        return {"error": "STALE_EXECUTION_RECORD",
-                "detail": f"report was executed for {stamp.get('memory_id')}"
-                          f"@{stamp.get('content_revision')}, "
-                          f"not {memory_id}@{revision}"}
+        return {"error": "EXECUTION_STAMP_REQUIRED"}
+    if (stamp.get("memory_id"), stamp.get("content_revision")) != (memory_id, revision):
+        return {"error": "STALE_EXECUTION_RECORD"}
     rec = conn.execute(
-        "SELECT content_revision,run_id,validator_id FROM validator_executions WHERE memory_id=? AND artifact_hash=?",
+        "SELECT content_revision,run_id,validator_id,binding_hash,checks_hash,independence_group,"
+        "source_key,verdict FROM validator_executions WHERE memory_id=? AND artifact_hash=?",
         (memory_id, artifact_hash)).fetchone()
     if not rec:
-        return {"error": "EXECUTION_RECORD_MISSING",
-                "detail": "no validator_executions row for this artifact: "
-                          "feed must reference a run recorded at execution time"}
+        return {"error": "EXECUTION_RECORD_MISSING"}
     if rec[0] != revision:
-        return {"error": "STALE_EXECUTION_RECORD",
-                "detail": f"execution recorded for revision {rec[0]}, "
-                          f"card is now {revision}"}
-    if (rec[1], rec[2]) != (run_id or "", validator_id) or (
-            stamp.get("run_id") or "", stamp.get("validator_id")) != (rec[1], rec[2]):
-        return {"error": "EXECUTION_IDENTITY_MISMATCH",
-                "detail": "report, recorded execution, task run and validator must match"}
-    from .. import store
+        return {"error": "STALE_EXECUTION_RECORD"}
+    if rec[1:3] != (run_id or "", validator_id) or (stamp.get("run_id") or "", stamp.get("validator_id")) != rec[1:3]:
+        return {"error": "EXECUTION_IDENTITY_MISMATCH"}
     meta, body, _ = store.load(repo, memory_id)
     if not meta:
         return {"error": "NOT_FOUND"}
-    from ..mutations import _compute_revision
     if _compute_revision(meta, body) != revision:
-        return {"error": "STALE_EXECUTION_RECORD", "detail": "card changed after validation ran"}
-    claim_ids = {c.get("claim_id") for c in (meta.get("claims") or [])
-                 if isinstance(c, dict)} or {"C-whole"}
-    unknown_claims = [c.get("check_id") for c in checks
-                      if c.get("claim_id") and c["claim_id"] not in claim_ids]
-    results = [c.get("observed_result") for c in checks]
-    if unknown_claims:
-        outcome = "unknown"
-        reason = f"checks reference unknown claims: {unknown_claims[:3]}"
-    elif any(r == "fail" for r in results):
-        outcome = "fail"
-        reason = "observed failure in claimed checks"
-    elif any(r != "pass" for r in results):
-        outcome = "unknown"
-        reason = "checks with missing/indeterminate results"
-    else:
-        outcome = "pass"
-        reason = "all claimed checks passed with artifact"
-    from .observation import run_summary
+        return {"error": "STALE_EXECUTION_RECORD"}
+    binding = validators.binding_for(validator_id, meta, body, revision)
+    if not binding or not rec[3] or binding["binding_hash"] != rec[3]:
+        return {"error": "VALIDATOR_BINDING_REQUIRED"}
+    if _checks_hash(checks) != rec[4]:
+        return {"error": "VALIDATOR_CHECKS_MISMATCH"}
     summary = run_summary(conn, run_id) if run_id else {}
-    event_type = "validation.completed"
-    payload = {"validator_id": validator_id, "validator_kind": validators[validator_id]["kind"],
-               "scope": (meta or {}).get("scope", ""),
-               "artifact_hash": artifact_hash,
-               "expected_hash": str(report.get("expected_hash") or ""),
-               "checks": checks, "outcome": outcome, "reason": reason}
-    checks_digest = hashlib.sha256(contracts.canonical_json(
-        checks).encode("utf-8")).hexdigest()[:16]
-    _record_event(conn, event_type=event_type, memory_id=memory_id,
-                  revision_algo="content-v1", content_revision=revision,
-                  level="L3",
-                  polarity=("positive" if outcome == "pass"
-                            else "negative" if outcome == "fail" else "neutral"),
-                  run_id=run_id or "", logical_task_key=summary.get("logical_task_key", ""),
-                  independence_group=summary.get("logical_task_key", ""),
-                  payload=payload, issuer_id=f"validator:{validator_id}",
-                  trust_basis="registered-adapter",
-                  claim_id=target.get("claim_id", ""),
-                  native_key=f"{run_id}:{memory_id}:{revision}:{validator_id}:{checks_digest}")
+    if run_id and (summary.get("error") or summary.get("project_key") != binding.get("project_key")):
+        return {"error": "VALIDATOR_TASK_PROJECT_MISMATCH"}
+    if not verification_workspace_matches(summary, binding):
+        return {"error": "VALIDATOR_TASK_WORKSPACE_MISMATCH"}
+    outcome = rec[7]
+    if outcome not in ("pass", "fail"):
+        return {"memory_id": memory_id, "content_revision": revision, "outcome": "unknown",
+                "validator": validator_id, "checks_count": len(checks)}
+    task = summary.get("logical_task_key", "") if summary.get("identity_basis") in ("native", "host_prompt") else ""
+    payload = {"validator_id": validator_id, "scope": meta["scope"], "artifact_hash": artifact_hash,
+               "checks": checks[:12], "checks_hash": rec[4], "outcome": outcome,
+               "junit_sha256": report.get("junit_sha256", ""),
+               "contract_fingerprint": binding["contract_fingerprint"],
+               "binding_hash": rec[3], "validation_source_key": rec[6],
+               "origin_run_key": summary.get("origin_run_key", "")}
+    event_id = _record_event(conn, event_type="validation.completed", memory_id=memory_id,
+        revision_algo="content-v1", content_revision=revision, level="L3",
+        polarity="positive" if outcome == "pass" else "negative", run_id=run_id or "",
+        logical_task_key=task, independence_group=rec[5], payload=payload,
+        issuer_id=f"validator:{validator_id}", trust_basis="registered-adapter",
+        native_key=f"{run_id}:{memory_id}:{revision}:{rec[3]}:{rec[6]}:{outcome}")
     conn.commit()
-    return {"memory_id": memory_id, "content_revision": revision,
-            "outcome": outcome, "reason": reason, "validator": validator_id,
-            "checks_count": len(checks)}
+    projected = governance.project_after_evidence(repo, conn, memory_id)
+    return {"memory_id": memory_id, "content_revision": revision, "outcome": outcome,
+            "validator": validator_id, "checks_count": len(checks), "event_id": event_id,
+            "governance": projected}
+
+
+def run_verification(conn, repo, *, memory_id, revision, validator_id, binding, run_id="", timeout=600):
+    from . import validators
+    from .observation import run_summary
+
+    if run_id:
+        summary = run_summary(conn, run_id)
+        if summary.get("error") or summary.get("project_key") != binding.get("project_key"):
+            return {"error": "VALIDATOR_TASK_PROJECT_MISMATCH"}, None
+        if not verification_workspace_matches(summary, binding):
+            return {"error": "VALIDATOR_TASK_WORKSPACE_MISMATCH"}, None
+
+    result = validators.run_registered(binding, memory_id=memory_id, revision=revision, run_id=run_id,
+                                       validator_id=validator_id, executed_at=_now(), timeout=timeout)
+    if result.get("error"):
+        return result, None
+    report = result["report"]
+    record_execution(conn, memory_id=memory_id, content_revision=revision, artifact_hash=report["artifact_hash"],
+                     run_id=run_id, validator_id=validator_id, binding=binding, report=report, result=result)
+    if result["verdict"] == "unknown":
+        return {"outcome": "unknown", "executed_command_exit": result["exit_code"]}, result["raw"]
+    report["target"] = {"memory_id": memory_id, "content_revision": revision}
+    verified = verify_execution(conn, repo, run_id=run_id, validator_id=validator_id, report=report)
+    return {**verified, "executed_command_exit": result["exit_code"]}, result["raw"]
+
+
+def verification_workspace_matches(run, binding):
+    from .observe import workspace_fingerprint
+
+    observed = run.get("environment_fingerprint", "")
+    if not observed.startswith("workspace:"):
+        return not binding.get("auto") or not run
+    return bool(binding.get("workspace") and workspace_fingerprint(binding["workspace"]) == observed)
 
 
 def evidence_summary(conn, memory_id: str, content_revision: str) -> dict:

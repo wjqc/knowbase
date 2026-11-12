@@ -1,18 +1,41 @@
 # 执行中知识消费、反馈与团队统计协议
 
-本地开发实现，尚未进入32ad7f0固定运行包。仍共用原memory.db与Git知识库，无新增模型调用。
-
 ## 消费链
 
-1. `memory_context(session_id,event_id,task_id,task_revision,scope,current_goal,topics)` 返回候选的 `id/content_revision` 和实际任务身份。`freshness` 说明本地版本及后台刷新状态；当前调用不等待网络。后台只接收远端变更，推送仍由写入链路负责。
-2. 需要全文时，`memory_read(id)`可直接读取新卡、待审卡或历史卡。需要关联任务时，同时传`session_id/event_id/context_event_id`，host_profile沿用真实任务，得到独立阅读回执；缺少一项会明确列出缺参。context_event_id绑定实际任务上下文，同scope新卡/待审卡可直接读回，不要求先进入默认检索。阅读不等于递送候选或采纳。失败读取不增加成功阅读/hit计数，命令遥测仍记录失败尝试。
-3. `memory_use(session_id,event_id,context_event_id,id,content_revision,state,host_profile)` 接受 `referenced/adopted/irrelevant/unverified`，返回 `use_id`。每次状态变化使用独立稳定事件ID；同事件重试保持ID和内容。记录不会自动产生helpful。
-   使用记录的context_event_id必须指向实际递送该候选的事件；缓存跳过没有新候选时沿用原递送事件。staging读回不能据此绕过治理进入adopted。
-4. 实际执行并验证后，`memory_feedback(id,outcome,expected_content_revision,use_id,task_outcome_id,request_id)` 回填结果。`use_id`须是该卡版本的参考/采纳回执；`task_outcome_id`表示本任务的一项稳定验证结果，重试不能重新生成。去重粒度为卡版本+会话/任务/方案版本+结果ID；更换请求ID或工具标签不能重复累计同一结果。
+1. 提示词 Hook、`memory_search` 和 `memory_context` 为实际返回的卡版本生成递送回执。正常读卡沿用 `memory_read(id, delivery_id=...)`。具备任务锚点的宿主还可在读卡工具成功后，唯一匹配同任务、同卡、同版本的递送。独立读取与旧式三字段关联仍然可用。
+2. 项目作用域使用显式路径、已确认绑定和 Git 身份。新项目可以安全派生绑定。同名目录不会自动复用已有项目知识。提示词 Hook 可在项目未解析时读取全局卡，上下文入口保留未解析原因。
+3. 宿主工具事件记录在任务锚点下，阶段检索和内容采集开关可以独立关闭。自动确认采用需要已关联的阅读、之后的同任务动作、配对成功结果，以及明确的递送引用或卡片「可执行动作」中的完整命令匹配。普通读文件、通用测试命令和路径相似只留下观测。显式 `memory_use` 仍可记录实际参考、采用、无关或待验证。
+4. `memory_feedback` 保留为纠错、版本过时、缺少前置条件或帮助程度的补充信号。绑定反馈继续支持 `use_id`、明确 `outcome` 和实际 `task_result`，普通任务无须为补反馈增加工具调用。
+
+旧库中依赖目录同名查找的项目，可用 `knowbase scope bind --path 项目根路径 --scope 已确认作用域` 将已有卡的作用域与实际项目绑定。
 
 旧feedback调用仍可用，但仅记 `legacy_unbound` 观察，不改变有效验证计数或治理状态。旧历史日志保留，不追认成新版本验证。正文等内容字段变更后清除旧验证及本版本反馈计数；新版本重新验证。人工修订规则不等于人工确认有效，可信人工确认走CLI verify。工具标签用于归因，不认证人数，human前缀也不构成人工权限。
 
 反馈写前持久回执及文件before/after哈希，落盘后通过索引/日志事务完成；中断后重放核对实际文件，内容冲突返回明确错误，不凭文件存在宣称恢复。旧回执重放不会给新版本加计数或提交新正文。
+
+## 可信验证
+
+在私有 Knowbase 配置的 `knowledge_lifecycle.validators` 中，为验证器登记 `validator_id`、`kind: pytest` 和 `bindings`。每个绑定包含以下字段。
+
+| 字段 | 用途 |
+| --- | --- |
+| `memory_id`、`content_revision` | 限定验证的卡片版本 |
+| `contract_fingerprint` | 结构化声明或适用条件存在时必填，取 `contracts.content_v2_hash(meta, body)` |
+| `cwd`、`argv` | 固定绝对工作目录和命令，使用绝对路径的 Python 以 `-I -m pytest` 执行 |
+| `claim_map` | pytest node ID 到声明 ID，覆盖所有声明。无结构化声明的卡使用 `C-whole` |
+| `verifier_files` | 相对路径到 SHA-256，固定测试及其受信依赖文件 |
+| `input_paths` | 相对路径列表，包含被测输入和产物。相同原始输入摘要的重复验证合并计数 |
+| `project_key`、`workspace` | 将自动验证限制在观测到的项目与本地工作区。Git 项目使用仓库根路径 |
+| `independence_group` | 预先划分的独立证据组，同一组重跑不会扩展组数 |
+| `auto` | 为此绑定启用采用后的后台验证 |
+
+手工执行可用 `knowbase lifecycle verify --memory-id ID --format VALIDATOR --registered`。不带任务运行时可检查声明，正结果不参与独立任务计数。验证器以 pytest JUnit 结果核对已登记节点。已有执行原件可以重放，仍需匹配执行登记和当前绑定。未登记的命令、缺失的必测检查项、环境错误和历史版本报告均不能产生正向证据。
+
+可信结果入账后重算对应卡片。暂时不能写入时，由已有的后台全库重算恢复。当前版本要达到 `verified`，需要 3 个独立任务、至少 2 个独立组、无未解决的可信反证。普通反馈和模型提炼沿各自流程处理。
+
+本机 `knowbase retrieval-report` 按宿主和运行构建提供符合检索门槛的观测、含候选递送的次数、递送后关联读取和已采用任务的验证记录。候选相关性、归因召回与误关联仍需抽样标注。历史未带这些维度的数据保持原口径。
+
+2026-11-12 隔离试点中，三个真实 ZCode CLI 会话分别对不同输入执行同一张测试卡的动作。用三个会话的实际回执和产物在隔离库运行登记的验证器，卡片依次达到 `validated`（1 任务、1 组）、`validated`（2 任务、1 组）和 `verified`（3 任务、2 组）。三个最终答复只返回产物，显式反馈记录为零。
 
 ## 本机汇总导出
 

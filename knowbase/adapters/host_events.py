@@ -8,7 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .. import config, context, index, jobs, materials
+from .. import config, context, index, jobs, materials, scope_binding
 from . import normalizer
 
 
@@ -256,13 +256,22 @@ def pending_notifications(conn, job_ids, notices: dict, *, force: bool = False) 
 
 def handle(data: dict, *, event: str, style: str, defer_capture: bool = False) -> dict:
     cfg = config.load_config()
-    if not cfg["inflight"]["enabled"] or not cfg.get("hooks", {}).get("enabled", True):
+    if not cfg.get("hooks", {}).get("enabled", True):
+        return {"status": "disabled"}
+    host = _host(style)
+    observed_task = False
+    if event in ("tool-before", "tool-after", "tool-failure", "stop"):
+        try:
+            from ..knowledge_lifecycle.observe import observe_host_event
+            observed_task = observe_host_event(config.repo_path(cfg), data, host=host, event=event)
+        except Exception:
+            pass
+    if not cfg["inflight"]["enabled"]:
         return {"status": "disabled"}
     session = str(data.get("session_id") or data.get("sessionId") or os.environ.get("CLAUDE_SESSION_ID")
                   or os.environ.get("ZCODE_SESSION_ID") or "")
     if not session:
         return {"status": "failed", "error": "SESSION_ID_MISSING"}
-    host = _host(style)
     tool = str(data.get("tool_name") or data.get("toolName") or "")
     tool_input = data.get("tool_input") or data.get("toolInput") or {}
     observation = _sanitize_observation({"hook_event": event, "payload": data})
@@ -286,15 +295,7 @@ def handle(data: dict, *, event: str, style: str, defer_capture: bool = False) -
                            "WHERE host_profile=? AND session_id=?", (host, session)).fetchone()
         scope = row[0] if row else ""
         if project:
-            path = Path(project).expanduser().resolve()
-            mapped = config.mapped_scope(str(project), cfg) or ""
-            if not mapped:
-                known = conn.execute("SELECT 1 FROM meta WHERE scope=? LIMIT 1", (path.name,)).fetchone()
-                mapped = path.name if known else ""
-            if mapped:
-                scope = mapped
-            elif not row or context.provisional_global(row[0], row[1], row[3]):
-                scope = ""
+            scope = scope_binding.resolve_project(conn, project, cfg)["scope"] or ""
         if not scope and not project:
             scope = "global"
         last_at = row[2] if row else None
@@ -319,7 +320,7 @@ def handle(data: dict, *, event: str, style: str, defer_capture: bool = False) -
     # 放在 scope 分支之前：scope 未解析的工具调用同样是真实观测。
     # 观测失败不阻断 Hook（遥测同款 best-effort 语义）；self_call 已在上方跳过，
     # 故此处不与 MCP 路径重复记（memory_* 调用由 server impl 记录）。
-    if event in ("tool-before", "tool-after", "tool-failure"):
+    if not observed_task and event in ("tool-before", "tool-after", "tool-failure"):
         try:
             from ..knowledge_lifecycle import observe as _observe_lifecycle
             _obs_conn = index.connect(repo)

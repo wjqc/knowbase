@@ -29,11 +29,12 @@ def session_start() -> str:
         "[knowbase 经验库] 按需辅助当前任务：\n"
         "1. 具体项目/新子任务/新错误先用 memory_context 分阶段检索，topics格式为"
         '[{"topic_id":"本阶段","queries":["具体技术词"],"status":"active"}]；简单检索用memory_search，传正确scope。'
-        "只对相关候选memory_read；实际消费用memory_use绑定卡片版本与检索event_id，命中和阅读不等于有效帮助。\n"
-        "2. 验证实际结果后再memory_feedback，outcome为helpful/not_helpful/outdated/incorrect，"
+        "只对相关候选memory_read，沿用递送提供的delivery_id；采用与验证由后台记录可观察事实。\n"
+        "2. 需要报告知识纠错、过时或实际帮助时可用memory_feedback，"
         "通常只传已有use_id、明确outcome和实际task_result；没有可核对结果就不填。\n"
         "3. 日常任务用完整的业务答复直接结束。Hook静默采集入队，不阻断主任务；"
-        "不要主动保存或提炼，不等待采集，不为失败补写、重试或报告回执。\n"
+        "不要主动保存或提炼，不等待采集，不为失败补写、重试或报告回执。"
+        "除非用户明确询问知识来源，最终答复只报告工作结果，不转述读卡、递送标识、反馈或后台验证状态。\n"
         "4. 只有用户明确要求保存或维护经验时，才用memory_save、memory_update或memory_job_*；"
         "业务规则须有出处。不为补反馈延长会话。"
     )
@@ -43,39 +44,9 @@ def session_start() -> str:
 
 
 def _infer_scope(conn, project_dir=None) -> str | None:
-    """推断当前项目 scope。解析链（2026-11-04 裁决：未映射自动绑定，不再整场跳过）：
+    from .scope_binding import resolve_project
 
-    1. config scope_map 显式映射（含 bare-name 别名，原有行为）；
-    2. DB 已确认绑定（路径祖先最具体 / git 身份：toplevel 或 remote 相同即同项目）；
-    3. 目录名恰等于已有 scope 名（精确等值，无融合风险，原有行为）；
-    4. 自动绑定（git remote 派生 scope 名，同名不同库加父目录/哈希前缀防融合；
-       非 git 目录按绝对路径绑定，本机私有）；
-    5. 全部未命中返回 None，调用方回退 global。
-    """
-    project_dir = project_dir or os.environ.get("CLAUDE_PROJECT_DIR") or os.environ.get("ZCODE_PROJECT_DIR")
-    if not project_dir:
-        return None
-    resolved = str(Path(project_dir).expanduser().resolve())
-    mapped = config.mapped_scope(project_dir)
-    if mapped:
-        return str(mapped)
-    from . import scope_binding
-    result = scope_binding.resolve_binding(conn, resolved)
-    if result.get("status") == "resolved":
-        return result["scope"]
-    name = Path(resolved).name.lower()
-    if name:
-        scopes = [r[0] for r in conn.execute(
-            "SELECT DISTINCT scope FROM meta WHERE staging = 0 AND scope != 'global'")]
-        matches = [s for s in scopes if s and s.lower() == name]
-        if matches:
-            return max(matches, key=len)
-    if result.get("reason") != "ambiguous":
-        # 歧义（多条同等具体的已确认绑定指向不同 scope）不自动绑，留人工裁决。
-        bound = scope_binding.auto_bind(conn, resolved)
-        if bound.get("status") == "resolved":
-            return bound["scope"]
-    return None
+    return resolve_project(conn, project_dir)["scope"]
 
 
 def has_project_context() -> bool:
@@ -119,7 +90,7 @@ def _tier_hits(conn, hits, min_conf):
     return kept, dropped_once
 
 
-def user_prompt(prompt: str, project_dir=None, delivery_info=None) -> str:
+def user_prompt(prompt: str, project_dir=None, delivery_info=None, host_data=None) -> str:
     """对用户输入做本地检索（自动推断当前项目 scope），命中则返回注入文本。
 
     Phase 1 查询卫生（02 号设计§5）：先过意图门控与保守蒸馏再检索；
@@ -129,25 +100,42 @@ def user_prompt(prompt: str, project_dir=None, delivery_info=None) -> str:
     if not hooks_cfg.get("enabled", True):
         return ""
     prompt = (prompt or "").strip()
-    if len(prompt) < MIN_PROMPT_LEN:
+    if not prompt or (len(prompt) < MIN_PROMPT_LEN and not host_data):
         return ""
-    from . import query_hygiene
+    from uuid import uuid4
+    from . import delivery, query_hygiene, scope_binding
     hy = query_hygiene.prepare(prompt)  # V1 safety limits cannot be disabled by config.
     rp = config.repo_path()
     if not rp.exists():
         return ""
     conn = index.connect(rp)
     try:
+        resolution = scope_binding.resolve_project(conn, project_dir)
+        inferred = resolution["scope"]
+        scope = inferred or "global"
+        host = (delivery_info or {}).get("host_profile") or config.agent_name()
+        sid = (delivery_info or {}).get("session_id") or ""
+        task = ""
+        if host_data and sid and inferred:
+            try:
+                from .knowledge_lifecycle.observe import start_host_task
+                task = start_host_task(conn, host=host, session=sid, data=host_data,
+                                       project=project_dir, scope=inferred, prompt=prompt)
+            except Exception:
+                conn.rollback()
+        if len(prompt) < MIN_PROMPT_LEN:
+            return ""
+        from .build_identity import build_id
+        diagnostics = {"scope_resolved": bool(inferred), "scope_source": resolution["source"],
+                       "scope_reason": resolution["reason"], "host_profile": host,
+                       "runtime_build": build_id()}
         if hy["action"] == "skip":
             # 跳过也留痕（query 存前 200 字符防日志膨胀），便于统计跳过原因分布。
             index.record_search(conn, prompt[:200], "", [], tool="auto_search",
-                                query_class=f"skipped:{hy['reason']}", raw_len=len(prompt))
+                                query_class=f"skipped:{hy['reason']}", raw_len=len(prompt),
+                                retrieval={**diagnostics, "origin": "hook_prompt", "level": "not_executed"})
             return ""
-        inferred = _infer_scope(conn, project_dir)
-        # 2026-11-04 裁决：未映射项目由 _infer_scope 自动绑定；彻底无法解析时回退
-        # global（search 的 scope 过滤恒含 global 卡），不再整场跳过。
-        scope = inferred or "global"
-        diagnostics = {"scope_resolved": bool(inferred)}
+        search_id = str(uuid4())
         hits = index.search(conn, hy["query"], scope=scope, limit=100, origin="hook_prompt", diagnostics=diagnostics)
         min_conf = hooks_cfg.get("inject_min_confidence", "verified")
         # 矛盾知识只供主动调查，不自动建议采用。
@@ -170,6 +158,9 @@ def user_prompt(prompt: str, project_dir=None, delivery_info=None) -> str:
             else:
                 label="once·未验证" if hit["confidence"]=="once" else hit["confidence"]
                 line = f"- [{hit['id']}] {hit['title']}（{label}·{hit['status']} · scope={hit['scope']}）"
+            if sid and hit.get("content_revision"):
+                token = delivery.delivery_id_for(search_id, hit["id"], hit["content_revision"])
+                line += f' · memory_read(id="{hit["id"]}", delivery_id="{token}")'
             if len("\n".join(lines + [line])) > budget:
                 continue
             lines.append(line)
@@ -184,16 +175,13 @@ def user_prompt(prompt: str, project_dir=None, delivery_info=None) -> str:
         diagnostics.update(delivered_chars=len(text), delivered_count=len(delivered),
                            delivered_tiers=delivered_tiers, dropped_once=dropped_once)
         search_id=index.record_search(conn, hy["query"], scope, delivered, tool="auto_search",
-                            query_class=hy["query_class"], raw_len=len(prompt), retrieval=diagnostics)
+                            query_class=hy["query_class"], raw_len=len(prompt), retrieval=diagnostics, search_id=search_id)
         if delivery_info is not None:
-            from . import delivery as _delivery
-            host = delivery_info.get("host_profile") or os.environ.get("KNOWBASE_AGENT_NAME", "unknown")
-            sid = delivery_info.get("session_id") or ""
             delivery_ids = []
             for rank, hit in enumerate(delivered, 1):
-                delivery_ids.append(_delivery.record_delivery(
+                delivery_ids.append(delivery.record_delivery(
                     conn, search_id=search_id, host_profile=host, session_id=sid,
-                    context_event_id=f"hook:{search_id}", task_id="", task_revision="",
+                    context_event_id=f"hook:{search_id}", task_id=task, task_revision="",
                     scope=scope, memory_id=hit["id"],
                     content_revision=hit.get("content_revision") or "", rank=rank))
             conn.commit()
@@ -343,15 +331,18 @@ def cmd_user_prompt(style: str = "claude"):
     data = _read_stdin()
     prompt = _first(data, "prompt", "prompt_text", "user_prompt", "input")
     # M3-2: 中途检查点触发（不阻断，异步入队）
-    sid = _first(data, "session_id", "sessionId")
+    from .knowledge_lifecycle.observe import host_session
+    sid = host_session(data)
     transcript = _first(data, "transcript_path", "transcriptPath", "transcript")
     cfg = config.load_config()
     if (sid and transcript and not cfg["inflight"]["enabled"] and cfg["inflight"]["capture_enabled"]
             and cfg["hooks"].get("enabled", True) and cfg["hooks"].get("mid_session_capture", False)
             and not _mid_capture_flag_path(sid).exists()):
         _defer_legacy_capture(data, cfg, style, mid_session=True)
-    delivery_info={"session_id": sid or "", "host_profile": style}
-    text = user_prompt(prompt, data.get("cwd") or data.get("project_dir"), delivery_info)
+    delivery_info={"session_id": sid or "", "host_profile": cfg["inflight"].get("host_profile") or style}
+    project = (_first(data, "cwd", "project_dir", "projectDir") or os.environ.get("ZCODE_PROJECT_DIR")
+               or os.environ.get("CLAUDE_PROJECT_DIR"))
+    text = user_prompt(prompt, project, delivery_info, host_data=data)
     if cfg["inflight"]["enabled"]:
         from .adapters import host_events
         observation = host_events.handle(data, event="user-prompt", style=style, defer_capture=True)
@@ -380,12 +371,19 @@ def cmd_stop(style: str = "claude"):
     data = _read_stdin()
     try:
         cfg = config.load_config()
-        if not cfg["hooks"].get("enabled", True) or not cfg["inflight"]["capture_enabled"]:
+        if not cfg["hooks"].get("enabled", True):
             return
+        if not cfg["inflight"]["enabled"]:
+            from .knowledge_lifecycle.observe import observe_host_event
+            try:
+                observe_host_event(config.repo_path(cfg), data,
+                                   host=cfg["inflight"].get("host_profile") or style, event="stop")
+            except Exception:
+                pass
         if cfg["inflight"]["enabled"]:
             from .adapters import host_events
             host_events.handle(data, event="stop", style=style, defer_capture=True)
-        else:
+        elif cfg["inflight"]["capture_enabled"]:
             _defer_legacy_capture(data, cfg, style)
     except Exception:
         # Stop 输出属于宿主会话；采集失败不能进入主任务的收尾。

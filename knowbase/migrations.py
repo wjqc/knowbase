@@ -649,6 +649,21 @@ MIGRATIONS: list[tuple[int, str]] = [
     CREATE TABLE command_call_rejections(
       call_id TEXT PRIMARY KEY, reason TEXT NOT NULL);
     """),
+    (37, """
+    ALTER TABLE native_events ADD COLUMN run_id TEXT NOT NULL DEFAULT '';
+    CREATE INDEX idx_native_events_run ON native_events(run_id, event_kind, tool_call_id);
+    CREATE TABLE host_task_anchors(
+      host_profile TEXT NOT NULL, session_id TEXT NOT NULL, task_id TEXT NOT NULL,
+      project_key TEXT NOT NULL, run_id TEXT NOT NULL, scope TEXT NOT NULL,
+      PRIMARY KEY(host_profile, session_id));
+    CREATE TABLE lifecycle_run_progress(
+      run_id TEXT PRIMARY KEY, input_digest TEXT NOT NULL);
+    ALTER TABLE validator_executions ADD COLUMN binding_hash TEXT NOT NULL DEFAULT '';
+    ALTER TABLE validator_executions ADD COLUMN checks_hash TEXT NOT NULL DEFAULT '';
+    ALTER TABLE validator_executions ADD COLUMN independence_group TEXT NOT NULL DEFAULT '';
+    ALTER TABLE validator_executions ADD COLUMN source_key TEXT NOT NULL DEFAULT '';
+    ALTER TABLE validator_executions ADD COLUMN verdict TEXT NOT NULL DEFAULT '';
+    """),
 ]
 
 

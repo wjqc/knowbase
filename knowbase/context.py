@@ -104,16 +104,14 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                   "coverage_summary": {}}
         if prior and scope and prior[0] != scope:
             result.update(error="SCOPE_MISMATCH", retrieval_status="scope_unresolved")
+            result["scope_resolution"] = {"source": "session", "reason": "scope_mismatch"}
         else:
             scope = scope or (prior[0] if prior else "")
             if not scope:
-                from .hooks import _infer_scope, has_project_context
-                if project_path:
-                    from pathlib import Path
-                    path = Path(project_path).expanduser().resolve()
-                    scope = config.mapped_scope(project_path, cfg) or ""
-                else:
-                    scope = _infer_scope(conn) or ("" if has_project_context() else "global")
+                from .scope_binding import resolve_project
+                resolution = resolve_project(conn, project_path, cfg)
+                scope = resolution["scope"] or ("global" if resolution["reason"] == "missing_project" else "")
+                result["scope_resolution"] = {"source": resolution["source"], "reason": resolution["reason"]}
             if not scope:
                 result.update(error="SCOPE_UNRESOLVED", retrieval_status="scope_unresolved")
         if not result.get("error"):
@@ -150,6 +148,7 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
             hit_search = {}
             deferred_sync = False
             performed = 0
+            hygiene_skips = 0
             limit = max(1, min(20, int(options["max_queries_per_event"])))
             per_topic = max(1, min(6, int(options["max_queries_per_topic"])))
             budget_chars = max(128, min(32000, int(options["context_token_budget"]) * 2))
@@ -186,6 +185,7 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                         from .query_hygiene import prepare
                         prepared = prepare(query)
                         if prepared["action"] == "skip":
+                            hygiene_skips += 1
                             completed.add(query)
                             continue
                         search_query = prepared["query"]
@@ -246,6 +246,7 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                     memory_id=candidate["id"], content_revision=candidate["content_revision"],
                     rank=rank)
                 result["delivery_ids"].append(delivery_id)
+                candidate["delivery_id"] = delivery_id
                 if events_enabled:
                     from .value import events as _ve
                     _ve.record(conn, "knowledge.delivered",
@@ -270,6 +271,10 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
             if not result.get("error"):
                 result["retrieval_status"] = ("deferred_sync" if deferred_sync else "deferred_budget" if any(t.get("status") == "deferred" for t in deferred)
                     else "executed" if found else "no_hit" if performed else "skipped_cache")
+                if result["retrieval_status"] == "skipped_cache":
+                    result["skip_reason"] = ("no_topic" if not topics else "prompt_hook_owns_retrieval"
+                        if automatic and stage == "observe" and (observation or {}).get("hook_event") == "user-prompt"
+                        else "query_hygiene" if hygiene_skips else "already_covered")
             result["job_ids"] = [r[0] for r in conn.execute(
                 "SELECT job_id FROM jobs WHERE scope=? AND state IN ('awaiting_agent','validating') "
                 "ORDER BY created_at LIMIT ?", (scope, options["max_batches_per_opportunity"]))]

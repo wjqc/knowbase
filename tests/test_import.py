@@ -42,8 +42,10 @@ def card(conclusion, problem, applies, excludes, action, evidence,
 # 准备：初始化 + 存量文档目录
 cli.main(["init"])
 os.environ["KNOWBASE_AGENT_NAME"] = "claude-code"
-os.environ["CLAUDE_PROJECT_DIR"] = "/tmp/projx"
-CFG.write_text(json.dumps({"hooks": {"inject_min_confidence": "any"}}), encoding="utf-8")
+project = TMP / "projx"; project.mkdir()
+os.environ["CLAUDE_PROJECT_DIR"] = str(project)
+CFG.write_text(json.dumps({"hooks": {"inject_min_confidence": "any"},
+                           "scope_map": {str(project): "projx"}}), encoding="utf-8")
 SRC = TMP / "存量文档"
 SRC.mkdir()
 (SRC / "数据库连接池耗尽排查.md").write_text(
@@ -90,7 +92,8 @@ r = save_impl("pitfall", "数据库连接池耗尽排查", POOL_CARD,
 pid = r.split()[1]
 out_any = hooks.user_prompt("数据库连接池 耗尽 排查")
 check("any 放行 once 注入", pid in out_any, out_any[:80])
-CFG.write_text(json.dumps({"hooks": {"enabled": True, "inject_min_confidence": "verified"}}),
+CFG.write_text(json.dumps({"hooks": {"enabled": True, "inject_min_confidence": "verified"},
+                           "scope_map": {str(project): "projx"}}),
                encoding="utf-8")
 out_strict = hooks.user_prompt("数据库连接池 耗尽 排查")
 check("verified-only 拦截 once", out_strict == "", out_strict[:60])

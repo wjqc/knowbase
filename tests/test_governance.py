@@ -47,7 +47,10 @@ os.environ['CLAUDE_PROJECT_DIR']='/tmp/unrelated'
 # 2026-11-04 裁决：未映射不再整场跳过——自动绑定 unrelated scope 后检索该 scope+global；
 # demo 卡不在其中 → 静默无注入（既无旧跳过文案，也无跨 scope 泄漏）
 assert hooks.user_prompt('AlphaUnique 工程部署')==''
-os.environ['CLAUDE_PROJECT_DIR']='/tmp/demo'
+demo = tmp / 'demo'; demo.mkdir()
+_cfg['scope_map'] = {str(demo): 'demo'}
+_cfg_path.write_text(json.dumps(_cfg))
+os.environ['CLAUDE_PROJECT_DIR'] = str(demo)
 assert mid in hooks.user_prompt('AlphaUnique 工程部署')
 read_impl(mid);feedback_impl(mid,'helpful')
 conn=index.connect(config.repo_path());before=index.search_history(conn);conn.close()

@@ -137,6 +137,7 @@ class TestDispatch:
         from knowbase.__main__ import _dispatch
         from unittest.mock import MagicMock
 
+        monkeypatch.setenv("KNOWBASE_REPO_PATH", str(tmp_path / "missing-repo"))
         args = MagicMock()
         args.cmd = "stats"
         args.since = None

@@ -15,6 +15,10 @@ from datetime import datetime, timezone
 from . import materials
 
 LINK_BASIS_CONTEXT_CANDIDATE = "context_candidate"
+DELIVERY_FIELDS = ("delivery_id", "search_id", "host_profile", "session_id", "context_event_id",
+                   "task_id", "task_revision", "scope", "memory_id", "content_revision", "rank",
+                   "source_delivery_id", "created_at")
+DELIVERY_COLUMNS = ",".join(DELIVERY_FIELDS)
 
 
 def delivery_id_for(search_id: str, memory_id: str, content_revision: str) -> str:
@@ -35,7 +39,7 @@ def record_delivery(conn, *, search_id: str, host_profile: str, session_id: str,
         "rank,source_delivery_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (delivery_id, search_id, host_profile, session_id, context_event_id, task_id,
          task_revision, scope, memory_id, content_revision, rank, source_delivery_id,
-         datetime.now(timezone.utc).isoformat(timespec="seconds")))
+         datetime.now(timezone.utc).isoformat(timespec="microseconds")))
     return delivery_id
 
 
@@ -50,10 +54,27 @@ def find_delivery(conn, context_event_id: str, memory_id: str,
         (context_event_id, memory_id, content_revision, host_profile, session_id)).fetchone()
     if not row:
         return None
-    keys = ("delivery_id", "search_id", "host_profile", "session_id", "context_event_id",
-            "task_id", "task_revision", "scope", "memory_id", "content_revision", "rank",
-            "source_delivery_id", "created_at")
-    return dict(zip(keys, row))
+    return dict(zip(DELIVERY_FIELDS, row))
+
+
+def by_id(conn, delivery_id: str) -> dict | None:
+    row = conn.execute(f"SELECT {DELIVERY_COLUMNS} FROM retrieval_deliveries WHERE delivery_id=?",
+                       (delivery_id,)).fetchone()
+    return dict(zip(DELIVERY_FIELDS, row)) if row else None
+
+
+def for_task(conn, *, host, session, task, memory_id, revision) -> list[dict]:
+    rows = conn.execute(
+        f"SELECT {DELIVERY_COLUMNS} FROM retrieval_deliveries WHERE host_profile=? "
+        "AND session_id=? AND task_id=? AND memory_id=? AND content_revision=? LIMIT 2",
+        (host, session, task, memory_id, revision)).fetchall()
+    return [dict(zip(DELIVERY_FIELDS, row)) for row in rows]
+
+
+def same_host(left: str, right: str) -> bool:
+    if not left or not right or 'unknown' in (left, right):
+        return False
+    return (left == right or left.startswith(right + "-") or right.startswith(left + "-"))
 
 
 def record_use_link(conn, *, use_id: str, delivery_id: str, search_id: str,
@@ -62,7 +83,7 @@ def record_use_link(conn, *, use_id: str, delivery_id: str, search_id: str,
         "INSERT OR IGNORE INTO use_retrieval_links(use_id,delivery_id,search_id,link_basis,"
         "created_at) VALUES(?,?,?,?,?)",
         (use_id, delivery_id, search_id, link_basis,
-         datetime.now(timezone.utc).isoformat(timespec="seconds")))
+         datetime.now(timezone.utc).isoformat(timespec="microseconds")))
 
 
 def deliveries_for_search(conn, search_id: str) -> list[dict]:
