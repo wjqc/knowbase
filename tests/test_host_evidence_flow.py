@@ -5,7 +5,7 @@ from knowbase import config, hooks, index, retrieval_metrics, store, writer
 from knowbase.adapters import host_events
 from knowbase.automation import worker
 from knowbase.knowledge_lifecycle import governance
-from knowbase.server import read_impl, search_impl
+from knowbase.server import feedback_impl, read_impl, search_impl
 from lifecycle_verifier_fixture import configure_verifier
 
 
@@ -54,10 +54,11 @@ def test_host_delivery_plain_read_and_automatic_verification(memory_repo, tmp_pa
     assert initial["L0"] == 1 and initial["L2"] == 0
 
     reply = read_impl(mid)  # legacy one-argument call, linked by the actual result event
+    assert "read_use_id=" not in reply
     host_events.handle({**task, "tool_name": "mcp__knowbase__memory_read", "tool_input": {"id": mid},
                         "tool_response": {"content": [{"type": "text", "text": reply}]}},
                        event="tool-after", style="zcode")
-    assert "read_use_id=" not in read_impl(mid, delivery_id=token)
+    assert "read_use_id=USE-" in read_impl(mid, delivery_id=token)
     assert conn.execute("SELECT count(*) FROM use_retrieval_links").fetchone()[0] == 1
     observed = worker._h_lifecycle_correlate(memory_repo, conn, config.load_config())
     assert observed["L1"] == 1 and observed["L2"] == 0
@@ -92,6 +93,15 @@ def test_search_tool_result_binds_receipt_to_host_task(memory_repo, tmp_path, mo
     host_events.handle({**task, "tool_name": "mcp__knowbase__memory_search",
                         "tool_response": {"content": [{"type": "text", "text": result}]}},
                        event="tool-after", style="zcode")
-    assert "read_use_id=" not in read_impl(mid, delivery_id=token)
+    assert "read_use_id=" not in read_impl(mid, delivery_id="DEL-unknown")
+    reply = read_impl(mid, delivery_id=token)
+    use_id = re.search(r"read_use_id=(USE-[a-f0-9]+)", reply)[1]
+    feedback = feedback_impl(use_id=use_id, outcome="incorrect", task_result="failed")
+    assert "已记录反馈" in feedback
     with index.connect(memory_repo) as conn:
         assert conn.execute("SELECT task_id,session_id FROM knowledge_uses").fetchall() == [("task-a", "s")]
+        assert conn.execute("SELECT f.binding,f.outcome,f.content_revision,o.task_id,o.result "
+                            "FROM feedback_events f JOIN task_outcomes o USING(task_outcome_id) WHERE f.use_id=?",
+                            (use_id,)).fetchone() == ("version_task", "incorrect",
+                            re.search(r"content_revision=([a-f0-9]+)", reply)[1], "task-a", "failed")
+    assert store.load(memory_repo, mid)[0]["status"] == "active"

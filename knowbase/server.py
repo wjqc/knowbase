@@ -164,11 +164,10 @@ def update_impl(id: str, body: str | None = None, title: str | None = None,
 
 def read_impl(id: str, session_id: str = "", event_id: str = "",
               context_event_id: str = "", host_profile: str = "", delivery_id: str = ""):
-    """按id读全文。关联任务时同时传session_id/event_id/context_event_id，host_profile沿用检索。
+    """按 id 读全文。递送关联成功时返回 read_use_id，可用于提交绑定反馈。
 
-    event_id是本次阅读的新稳定事件ID；context_event_id是实际返回该候选的检索事件ID。
-    仅传id仍可普通读取新卡、staging或历史卡，不会产生任务阅读回执。
-    完整身份关联到任务时也允许同scope新卡/待审卡读回；阅读不代表候选已被采纳。
+    可传 delivery_id，或同时传旧式 session_id/event_id/context_event_id。
+    仅传 id 可直接读取卡片，工具响应中没有任务阅读回执。
     """
     rp, err = _repo()
     if err:
@@ -236,8 +235,9 @@ def read_impl(id: str, session_id: str = "", event_id: str = "",
         head += f" ｜ content_revision={content_rev}"
     if gov_rev:
         head += f" ｜ governance_revision={gov_rev}"
-    if read_receipt and not delivery_id:
+    if read_receipt:
         head += f" ｜ read_use_id={read_receipt['use_id']}"
+    if read_receipt and not delivery_id:
         head += " ｜ 阅读不等于采纳；实际验证后，可将 read_use_id 作为 use_id，连同 outcome 和 task_result 回填。"
     head += "\n\n"
     refs = []
@@ -1021,7 +1021,7 @@ from .telemetry import observe as _observe
 
 mcp.tool(name="memory_save", description="仅当用户明确要求保存或维护经验时调用；日常任务由 Hook 静默采集。改变已发布结论、共享范围（global）、争议或来源不足时进入 staging；待审发布与可信晋升分开")(_observe(save_impl,"memory_save"))
 mcp.tool(name="memory_update", description="仅当用户明确要求维护经验时调用；实质修订返回待审变更 ID，旧发布版本继续可用。confidence 与 status 由服务端管理")(_observe(update_impl,"memory_update"))
-mcp.tool(name="memory_read", description="按id读全文。正常读卡沿用检索或Hook提供的delivery_id，自动关联递送与当前卡版本。也支持只传id和旧的session_id/event_id/context_event_id读回。")(_observe(read_impl,"memory_read"))
+mcp.tool(name="memory_read", description="按id读全文。沿用检索或Hook提供的delivery_id，关联成功时返回read_use_id，有实际结果需要反馈时可作为use_id。也支持只传id和旧的session_id/event_id/context_event_id读回。")(_observe(read_impl,"memory_read"))
 mcp.tool(name="memory_search", description="检索经验记忆：任务开始涉及具体项目/系统/报错时先调用。检索词建议 ≥3 字的具体名词或报错关键词。传 session_id 可将本次检索记入任务观测（用于证据归因）。")(_observe(search_impl,"memory_search"))
 mcp.tool(name="memory_feedback", description="仅在结果可验证时回填。通常只传已有 use_id、明确 outcome 和实际 task_result；服务端从回执补卡 ID、版本和稳定任务结果 ID，不猜结果。旧调用只记录观察；反馈不等于可信晋升。")(_observe(feedback_impl,"memory_feedback"))
 mcp.tool(name="memory_context", description="执行中知识检索：拆解长方案后、进入子任务、新错误和重要决策前调用；提供当前主题与查询。日常任务不做积压领取或待办催办，明确整理任务才走提炼协议")(_observe(context_impl,"memory_context"))
