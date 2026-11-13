@@ -664,6 +664,35 @@ MIGRATIONS: list[tuple[int, str]] = [
     ALTER TABLE validator_executions ADD COLUMN source_key TEXT NOT NULL DEFAULT '';
     ALTER TABLE validator_executions ADD COLUMN verdict TEXT NOT NULL DEFAULT '';
     """),
+    (38, """
+    CREATE TABLE IF NOT EXISTS source_documents(
+      id TEXT PRIMARY KEY, root TEXT NOT NULL, path TEXT NOT NULL,
+      scope TEXT NOT NULL, title TEXT NOT NULL, format TEXT NOT NULL,
+      source_id TEXT NOT NULL, sha256 TEXT NOT NULL, raw_hash TEXT NOT NULL,
+      parser_version TEXT NOT NULL, status TEXT NOT NULL, error TEXT NOT NULL,
+      updated_at TEXT NOT NULL, UNIQUE(root,path,scope));
+    CREATE TABLE IF NOT EXISTS source_document_history(
+      document_id TEXT NOT NULL, source_id TEXT NOT NULL,
+      PRIMARY KEY(document_id,source_id));
+    CREATE INDEX IF NOT EXISTS idx_source_history_id ON source_document_history(source_id);
+    CREATE TABLE IF NOT EXISTS source_snapshot_versions(
+      document_id TEXT NOT NULL, source_id TEXT NOT NULL, sha256 TEXT NOT NULL,
+      scope TEXT NOT NULL, title TEXT NOT NULL, recorded_at TEXT NOT NULL,
+      PRIMARY KEY(document_id,source_id));
+    INSERT OR IGNORE INTO source_snapshot_versions
+      SELECT id,source_id,sha256,scope,title,updated_at FROM source_documents WHERE sha256!='';
+    CREATE TABLE IF NOT EXISTS source_chunks(
+      chunk_id TEXT PRIMARY KEY, document_id TEXT NOT NULL,
+      start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, text TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS idx_source_chunks_document ON source_chunks(document_id);
+    CREATE VIRTUAL TABLE IF NOT EXISTS source_chunks_fts USING fts5(
+      chunk_id UNINDEXED, title, text, tokenize='trigram');
+    CREATE TABLE IF NOT EXISTS source_watch_roots(
+      id TEXT PRIMARY KEY, directory TEXT NOT NULL, scope TEXT NOT NULL,
+      excludes TEXT NOT NULL, interval REAL NOT NULL,
+      last_started TEXT, last_finished TEXT, last_result TEXT,
+      UNIQUE(directory,scope));
+    """),
 ]
 
 

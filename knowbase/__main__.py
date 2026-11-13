@@ -955,6 +955,8 @@ def _report_error(message, exit_code=2):
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(prog="knowbase", description="薪火：跨 Agent 经验记忆库")
     sub = parser.add_subparsers(dest="cmd", required=True)
+    from .document_cli import add_parser as add_document_parser
+    add_document_parser(sub)
     p_init = sub.add_parser("init", help="初始化/补全（幂等）")
     p_init.add_argument("--import-from", help="现存文档目录，导入为 source artifact（不产生知识卡）")
     p_init.add_argument("--scope", help="明确项目范围；通用资料用 global")
@@ -1235,6 +1237,10 @@ def _parse_args(argv=None):
 
 
 def _dispatch(args):
+    if args.cmd == "documents":
+        from .document_cli import run
+        return run(args)
+
     if args.cmd == "sync-once":
         from .refresh import run_once
         result = run_once(config.repo_path(), args.remote, args.branch, args.lease_token)

@@ -139,6 +139,8 @@ code_refs:
 - 可复用结论从 source 中提炼后用 `memory_save` 按八项小节结构保存；
 - 旧 `reference`（R 卡）已退出默认检索与速览，可 `memory_read` 单条查看，待逐条提炼迁移（P3）。
 
+用 `knowbase documents sync <目录> --scope <项目>` 增量接入资料，或用 `knowbase documents reindex` 索引已有 source。通过 `knowbase documents browse --open` 核对解析文本和历史快照。宿主可按项目显式调用 `source_search` 和 `source_read`。[文档资料库说明](docs/document-library.md)
+
 防污染开关（`~/.knowbase/config.json` → hooks）：
 
 ```json

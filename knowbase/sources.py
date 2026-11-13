@@ -82,20 +82,32 @@ def find_by_sha(repo: Path, sha256: str, scope: str = "") -> dict | None:
 
 def import_source(repo: Path, text: str, *, title: str, scope: str, fmt: str,
                   parser_version: str, imported_by: str, kind: str = "document",
-                  source_modified_at: str = "") -> tuple[str, str, bool]:
+                  source_modified_at: str = "", known_sources: dict | None = None) -> tuple[str, str, bool]:
     """写入一个 source artifact，返回 (src_id, sha256, created)。
 
     同内容（sha256）已存在时不重复写，返回既有 id 且 created=False；
     同路径源文件变化 = 新 sha = 新快照（内容寻址语义，无覆盖问题）。
     """
     repo = Path(repo)
-    sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    prior = find_by_sha(repo, sha, scope=scope)
+    raw = text.encode("utf-8")
+    sha = hashlib.sha256(raw).hexdigest()
+    object_path = repo / object_relpath(sha)
+    if known_sources is not None and (object_path.is_symlink() or
+            not object_path.resolve().is_relative_to(repo.resolve()) or
+            not (repo / MANIFESTS_DIR).resolve().is_relative_to(repo.resolve())):
+        raise ValueError("source storage path escapes the repository")
+    prior = (find_by_sha(repo, sha, scope=scope) if known_sources is None
+             else known_sources.get((scope, sha)))
     if prior:
+        if known_sources is not None:
+            # A local directory can restore the canonical bytes of a damaged snapshot.
+            if (not object_path.is_file() or object_path.stat().st_size != len(raw) or
+                    object_path.read_bytes() != raw):
+                write_shared_text(object_path, text)
         return str(prior["id"]), sha, False
     ensure_dirs(repo)
     sid = alloc_id(repo)
-    write_shared_text(repo / OBJECTS_DIR / f"{sha}.md", text)
+    write_shared_text(object_path, text)
     manifest = {
         "id": sid,
         "kind": kind,
@@ -113,6 +125,8 @@ def import_source(repo: Path, text: str, *, title: str, scope: str, fmt: str,
         manifest["source_modified_at"] = source_modified_at
     write_shared_text(repo / MANIFESTS_DIR / f"{sid}.yaml",
                       yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False))
+    if known_sources is not None:
+        known_sources[scope, sha] = manifest
     return sid, sha, True
 
 
