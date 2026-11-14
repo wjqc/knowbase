@@ -31,6 +31,33 @@ def kind_for(suffix: str) -> str:
     return _KIND_BY_EXT.get((suffix or "").lower(), "document")
 
 
+def format_citation(source_id: str, sha256: str, start_line, end_line) -> str:
+    """内容寻址引用串：SRC@sha256#L起-L止。文档库与卡片出处渲染共用。"""
+    return f"knowbase-source:{source_id}@{sha256}#L{int(start_line)}-L{int(end_line)}"
+
+
+def describe_source_ref(ref) -> str:
+    """卡片 frontmatter source_refs → 人类可读引用串。
+
+    纯格式化，不检查快照是否存在：引用指向已删除/未导入快照时仍照实显示，
+    由调用方决定是否附加有效性标记。sha256 与 locator 缺失时逐级降级。
+    """
+    if not isinstance(ref, dict) or not ref.get("source_id"):
+        return ""
+    text = f"knowbase-source:{ref['source_id']}"
+    if ref.get("sha256"):
+        text += f"@{ref['sha256']}"
+    locator = ref.get("locator")
+    if isinstance(locator, dict):
+        start = locator.get("start_line")
+        if start is not None:
+            end = locator.get("end_line")
+            text += f"#L{int(start)}" + (f"-L{int(end)}" if end else "")
+        elif locator.get("value"):
+            text += f"#{locator['value']}"
+    return text
+
+
 def ensure_dirs(repo: Path) -> None:
     (Path(repo) / OBJECTS_DIR).mkdir(parents=True, exist_ok=True)
     (Path(repo) / MANIFESTS_DIR).mkdir(parents=True, exist_ok=True)

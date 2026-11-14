@@ -103,19 +103,23 @@ def upsert(conn: sqlite3.Connection, meta: dict, body: str, path: Path, staging:
     )
     conn.execute(
         """INSERT INTO meta(id,type,title,scope,tags,confidence,status,last_verified,updated,
-                            helpful_count,unhelpful_count,hit_count,path,staging)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,COALESCE((SELECT hit_count FROM meta WHERE id=?),0),?,?)
+                            helpful_count,unhelpful_count,hit_count,path,staging,source_ref_count)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,COALESCE((SELECT hit_count FROM meta WHERE id=?),0),?,?,
+                  ?)
            ON CONFLICT(id) DO UPDATE SET
              type=excluded.type, title=excluded.title, scope=excluded.scope, tags=excluded.tags,
              confidence=excluded.confidence, status=excluded.status,
              last_verified=excluded.last_verified, updated=excluded.updated,
              helpful_count=excluded.helpful_count, unhelpful_count=excluded.unhelpful_count,
-             path=excluded.path, staging=excluded.staging""",
+             path=excluded.path, staging=excluded.staging,
+             source_ref_count=excluded.source_ref_count""",
         (meta["id"], meta.get("type"), meta.get("title", ""), meta.get("scope", ""),
          json.dumps(meta.get("tags", []), ensure_ascii=False), meta.get("confidence", "once"),
          meta.get("status", "active"), meta.get("last_verified", "") or "",
          meta.get("updated", ""), int(meta.get("helpful_count", 0)),
-         int(meta.get("unhelpful_count", 0)), meta["id"], str(path), int(staging)),
+         int(meta.get("unhelpful_count", 0)), meta["id"], str(path), int(staging),
+         sum(1 for ref in meta.get("source_refs") or []
+             if isinstance(ref, dict) and ref.get("source_id"))),
     )
     # 卡片是内容权威；Git 克隆/同步后也要能读取版本并进行 CAS。
     from .mutations import _compute_revision, _compute_governance_revision
@@ -245,6 +249,8 @@ def _row_meta(r) -> dict:
         "tags": json.loads(r[4] or "[]"), "confidence": r[5], "status": r[6],
         "last_verified": r[7], "updated": r[8], "helpful_count": r[9],
         "unhelpful_count": r[10], "hit_count": r[11], "path": r[12], "staging": r[13],
+        # v39 前的手工建库可能缺列；缺列按 0 处理（列恒由迁移补齐）
+        "source_ref_count": r[14] if len(r) > 14 else 0,
     }
 
 

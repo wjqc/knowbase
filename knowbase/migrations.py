@@ -695,6 +695,14 @@ MIGRATIONS: list[tuple[int, str]] = [
     """),
     (39, """
     DROP TABLE IF EXISTS source_watch_roots;
+    -- meta 由 index.connect 基础脚本创建；此处 IF NOT EXISTS 保证迁移在
+    -- 仅含旧迁移产物的库上自足（真实库为无操作），列序须与基础脚本一致。
+    CREATE TABLE IF NOT EXISTS meta(
+      id TEXT PRIMARY KEY, type TEXT, title TEXT, scope TEXT, tags TEXT,
+      confidence TEXT, status TEXT, last_verified TEXT, updated TEXT,
+      helpful_count INTEGER DEFAULT 0, unhelpful_count INTEGER DEFAULT 0,
+      hit_count INTEGER DEFAULT 0, path TEXT, staging INTEGER DEFAULT 0);
+    ALTER TABLE meta ADD COLUMN source_ref_count INTEGER NOT NULL DEFAULT 0;
     CREATE TABLE IF NOT EXISTS source_drift_events(
       drift_id TEXT PRIMARY KEY, document_id TEXT NOT NULL, source_id TEXT NOT NULL,
       old_sha256 TEXT NOT NULL, new_sha256 TEXT NOT NULL, memory_id TEXT NOT NULL,

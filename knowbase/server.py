@@ -20,7 +20,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .build_identity import build_id
 
-from . import __version__, config, consumption, delivery, gitops, index, jobs, lifecycle, store
+from . import __version__, config, consumption, delivery, gitops, index, jobs, lifecycle, sources, store
 from .adapters import checkpoint as cp_mod
 from .adapters import normalizer
 from .extraction import recall, sanitizer, validator
@@ -253,6 +253,13 @@ def read_impl(id: str, session_id: str = "", event_id: str = "",
         refs.append(location)
     if refs:
         head += "代码位置: " + "；".join(refs) + "\n\n"
+    src_refs = [t for t in (sources.describe_source_ref(ref)
+                            for ref in meta.get("source_refs") or []) if t]
+    if src_refs:
+        shown = "；".join(src_refs[:10])
+        if len(src_refs) > 10:
+            shown += f"；…另 {len(src_refs) - 10} 条"
+        head += "出处: " + shown + "\n\n"
     if meta.get("type") == "reference":
         head = ("[knowbase] 该条为 reference 原始材料卡（已退出默认检索，待迁移为 source）："
                 "内容未经知识化提炼，采信前须自行验证。\n\n" + head)
@@ -308,10 +315,11 @@ def search_impl(query: str, type: str | None = None, scope: str | None = None,
     lines = [f"命中 {len(results)} 条（{diagnostics['level']} {'混合语义检索' if diagnostics['level']=='L3' else '本地词法检索；未调用远程模型'}）："]
     for r in results:
         stg = "（staging 提案）" if r["staging"] else ""
+        refs_note = f" ｜ refs={r['source_ref_count']}" if (r.get("source_ref_count") or 0) else ""
         lines.append(
             f"- [{r['id']}]{stg} {r['title']} ｜ {r['confidence']}·{r['status']}"
             f" ｜ scope={r['scope']} ｜ hit={r['hit_count']} helpful={r['helpful_count']}"
-            f" ｜ score={r['score']} ｜ channels={','.join(r.get('channels', []))}"
+            f" ｜ score={r['score']} ｜ channels={','.join(r.get('channels', []))}{refs_note}"
             f"\n  摘要：{r['snippet'][:80]}\n  详情：memory_read(id=\"{r['id']}\""
             + (f', delivery_id="{r["delivery_id"]}")' if r.get("delivery_id") else ")")
         )

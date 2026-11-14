@@ -509,7 +509,7 @@ class DocumentLibrary:
                 "sha256": selected["sha256"], "source_id": selected["source_id"],
                 "stale": stale, "historical": old_version, "start_line": start,
                 "end_line": end, "total_lines": len(lines), "related_cards": related,
-                "citation": f"knowbase-source:{selected['source_id']}@{selected['sha256']}#L{start}-L{end}",
+                "citation": sources.format_citation(selected["source_id"], selected["sha256"], start, end),
                 "source_ref": {"source_id": selected["source_id"], "sha256": selected["sha256"],
                                "locator": {"type": "line", "start_line": start, "end_line": end}},
                 "text": "".join(lines[start - 1:end]), "locator_kind": "parsed_snapshot_lines"}

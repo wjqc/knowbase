@@ -5,7 +5,7 @@ import re
 import time
 from datetime import datetime, timezone
 
-from . import config, delivery, index, materials, store
+from . import config, delivery, index, materials, sources, store
 from .locking import RepoLock, LockTimeout
 
 STAGES = {"task_plan", "subtask_start", "new_failure", "decision", "verified_result",
@@ -52,7 +52,9 @@ def _candidate(repo, mid, scope, automatic, timeout):
         return {"id":mid,"scope":meta["scope"],"content_revision":_compute_revision(meta,body),
                 "title":meta.get("title", ""),"summary":_summary(body),
                 "applicable_when":_section(body,"适用条件")[:300],
-                "confidence":meta.get("confidence", "once"),"status":meta["status"]}
+                "confidence":meta.get("confidence", "once"),"status":meta["status"],
+                "source_refs": [t for t in (sources.describe_source_ref(ref)
+                                            for ref in meta.get("source_refs") or []) if t][:8]}
 
 
 def execute(repo, *, session_id: str, event_id: str, scope: str = "",
