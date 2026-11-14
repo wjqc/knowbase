@@ -80,20 +80,28 @@ def card_source_changes(conn, meta: dict, limit: int | None = 5) -> list[dict]:
         sha = ref.get("sha256")
         if sha is not None and not isinstance(sha, str):
             continue
-        for document_id, source_id, old_sha, new_sha, scope in conn.execute(
-                "SELECT d.id,d.source_id,v.sha256,d.sha256,d.scope FROM source_snapshot_versions v "
+        for document_id, source_id, old_sha, new_sha, scope, status in conn.execute(
+                "SELECT d.id,d.source_id,v.sha256,d.sha256,d.scope,d.status FROM source_snapshot_versions v "
                 "JOIN source_documents d ON d.id=v.document_id "
                 "WHERE v.source_id=? AND (? IS NULL OR v.sha256=?) AND v.scope=d.scope "
-                "AND d.scope IN (?, 'global') AND d.status='available' AND d.sha256<>v.sha256 "
+                "AND d.scope IN (?, 'global') AND ((d.status='available' AND d.sha256<>v.sha256) "
+                "OR (d.root<>'' AND d.status IN ('deleted','error'))) "
                 "ORDER BY d.id",
                 (ref["source_id"], sha, sha, meta.get("scope"))):
             change = {"document_id": document_id, "source_id": source_id, "old_source_id": ref["source_id"],
-                      "scope": scope, "old_sha256": old_sha, "new_sha256": new_sha}
+                      "scope": scope, "old_sha256": old_sha,
+                      "new_sha256": new_sha if status == "available" else "",
+                      "reason": {"available": "updated", "deleted": "deleted", "error": "unavailable"}[status]}
             if change not in changes:
                 changes.append(change)
                 if len(changes) == limit:
                     return changes
     return changes
+
+
+def revalidation_notice(changes: list[dict]) -> str:
+    labels = {"updated": "源已更新", "deleted": "来源已删除或移出索引", "unavailable": "来源不可用"}
+    return "、".join(dict.fromkeys(labels[change["reason"]] for change in changes)) + "，采信前复核"
 
 
 def ensure_dirs(repo: Path) -> None:

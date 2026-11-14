@@ -77,3 +77,19 @@ def test_standalone_projection_version_migration(library, monkeypatch):
     assert lib.reindex()['indexed'] == 1
     assert lib.reindex()['unchanged'] == 1
     assert lib.search_page('migration')['total'] == 1
+
+
+def test_question_retrieval_returns_specific_evidence(library):
+    lib, root = library
+    (root / "release.md").write_text(
+        "# 安装运维\n\n更新失败时，执行回滚并恢复旧包。\n\n"
+        "命令输出仅供排障。\n", encoding="utf-8")
+    (root / "other.md").write_text(
+        "# 数据恢复\n\n恢复备份之后检查项目配置。\n", encoding="utf-8")
+    lib.sync(root, scope="x")
+    hit = lib.search_page("升级失败后系统怎样恢复旧版本", scope="x")["items"][0]
+    assert hit["path"] == "release.md"
+    assert "执行回滚并恢复旧包" in hit["snippet"]
+    read = lib.read(hit["document_id"], start_line=hit["start_line"], end_line=hit["end_line"])
+    assert "执行回滚并恢复旧包" in read["text"]
+    assert lib.search_page("火星水票 H9QQZ", scope="x")["total"] == 0

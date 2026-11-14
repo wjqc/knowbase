@@ -220,3 +220,49 @@ def test_cli_import_drift_reaches_mcp_and_hook_and_keeps_history(memory_repo, tm
     assert historical["text"] == "第一版 文档引用"
     assert historical["source_ref"] == ref
     assert "源已更新" in read_impl(mid)
+
+
+def test_deleted_source_marks_card_for_review_and_keeps_citation(memory_repo, tmp_path):
+    import json
+
+    from knowbase import config
+    from knowbase.adapters.host_events import render
+    from knowbase.hooks import user_prompt
+    from knowbase.server import context_impl, read_impl, search_impl, source_read_impl
+
+    lib = DocumentLibrary(memory_repo)
+    root = tmp_path / "docs"
+    root.mkdir()
+    file = root / "approval.md"
+    original = "新明审批应由负责人签署。\n"
+    file.write_text(original, encoding="utf-8")
+    _sync_doc(lib, root)
+    sid, sha, document_id = _current_snapshot(lib)
+    source = lib.read(document_id, start_line=1, end_line=1)
+    mid = "P-2026-4100"
+    path = _write_card(memory_repo, mid, source_refs=[source["source_ref"]])
+    meta, body, _ = store.load(memory_repo, mid)
+    meta["confidence"] = "verified"
+    path.write_text(store.render(meta, body), encoding="utf-8")
+    index.rebuild(memory_repo)
+    cfg = config.load_config()
+    cfg["scope_map"][str(root)] = "x"
+    config.CONFIG_PATH.write_text(json.dumps(cfg), encoding="utf-8")
+
+    file.unlink()
+    assert _sync_doc(lib, root)["drift_marked"] == 1
+    assert _sync_doc(lib, root)["drift_marked"] == 0
+    assert unresolved_drift_memory_ids(memory_repo) == {mid}
+    query = "漂移回归卡"
+    result = json.loads(context_impl(session_id="deleted", event_id="stage", scope="x", current_goal=query))
+    candidate = next(card for card in result["candidates"] if card["id"] == mid)
+    assert candidate["mode"] == "validate_only"
+    assert candidate["source_revalidation"][0]["reason"] == "deleted"
+    for response in [read_impl(mid), search_impl(query, scope="x"), render(result), user_prompt(query, project_dir=str(root))]:
+        assert "来源已删除" in response and "采信前复核" in response
+    historical = json.loads(source_read_impl(sid, "x", sha, start_line=1, end_line=1, historical=True))
+    assert historical["text"] == original and historical["stale"] and historical["historical"]
+
+    file.write_text(original, encoding="utf-8")
+    assert _sync_doc(lib, root)["drift_resolved"] == 1
+    assert "来源已删除" not in read_impl(mid)

@@ -265,12 +265,13 @@ def read_impl(id: str, session_id: str = "", event_id: str = "",
         if errors:
             head += "出处校验失败: " + "；".join(errors[:5]) + "\n\n"
     if changes:
-        head += "源已更新: 采信前请核对新版原文是否仍支撑本卡结论。\n"
+        head += sources.revalidation_notice(changes) + "。\n"
         for change in changes[:5]:
             document_id = change["document_id"]
             scope = change["scope"]
-            sha = change["new_sha256"]
-            head += f'- source_read(document_id="{document_id}", scope="{scope}", sha256="{sha}")\n'
+            sha = change["new_sha256"] or change["old_sha256"]
+            historical = ", historical=true" if change["reason"] != "updated" else ""
+            head += f'- source_read(document_id="{document_id}", scope="{scope}", sha256="{sha}"{historical})\n'
         head += "\n"
     if meta.get("type") == "reference":
         head = ("[knowbase] 该条为 reference 原始材料卡（已退出默认检索，待迁移为 source）："
@@ -316,7 +317,8 @@ def search_impl(query: str, type: str | None = None, scope: str | None = None,
     for result in results:
         meta, _, _ = store.load(rp, result["id"])
         result["citations"] = sources.card_citations(meta, 2) if meta else []
-        result["source_changed"] = bool(meta and sources.card_source_changes(conn, meta, 1))
+        changes = sources.card_source_changes(conn, meta, 5) if meta else []
+        result["source_notice"] = sources.revalidation_notice(changes) if changes else ""
     conn.commit()
     _observe_mcp_call(rp, session_id, "memory_search", payload={
         "tool": "memory_search", "query": query[:512], "scope": scope,
@@ -332,7 +334,7 @@ def search_impl(query: str, type: str | None = None, scope: str | None = None,
     for r in results:
         stg = "（staging 提案）" if r["staging"] else ""
         refs_note = f" ｜ refs={r['source_ref_count']}" if (r.get("source_ref_count") or 0) else ""
-        drift_note = " ｜ 源已更新" if r["source_changed"] else ""
+        drift_note = f" ｜ {r['source_notice']}" if r["source_notice"] else ""
         lines.append(
             f"- [{r['id']}]{stg} {r['title']} ｜ {r['confidence']}·{r['status']}"
             f" ｜ scope={r['scope']} ｜ hit={r['hit_count']} helpful={r['helpful_count']}"

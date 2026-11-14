@@ -79,10 +79,10 @@ def test_import_creates_source_not_card(isolated_repo, tmp_path):
     assert mf["scope"] == "demo"
     obj = isolated_repo / mf["object"]
     assert obj.is_file() and "连接池" in obj.read_text(encoding="utf-8")
-    # manifest 内容寻址：object 相对路径 + sha 匹配（正文按导入时的 strip 形态）
+    # 导入与目录同步按同一解析文本计算快照哈希，保留 Markdown 的结尾换行。
     import hashlib
     assert mf["sha256"] == hashlib.sha256(
-        "# 架构设计\n\n数据库连接池上限与回收策略说明。\n".strip().encode("utf-8")).hexdigest()
+        "# 架构设计\n\n数据库连接池上限与回收策略说明。\n".encode("utf-8")).hexdigest()
     # 不产生任何知识卡（各类型目录与 staging 均为空）
     for d in store.ALL_DIRS:
         assert not list((isolated_repo / d).glob("*.md")), d

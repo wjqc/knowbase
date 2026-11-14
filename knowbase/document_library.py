@@ -16,7 +16,7 @@ from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import config, credentials, index, scope_binding, sources, store
+from . import config, credentials, index, scope_binding, source_search, sources, store
 from .locking import RepoLock
 from .parsers import register_builtin, registry
 
@@ -111,12 +111,22 @@ class DocumentLibrary:
                 break
             start = max(start + 1, end - 5)
 
+    @staticmethod
+    def parse_snapshot(file, raw, parser):
+        with tempfile.TemporaryDirectory(prefix="knowbase-doc-") as temporary:
+            copy = Path(temporary) / file.name
+            copy.write_bytes(raw)
+            parsed = parser.parse(copy)
+        text = parsed.text.replace("\r\n", "\n").replace("\r", "\n")
+        title = str(parsed.meta.get("title") or file.stem)[:200]
+        return text, title
+
     def sync(self, directory: Path, *, scope: str, exclude=(), progress=None, cancelled=None) -> dict:
         """Explicit local directory sync. No git commit/push or model calls.
 
         Hash every supported file (including same-mtime changes), parse changed
         files from an immutable temporary copy, retain prior snapshots on error.
-        Missing/ignored files leave searchable results but retain historical text.
+        Missing/ignored files leave the search index while retaining historical text.
         """
         scope = self.validate_scope(scope)
         requested_root = Path(directory).expanduser()
@@ -174,7 +184,8 @@ class DocumentLibrary:
                     raw_hash = _hash(raw)
                     version = f"{PARSER_VERSION}:{parser.name}"
                     item.update(raw_hash=raw_hash, version=version)
-                    if old and old["raw_hash"] == raw_hash and old["parser_version"] == version and old["status"] == "available":
+                    if (old and old["raw_hash"] == raw_hash and old["status"] == "available"
+                            and old["parser_version"] in (version, "cli-import")):
                         try:
                             self._snapshot(old["sha256"])
                         except (OSError, ValueError):
@@ -182,17 +193,12 @@ class DocumentLibrary:
                         else:
                             item["unchanged"] = True
                     if not item.get("unchanged"):
-                        with tempfile.TemporaryDirectory(prefix="knowbase-doc-") as tmp:
-                            copy = Path(tmp) / file.name
-                            copy.write_bytes(raw)
-                            parsed = parser.parse(copy)
-                        text = parsed.text.replace("\r\n", "\n").replace("\r", "\n")
+                        text, title = self.parse_snapshot(file, raw, parser)
                         if not text.strip():
                             raise ValueError("parser returned no text (scans require host OCR)")
                         text_bytes = len(text.encode())
                         if text_bytes > MAX_TEXT_BYTES:
                             raise ValueError("parsed text exceeds 8 MiB")
-                        title = str(parsed.meta.get("title") or file.stem)[:200]
                         if credentials.contains_credentials(text) or credentials.contains_credentials(title):
                             raise ValueError("possible plaintext credential; source not imported")
                         prepared_bytes += text_bytes
@@ -217,7 +223,8 @@ class DocumentLibrary:
                     current = conn.execute("SELECT * FROM source_documents WHERE id=?", (doc_id,)).fetchone()
                     if item.get("unchanged"):
                         # Another sync may have replaced the projection in the meantime.
-                        if current and current["raw_hash"] == item["raw_hash"] and current["parser_version"] == item["version"]:
+                        if (current and current["raw_hash"] == item["raw_hash"]
+                                and current["parser_version"] in (item["version"], "cli-import")):
                             conn.execute("UPDATE source_documents SET status='available',error='' WHERE id=?", (doc_id,))
                             report["unchanged"] += 1
                             continue
@@ -303,8 +310,22 @@ class DocumentLibrary:
             raise ValueError("file exceeds 16 MiB")
         return raw
 
+    def imported_snapshot(self, conn, file, root, scope, raw_hash):
+        doc_id = self._identity(str(root), file.relative_to(root).as_posix(), scope)
+        current = conn.execute(
+            "SELECT source_id,sha256 FROM source_documents WHERE id=? AND raw_hash=? AND status='available'",
+            (doc_id, raw_hash),
+        ).fetchone()
+        if current:
+            try:
+                self._snapshot(current[1])
+            except (OSError, ValueError):
+                return None
+            return tuple(current)
+
     def project_import(self, conn, *, root: Path, file: Path, scope: str,
-                       source_id: str, sha256: str, raw_hash: str, text: str, title: str):
+                       source_id: str, sha256: str, raw_hash: str, text: str, title: str,
+                       parser_version: str):
         rel = file.relative_to(root).as_posix()
         doc_id = self._identity(str(root), rel, scope)
         current = conn.execute("SELECT source_id,sha256,raw_hash,status FROM source_documents WHERE id=?",
@@ -322,7 +343,7 @@ class DocumentLibrary:
         self._project(conn, doc_id=doc_id, root=str(root), path=rel, scope=scope,
                       manifest={"id": source_id, "sha256": sha256}, text=text, title=title,
                       fmt=file.suffix.lstrip("."), raw_hash=raw_hash,
-                      parser_version="cli-import")
+                      parser_version=parser_version)
         conn.execute("UPDATE source_documents SET status='deleted',updated_at=? "
                      "WHERE root='' AND source_id=? AND scope=? AND status!='deleted'",
                      (_now(), source_id, scope))
@@ -465,18 +486,57 @@ class DocumentLibrary:
         with self._connect() as conn:
             conn.execute("BEGIN")
             page["total"] = conn.execute(cte + "SELECT count(*) FROM ranked " + where, params).fetchone()[0]
-            rows = [dict(r) for r in conn.execute(
-                cte + "SELECT * FROM ranked " + where + "ORDER BY score DESC,lexical_rank,document_id,start_line,chunk_id "
-                "LIMIT ? OFFSET ?", params + [limit, offset])]
+            if page["total"]:
+                rows = [dict(r) for r in conn.execute(
+                    cte + "SELECT * FROM ranked " + where + "ORDER BY score DESC,lexical_rank,path,start_line,chunk_id "
+                    "LIMIT ? OFFSET ?", params + [limit, offset])]
+            else:
+                rows = source_search.find_candidates(conn, query, scope)
+            excerpt_weights = source_search.signals(query)
+            if page["total"] and group_by_file:
+                for row in rows:
+                    alternates = [dict(match) for match in conn.execute(
+                        "SELECT chunk_id,text _text,start_line,end_line FROM source_chunks WHERE document_id=? "
+                        "AND start_line BETWEEN ? AND ? ORDER BY start_line,chunk_id LIMIT 16",
+                        (row["document_id"], max(1, row["start_line"] - 80), row["end_line"] + 80))]
+                    if alternates:
+                        row.update(max(alternates, key=lambda match: source_search.excerpt(
+                            match["_text"], query, excerpt_weights)[0]))
+        if not page["total"]:
+            weights = source_search.match_weights(query, rows)
+            counts = {}
+            question_parts = source_search.question_parts(query)
+            for row in rows:
+                score, _, _, _ = source_search.excerpt(row["_text"], query, weights)
+                title = row["title"].lower()
+                score += 0.38 * sum(weight for term, weight in weights.items() if term in title)
+                score += 3 * sum(term in row["_text"].lower() for term in question_parts)
+                row["score"] = round(score, 5)
+                counts[row["document_id"]] = counts.get(row["document_id"], 0) + 1
+            rows.sort(key=lambda row: (-row["score"], row["path"], row["start_line"]))
+            if group_by_file:
+                best = {}
+                for row in rows:
+                    best.setdefault(row["document_id"], row)
+                rows = list(best.values())
+            for row in rows:
+                row["matched_chunks"] = counts[row["document_id"]]
+            page["total"] = len(rows)
+            rows = rows[offset:offset + limit]
         for row in rows:
             text = row.pop("_text")
-            row.pop("position")
-            row.pop("lexical_rank")
-            offsets = [text.lower().find(t.lower()) for t in terms]
-            match_offset = min((p for p in offsets if p >= 0), default=0)
-            row["start_line"] += text[:match_offset].count("\n")
-            row["end_line"] = min(row["end_line"], row["start_line"] + 3)
-            row["snippet"] = text[max(0, match_offset - 80):match_offset + 520]
+            row.pop("position", None)
+            row.pop("lexical_rank", None)
+            score, first, last, excerpt = source_search.excerpt(text, query, excerpt_weights)
+            if score:
+                row["end_line"] = row["start_line"] + last - 1
+                row["start_line"] += first
+                row["snippet"] = excerpt[:1600]
+            else:
+                offset_in_text = min((p for t in terms if (p := text.lower().find(t.lower())) >= 0), default=0)
+                row["start_line"] += text[:offset_in_text].count("\n")
+                row["end_line"] = min(row["end_line"], row["start_line"] + 3)
+                row["snippet"] = text[offset_in_text:offset_in_text + 520]
             row["locator_kind"] = "parsed_snapshot_lines"
         page["items"] = rows
         page["has_more"] = offset + len(rows) < page["total"]
@@ -565,7 +625,8 @@ class DocumentLibrary:
         return {"id": document["id"], "title": selected.get("title", document["title"]), "path": document["path"],
                 "scope": document["scope"], "format": document["format"], "status": document["status"],
                 "sha256": selected["sha256"], "source_id": selected["source_id"],
-                "stale": stale, "historical": old_version, "start_line": start,
+                "stale": stale, "historical": old_version or (historical and document["status"] != "available"),
+                "start_line": start,
                 "end_line": end, "total_lines": len(lines), "related_cards": related,
                 "citation": sources.format_citation(selected["source_id"], selected["sha256"], start, end),
                 "source_ref": {"source_id": selected["source_id"], "sha256": selected["sha256"],
@@ -584,7 +645,8 @@ class DocumentLibrary:
         """
         superseded = conn.execute(
             "SELECT 1 FROM source_snapshot_versions v JOIN source_documents d ON d.id=v.document_id "
-            "WHERE d.status='available' AND v.sha256<>d.sha256 LIMIT 1").fetchone()
+            "WHERE (d.status='available' AND v.sha256<>d.sha256) "
+            "OR (d.root<>'' AND d.status IN ('deleted','error')) LIMIT 1").fetchone()
         marked = 0
         if superseded:
             for meta, _body, _path in store.iter_all(self.repo):

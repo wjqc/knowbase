@@ -27,7 +27,7 @@
 
 - **P0（本次）**：检索/速览排除 reference；import 只产 source；save 拒绝 reference；八项结构强制；接口兼容保留。
 - **P1**：knowledge_extract（source→candidate）、staging 审核（approve/merge/reject）、**结构化 code_refs 已落地（2026-09-21）**、source→card 派生关系。
-- **P2**：applicability/exclusions schema、检索前适用性门、来源版本漂移复核。目录同步和原文导入更新快照版本，登记受影响的已发布卡。阶段检索将相关卡标为 `validate_only`，读卡返回新版定位。现有治理根据任务验证结果决定可信状态。
+- **P2**：applicability/exclusions schema、检索前适用性门、来源版本漂移复核。目录同步和原文导入共用解析规则和快照索引。源文件更新、删除或解析失败后，阶段检索将受影响的已发布卡标为 `validate_only`，读卡返回新版或历史快照的位置。现有治理根据任务验证结果决定可信状态。
 - **P3**：存量 18 张 R 卡转 source、分批提炼、人工审核后归档旧卡。
 
 ### 出处透出与主张级发布门（2026-11-14 补充落地）

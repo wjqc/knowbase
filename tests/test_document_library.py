@@ -338,3 +338,27 @@ def test_reindex_superseded_source_hidden(library):
     assert not lib.search("oldcontent")
     new_document = lib.search("newcontent")[0]["document_id"]
     assert lib.read(new_document, sha256=old_sha, historical=True)["source_id"] == old_id
+
+
+@pytest.mark.parametrize("first", ["sync", "import"])
+def test_unchanged_file_keeps_same_snapshot_when_switching_entry(memory_repo, tmp_path, first):
+    from knowbase.__main__ import cmd_import
+
+    lib = DocumentLibrary(memory_repo)
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "approval.md").write_bytes("# 审批\r\n\r\n保留行与换行。\r\n".encode())
+
+    def ingest(entry):
+        if entry == "sync":
+            assert not lib.sync(root, scope="x")["errors"]
+        else:
+            assert cmd_import(str(root), "reference", "x", False, "human:import") == 0
+
+    ingest(first)
+    doc = lib.list_documents(scope="x")[0]
+    old = lib.read(doc["id"])
+    ingest("import" if first == "sync" else "sync")
+    assert sources.count_sources(memory_repo) == 1
+    assert len(lib.history(doc["id"])) == 1
+    assert lib.read(doc["id"])["source_ref"] == old["source_ref"]

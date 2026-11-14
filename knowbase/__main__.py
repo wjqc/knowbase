@@ -467,50 +467,35 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
 
     print("导入只生成 source artifact（--type/--staging 已忽略）：原始材料保真留存，不产生知识卡、不进入默认检索。")
 
+    from .document_library import DocumentLibrary, MAX_TEXT_BYTES, PARSER_VERSION
+    from .parsers import register_builtin, registry
+
+    library = DocumentLibrary(rp)
+    register_builtin()
+
     # === 阶段 1：锁外读取 + 解析（不持有 RepoLock）===
     parsed_items: list[dict] = []
     skipped = 0
     for f in files:
-        import re as _re
-        # 锁外读取原始字节并计算 hash
         try:
             raw_bytes = f.read_bytes()
             raw_hash = hashlib.sha256(raw_bytes).hexdigest()
             raw_mtime = f.stat().st_mtime
+            parser = registry().find(f)
+            if parser is None:
+                raise ValueError(f"无可用解析器: {f.suffix}")
+            body, title = library.parse_snapshot(f, raw_bytes, parser)
         except Exception as exc:
             skipped += 1
-            print(f"  跳过（读取失败: {exc}）：{f.name}")
+            print(f"  跳过（解析失败: {exc}）：{f.name}")
             continue
-
-        # 锁外解析
-        if f.suffix.lower() == ".md":
-            body = raw_bytes.decode("utf-8", errors="replace").strip()
-            parsed_title = ""
-        else:
-            try:
-                from .parsers import register_builtin, registry
-                register_builtin()
-                parser = registry().find(f)
-                if parser is None:
-                    raise ValueError(f"无可用解析器: {f.suffix}")
-                parsed = parser.parse(f)
-                body = parsed.text.strip()
-                parsed_title = str(parsed.meta.get("title", ""))
-            except Exception as exc:
-                skipped += 1
-                print(f"  跳过（解析失败: {exc}）：{f.name}")
-                continue
-        if not body:
+        if not body.strip():
             skipped += 1
             continue
-        body = body.replace("\r\n", "\n").replace("\r", "\n")
         if credentials.contains_credentials(body) or credentials.contains_credentials(f.name):
             skipped += 1
             print(f"  跳过（疑似明文凭据）：{f.name}")
             continue
-        m = _re.search(r"^#\s+(.+)$", body, _re.M)
-        title = (m.group(1).strip() if m else parsed_title or f.stem)[:80]
-
         if credentials.contains_credentials(title):
             skipped += 1
             print(f"  跳过（标题疑似明文凭据）：{f.name}")
@@ -523,6 +508,7 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
             "raw_hash": raw_hash,
             "raw_mtime": raw_mtime,
             "fmt": f.suffix.lower().lstrip("."),
+            "parser_version": f"{PARSER_VERSION}:{parser.name}",
         })
 
     if not parsed_items:
@@ -530,8 +516,6 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
         return 0
 
     # === 阶段 2：锁内复核 hash + 落库 ===
-    from .document_library import DocumentLibrary, MAX_TEXT_BYTES
-    library = DocumentLibrary(rp)
     imported = 0
     written_paths: list[Path] = []
     with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
@@ -551,16 +535,20 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
                 print(f"  跳过（复核失败）：{f.name}")
                 continue
 
-            sid, digest, created = sources.import_source(
-                rp, item["body"], title=item["title"], scope=scope, fmt=item["fmt"],
-                parser_version="markdown-direct" if f.suffix.lower() == ".md" else "parsers-v1",
-                imported_by=source, kind=sources.kind_for(f.suffix),
-                source_modified_at=datetime.fromtimestamp(item["raw_mtime"]).isoformat(timespec="seconds"),
-            )
-            if len(item["body"].encode("utf-8")) <= MAX_TEXT_BYTES:
-                library.project_import(conn, root=src_dir, file=f, scope=scope, source_id=sid,
-                                       sha256=digest, raw_hash=item["raw_hash"],
-                                       text=item["body"], title=item["title"])
+            existing = library.imported_snapshot(conn, f, src_dir, scope, item["raw_hash"])
+            if existing:
+                sid, digest = existing
+                created = False
+            else:
+                sid, digest, created = sources.import_source(
+                    rp, item["body"], title=item["title"], scope=scope, fmt=item["fmt"],
+                    parser_version=item["parser_version"], imported_by=source, kind=sources.kind_for(f.suffix),
+                    source_modified_at=datetime.fromtimestamp(item["raw_mtime"]).isoformat(timespec="seconds"),
+                )
+                if len(item["body"].encode("utf-8")) <= MAX_TEXT_BYTES:
+                    library.project_import(conn, root=src_dir, file=f, scope=scope, source_id=sid,
+                                           sha256=digest, raw_hash=item["raw_hash"], text=item["body"],
+                                           title=item["title"], parser_version=item["parser_version"])
             index.record_source_state(
                 conn, str(f.resolve()), digest,
                 datetime.fromtimestamp(item["raw_mtime"]).isoformat(timespec="seconds"),

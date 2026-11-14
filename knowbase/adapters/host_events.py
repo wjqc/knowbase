@@ -8,7 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .. import config, context, index, jobs, materials, scope_binding
+from .. import config, context, index, jobs, materials, scope_binding, sources
 from . import normalizer
 
 
@@ -451,7 +451,7 @@ def render(result):
         for c in result["candidates"]:
             line = f"- [{c['id']}] {c['summary']}；适用：{c['applicable_when']}；{c['confidence']}"
             if c.get("source_revalidation"):
-                line += "；源已更新，采信前复核"
+                line += "；" + sources.revalidation_notice(c["source_revalidation"])
             if c.get("source_refs"):
                 line += "；出处 " + c["source_refs"][0]
             lines.append(line)
