@@ -221,6 +221,9 @@ def read_impl(id: str, session_id: str = "", event_id: str = "",
     conn=index.connect(rp)
     try:
         index.bump_hit(conn,id)
+        drifted = bool(conn.execute(
+            "SELECT 1 FROM source_drift_events WHERE memory_id=? AND resolved_at='' LIMIT 1",
+            (id,)).fetchone())
         index.record_usage(conn,"read",id,read_link_reason if not read_receipt else "task_receipt")
     finally:
         conn.close()
@@ -260,6 +263,9 @@ def read_impl(id: str, session_id: str = "", event_id: str = "",
         if len(src_refs) > 10:
             shown += f"；…另 {len(src_refs) - 10} 条"
         head += "出处: " + shown + "\n\n"
+    if drifted:
+        head += ("源已更新: 该卡引用的源快照已有新版本；采信前先用 source_search/source_read "
+                 "核对最新快照是否仍支撑本卡结论。\n\n")
     if meta.get("type") == "reference":
         head = ("[knowbase] 该条为 reference 原始材料卡（已退出默认检索，待迁移为 source）："
                 "内容未经知识化提炼，采信前须自行验证。\n\n" + head)
@@ -301,6 +307,8 @@ def search_impl(query: str, type: str | None = None, scope: str | None = None,
             result["delivery_id"] = delivery.record_delivery(conn, search_id=search_id, host_profile=host,
                 session_id=session_id, context_event_id=f"mcp:{search_id}", task_id=task, task_revision="",
                 scope=scope, memory_id=result["id"], content_revision=result["content_revision"], rank=rank)
+    drifted = {r[0] for r in conn.execute(
+        "SELECT DISTINCT memory_id FROM source_drift_events WHERE resolved_at=''")}
     conn.commit()
     _observe_mcp_call(rp, session_id, "memory_search", payload={
         "tool": "memory_search", "query": query[:512], "scope": scope,
@@ -316,10 +324,11 @@ def search_impl(query: str, type: str | None = None, scope: str | None = None,
     for r in results:
         stg = "（staging 提案）" if r["staging"] else ""
         refs_note = f" ｜ refs={r['source_ref_count']}" if (r.get("source_ref_count") or 0) else ""
+        drift_note = " ｜ 源已更新" if r["id"] in drifted else ""
         lines.append(
             f"- [{r['id']}]{stg} {r['title']} ｜ {r['confidence']}·{r['status']}"
             f" ｜ scope={r['scope']} ｜ hit={r['hit_count']} helpful={r['helpful_count']}"
-            f" ｜ score={r['score']} ｜ channels={','.join(r.get('channels', []))}{refs_note}"
+            f" ｜ score={r['score']} ｜ channels={','.join(r.get('channels', []))}{refs_note}{drift_note}"
             f"\n  摘要：{r['snippet'][:80]}\n  详情：memory_read(id=\"{r['id']}\""
             + (f', delivery_id="{r["delivery_id"]}")' if r.get("delivery_id") else ")")
         )

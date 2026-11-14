@@ -278,6 +278,9 @@ class DocumentLibrary:
                         conn.execute("UPDATE source_documents SET status='deleted',updated_at=? WHERE id=?", (_now(), doc_id))
                         report["deleted"] += 1
             checkpoint("complete")
+            drift = self.record_source_drift(conn)
+            report["drift_marked"] = drift["marked"]
+            report["drift_resolved"] = drift["resolved"]
         return report
 
     @staticmethod
@@ -367,6 +370,9 @@ class DocumentLibrary:
                         conn.execute("UPDATE source_documents SET status='error',error=?,updated_at=? WHERE id=?",
                                      (error, _now(), doc_id))
                     result["errors"].append({"source_id": sid, "error": error})
+            drift = self.record_source_drift(conn)
+            result["drift_marked"] = drift["marked"]
+            result["drift_resolved"] = drift["resolved"]
         return result
 
     def list_documents(self, scope="", limit=200) -> list[dict]:
@@ -513,3 +519,74 @@ class DocumentLibrary:
                 "source_ref": {"source_id": selected["source_id"], "sha256": selected["sha256"],
                                "locator": {"type": "line", "start_line": start, "end_line": end}},
                 "text": "".join(lines[start - 1:end]), "locator_kind": "parsed_snapshot_lines"}
+
+    # ---------- 版本漂移（ADR-0002 P2：版本漂移触发复验）----------
+
+    def record_source_drift(self, conn) -> dict:
+        """快照 sha256 更替 → 反查引用旧版的 active 卡 → source_drift_events。
+
+        只认显式钉住 sha256 的硬引用；不带 sha 的软引用语义是"读取时取当前
+        版"，不会 rot，不产生漂移。已修复引用或卡片已消失的未决事件在本轮
+        回填 resolved_at。确定性钩子，sync 进程内完成，不依赖 worker 存活。
+        返回 {"marked": 新登记事件数, "resolved": 本轮解决数}。
+        """
+        current = {r["id"]: (r["source_id"], r["sha256"]) for r in conn.execute(
+            "SELECT id,source_id,sha256 FROM source_documents WHERE status='available' AND sha256!=''")}
+        # 每个快照版本有独立 source_id（SRC-xxx），同一 document 的新版本更换 SID；
+        # 因此按 document 分组判断更替，键为卡片实际钉住的 (旧SID, 旧sha)。
+        superseded = {}
+        for r in conn.execute("SELECT document_id,source_id,sha256 FROM source_snapshot_versions"):
+            cur = current.get(r["document_id"])
+            if cur and r["sha256"] != cur[1]:
+                superseded[(r["source_id"], r["sha256"])] = (r["document_id"], cur[0], cur[1])
+        marked = 0
+        for sid in {sid for sid, _ in superseded}:
+            for mid in sources.find_knowledge_cards_referencing(self.repo, sid):
+                meta, _body, path = store.load(self.repo, mid)
+                if not meta or path.parent.name == "staging" or meta.get("status") != "active":
+                    continue
+                for ref in meta.get("source_refs") or []:
+                    if not (isinstance(ref, dict) and ref.get("source_id") == sid and ref.get("sha256")):
+                        continue
+                    key = (sid, ref["sha256"])
+                    if key not in superseded:
+                        continue
+                    doc_id, new_sid, new_sha = superseded[key]
+                    cursor = conn.execute(
+                        "INSERT OR IGNORE INTO source_drift_events VALUES(?,?,?,?,?,?,?,?)",
+                        (_hash(f"{sid}|{ref['sha256']}|{new_sha}|{mid}".encode())[:24],
+                         doc_id, sid, ref["sha256"], new_sha, mid, _now(), ""))
+                    marked += cursor.rowcount
+        return {"marked": marked, "resolved": self._resolve_source_drift(conn)}
+
+    def _resolve_source_drift(self, conn) -> int:
+        """引用已修复或卡片已消失的未决漂移事件回填 resolved_at。"""
+        open_events = conn.execute(
+            "SELECT drift_id,source_id,old_sha256,memory_id FROM source_drift_events "
+            "WHERE resolved_at=''").fetchall()
+        if not open_events:
+            return 0
+        still_cited = set()
+        for sid in {r["source_id"] for r in open_events}:
+            for mid in sources.find_knowledge_cards_referencing(self.repo, sid):
+                meta, _body, path = store.load(self.repo, mid)
+                if not meta or path.parent.name == "staging" or meta.get("status") != "active":
+                    continue
+                for ref in meta.get("source_refs") or []:
+                    if isinstance(ref, dict) and ref.get("source_id") == sid and ref.get("sha256"):
+                        still_cited.add((sid, ref["sha256"], mid))
+        resolved = 0
+        for r in open_events:
+            if (r["source_id"], r["old_sha256"], r["memory_id"]) not in still_cited:
+                cursor = conn.execute(
+                    "UPDATE source_drift_events SET resolved_at=? WHERE drift_id=? AND resolved_at=''",
+                    (_now(), r["drift_id"]))
+                resolved += cursor.rowcount
+        return resolved
+
+
+def unresolved_drift_memory_ids(repo) -> set:
+    """当前未解决漂移的卡片 ID 集合（供检索/读取响应打「源已更新」标记）。"""
+    with closing(sqlite3.connect(index.db_path(repo), timeout=10)) as conn:
+        return {r[0] for r in conn.execute(
+            "SELECT DISTINCT memory_id FROM source_drift_events WHERE resolved_at=''")}
