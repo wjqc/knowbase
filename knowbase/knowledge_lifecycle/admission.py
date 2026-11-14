@@ -110,6 +110,19 @@ def evaluate_admission(conn, repo, memory_id: str, content_revision: str, *,
            "provenance present" if has_provenance
            else "provenance absent: stays pending review, no type-based rejection")
 
+    # 主张级出处门（open-source-reuse §5）：引用了 source 快照的卡，发布前
+    # 必须能从服务端快照重算引用。篡改（text_hash/哈希不符）、越界（locator
+    # 超出快照行数）、跨材料（manifest scope 与卡不符）不得进入自动发布。
+    if meta.get("source_refs"):
+        gate_errors = store.source_refs_errors(meta, repo)
+        gate_errors += store.source_refs_bounds_errors(meta, repo)
+        if gate_errors:
+            record("source_evidence_recomputed", "fail", ";".join(gate_errors[:5]))
+            overall = "fail"
+        else:
+            record("source_evidence_recomputed", "pass",
+                   f"recomputed {len(meta['source_refs'])} source ref(s) against snapshots")
+
     # 统一权威门：共享范围（global）需要权威确认，类型不参与。
     if scope == "global":
         if not authority_ref:

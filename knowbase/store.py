@@ -451,6 +451,47 @@ def source_refs_errors(meta: dict, repo: Path | None = None) -> list[str]:
     return errors
 
 
+def source_refs_bounds_errors(meta: dict, repo: Path | None = None) -> list[str]:
+    """发布门专项：locator 行位越界检查。
+
+    刻意不并入写时 lint（source_refs_errors）：存量卡可能带着宽松 locator，
+    越界拒绝只发生在发布门，避免升级即误伤。存在性/哈希问题由
+    source_refs_errors 负责，这里跳过缺失 manifest 的引用。
+    """
+    refs = meta.get("source_refs") or []
+    if not isinstance(refs, list) or repo is None:
+        return []
+    errors = []
+    for ref in refs:
+        if not isinstance(ref, dict) or not ref.get("source_id"):
+            continue
+        locator = ref.get("locator")
+        if not isinstance(locator, dict) or locator.get("start_line") is None:
+            continue
+        from . import sources
+        manifest = sources.load_manifest(repo, ref["source_id"])
+        if not manifest:
+            continue
+        root = (Path(repo) / sources.OBJECTS_DIR).resolve()
+        path = (Path(repo) / str(manifest.get("object", ""))).resolve()
+        if root not in path.parents or not path.is_file():
+            continue
+        try:
+            total = len(path.read_text(encoding="utf-8").splitlines())
+        except (OSError, UnicodeError):
+            continue
+        start, end = locator.get("start_line"), locator.get("end_line")
+        try:
+            start = int(start)
+            end = int(end) if end is not None else start
+        except (TypeError, ValueError):
+            errors.append("source_refs locator 行号非整数")
+            continue
+        if start < 1 or end < start or end > total:
+            errors.append(f"source_refs locator 越界：L{start}-L{end} 超出快照 {total} 行")
+    return errors
+
+
 def lint(meta: dict, body: str, repo: Path | None = None) -> list[str]:
     errs = []
     t = meta.get("type")
