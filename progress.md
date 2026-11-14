@@ -1147,3 +1147,14 @@ tests/v2/ ................... 416 passed (原 383 + 新 33)
 - rc10 生产全链两条任务通过：A=capture→claim→NEEDS_REASSESSMENT（10 相似卡）→逐卡真读→duplicate_evaluation 重提交→succeeded→读回 P-b4506b0ae008；B=检索→读→adopted→feedback(helpful/completed)→update 修订清验证。
 - 生产新语义防线各拦截一次并按协议放行：本机路径（~/）lint 拒绝候选；查重门要求逐卡评估。卡 active/once，内容库自动提交 3b4ef0e/8645097。
 - Trae GUI 两条任务仍待用户：注入四类路径（应用点击/底层事件/键盘/菜单 AX 动作）全部被 WindowServer 守卫拒绝（onscreen:false），Trae 已留在 knowbase 工作区待用户操作。
+
+## 2026-11-14 文档库拆壳保核 + 出处能力接入卡链路（偏差纠正）
+
+- 背景：用户发现 682163d（11-13 文档库）偏离原意图——评审文档 §5 要的是"移植 LLM Wiki 逐条来源校验增强现有卡链路"，实际落地成平行新功能（自有 FTS/Web 浏览器/轮询器/CLI 壳），而卡链路出处能力仍为零。用户裁决：拆壳保核 + 补三项整合；Hook 递送带出处不做；CLI 瘦身 6 子命令。
+- Phase A（2a12f3e）：删 document_browser.py/document_watch.py 及 3 个测试文件（-1193 行）；documents CLI 保留 sync/reindex/list/search/history/read；迁移 39 DROP source_watch_roots + 建 source_drift_events + meta.source_ref_count 列；validate_scope 收敛至 scope_binding；文档删 browse/watch 章节（document-watch.md 删除）。
+- B1 出处透出（f9e7eeb）：memory_read 渲染 frontmatter source_refs（此前只渲染 code_refs，出处不可见）；memory_search 行带 refs=N；memory_context 候选带紧凑 source_refs；共享 sources.format_citation/describe_source_ref。
+- B2 漂移复验（c69b32b，落地 ADR-0002 P2）：sync 后确定性钩子按 document 分组检测快照更替（注意：每个版本是独立 SRC id，不能按 source_id 分组——首版实现此错误已修），反查钉住旧 (source_id,sha256) 硬引用的 active 卡登记漂移事件，引用修复回填 resolved_at；search/read 打「源已更新」标记。
+- B3 主张级发布门（9618af5，评审 §5 本体）：evaluate_admission 新增 source_evidence_recomputed——发布前从服务端快照字节重算引用，篡改/越界/跨材料三拒绝；越界检查刻意独立成 store.source_refs_bounds_errors 不进写时 lint（避免升级误伤存量卡）；无 source_refs 存量卡不受影响。
+- 边界声明：漂移刻意不进 governance.decide 负证据链（负证据直接映射 quarantine，违反"不自动隔离"裁决），只做账本+可见标记，降级留人工/后续 worker 任务。迁移 39 因升级自足规格（v8 合成库测试）补 CREATE TABLE IF NOT EXISTS meta 守卫；_row_meta 对缺列手工库防御 len(r)>14。
+- 回归：每阶段全量 pytest；最终 1295 passed / 1 skipped（一次性 uv 离线 editable venv）。README.md 含并行会话未提交的头部重写草稿，本次仅按行暂存 browse→history/read 一句修正（update-index --cacheinfo），草稿保持未提交。
+- 部署：推 GitHub main 后 launchd updater 原地升级；MCP 宿主连接需重连才能用新响应（旧连接仍跑 682163d 后端）。

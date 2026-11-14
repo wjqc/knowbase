@@ -27,8 +27,14 @@
 
 - **P0（本次）**：检索/速览排除 reference；import 只产 source；save 拒绝 reference；八项结构强制；接口兼容保留。
 - **P1**：knowledge_extract（source→candidate）、staging 审核（approve/merge/reject）、**结构化 code_refs 已落地（2026-09-21）**、source→card 派生关系。
-- **P2**：applicability/exclusions schema、检索前适用性门（先判断能不能用，再算排第几）、版本漂移触发复验。
+- **P2**：applicability/exclusions schema、检索前适用性门（先判断能不能用，再算排第几）、**版本漂移触发复验已落地（2026-11-14）**：`documents sync` 后确定性钩子反查钉住旧版快照的 active 卡，登记 `source_drift_events` 并在检索/读取响应打「源已更新」标记；刻意不进 governance 负证据链（不自动隔离），降级留人工/后续 worker 复验。
 - **P3**：存量 18 张 R 卡转 source、分批提炼、人工审核后归档旧卡。
+
+### 出处透出与主张级发布门（2026-11-14 补充落地）
+
+- **检索透出出处**：`memory_read` 渲染 frontmatter `source_refs` 为 `knowbase-source:SRC@sha256#L行` 引用行；`memory_search` 命中行带 `refs=N`；`memory_context` 候选带紧凑 `source_refs`。
+- **主张级发布门**：准入评估（`evaluate_admission`）新增 `source_evidence_recomputed` 检查——引用 source 快照的卡，发布前从服务端快照字节重算引用，篡改（text_hash 不符）、越界（locator 超出快照行数）、跨材料（manifest scope 与卡不符）不得进入自动发布；无 `source_refs` 的存量卡不受影响（按现有策略复核）。
+- 依据：docs/reviews/open-source-reuse-2026-11-12.md §5（LLM Wiki 逐条来源校验）。
 
 ## 取舍
 
