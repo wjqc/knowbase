@@ -30,6 +30,13 @@ def normalize_path(path) -> Path:
     return Path(path).expanduser().resolve()
 
 
+def validate_scope(scope: str) -> str:
+    """显式 scope 入口校验：documents 同步/检索共用，拒绝空白、越界与控制字符。"""
+    if not scope.strip() or scope != scope.strip() or len(scope) > 200 or any(ord(c) < 32 for c in scope):
+        raise ValueError("scope must be explicit (use global for shared documents)")
+    return scope
+
+
 def _existing_ancestor(path: Path) -> Path:
     cur = path
     while not cur.exists():

@@ -693,6 +693,17 @@ MIGRATIONS: list[tuple[int, str]] = [
       last_started TEXT, last_finished TEXT, last_result TEXT,
       UNIQUE(directory,scope));
     """),
+    (39, """
+    DROP TABLE IF EXISTS source_watch_roots;
+    CREATE TABLE IF NOT EXISTS source_drift_events(
+      drift_id TEXT PRIMARY KEY, document_id TEXT NOT NULL, source_id TEXT NOT NULL,
+      old_sha256 TEXT NOT NULL, new_sha256 TEXT NOT NULL, memory_id TEXT NOT NULL,
+      recorded_at TEXT NOT NULL, resolved_at TEXT NOT NULL DEFAULT '');
+    CREATE INDEX IF NOT EXISTS idx_source_drift_memory
+      ON source_drift_events(memory_id, resolved_at);
+    CREATE INDEX IF NOT EXISTS idx_source_drift_source
+      ON source_drift_events(source_id, old_sha256);
+    """),
 ]
 
 

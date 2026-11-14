@@ -16,7 +16,7 @@ from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import config, credentials, index, sources, store
+from . import config, credentials, index, scope_binding, sources, store
 from .locking import RepoLock
 from .parsers import register_builtin, registry
 
@@ -54,9 +54,7 @@ class DocumentLibrary:
 
     @staticmethod
     def validate_scope(scope: str) -> str:
-        if not scope.strip() or scope != scope.strip() or len(scope) > 200 or any(ord(c) < 32 for c in scope):
-            raise ValueError("scope must be explicit (use global for shared documents)")
-        return scope
+        return scope_binding.validate_scope(scope)
 
     def _snapshot(self, sha: str) -> str:
         # Never trust object paths from synchronized manifests.

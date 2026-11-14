@@ -226,7 +226,7 @@ def test_cli_parse_and_dispatch(library, monkeypatch, capsys):
     assert _main(["documents", "sync", str(root), "--scope", "x"]) == 0
     assert _main(["documents", "search", "evidence", "--scope", "x"]) == 0
     assert "document_id" in capsys.readouterr().out
-    assert _main(["documents", "watch", str(root), "--scope", "x", "--interval", "0"]) == 2
+    assert _main(["documents", "sync", str(root), "--scope", ""]) == 2
 
 
 def test_limits_and_invalid_ranges(library):
@@ -297,7 +297,7 @@ def test_tif_never_calls_ocr(library, monkeypatch):
     assert lib.sync(root, scope="x")["skipped"] == 1
 
 
-def test_unicode_separator_matches_browser_line_numbers(library):
+def test_unicode_separator_matches_snapshot_line_numbers(library):
     lib, root = library
     (root / "a.md").write_text("first\u2028still first\nneedle\n")
     lib.sync(root, scope="x")
