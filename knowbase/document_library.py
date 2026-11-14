@@ -454,6 +454,16 @@ class DocumentLibrary:
         page = {"items": [], "total": 0, "offset": offset, "limit": limit, "has_more": False}
         if not terms:
             return page
+        from . import question_search
+        if question_search.is_question(query):
+            question = question_search.Question(
+                query, index._load_aliases(), extra_groups=source_search.alias_groups(query)
+            )
+            with self._connect() as conn:
+                hits = source_search.question_hits(conn, question, scope, group_by_file=group_by_file)
+            page.update(items=hits[offset:offset + limit], total=len(hits),
+                        has_more=offset + limit < len(hits))
+            return page
         # Title and path hits remain primary so filenames work even when absent from the body.
         score, score_params = [], []
         for term in terms:

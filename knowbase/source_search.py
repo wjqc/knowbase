@@ -24,10 +24,13 @@ _DOCUMENT_TERMS = (
 )
 
 
-def aliases(query):
-    return {term for triggers, variants in _DOCUMENT_TERMS if any(trigger in query for trigger in triggers)
-            for term in variants}
+def alias_groups(query):
+    return tuple(variants for triggers, variants in _DOCUMENT_TERMS
+                 if any(trigger in query for trigger in triggers))
 
+
+def aliases(query):
+    return {term for group in alias_groups(query) for term in group}
 
 
 def question_parts(query):
@@ -69,6 +72,81 @@ def find_candidates(conn, query, scope):
         "JOIN source_documents d ON d.id=c.document_id WHERE d.status='available' AND (?='' OR d.scope=?) "
         "ORDER BY f.rank,d.path,c.start_line LIMIT 500", (expression, scope, scope),
     )]
+
+
+def question_hits(conn, question, scope, *, group_by_file):
+    """Choose a supported passage before ranking or grouping its document."""
+    terms = question.terms()
+    if not terms:
+        return []
+    expression = " OR ".join(index.fts_term(term) for term in terms)
+    candidates = conn.execute(
+        "WITH matches AS MATERIALIZED (SELECT chunk_id,rank FROM source_chunks_fts WHERE source_chunks_fts MATCH ?) "
+        "SELECT d.id document_id,d.title,d.path,d.scope,c.chunk_id,c.start_line,c.end_line,"
+        "c.text,d.sha256 FROM matches f JOIN source_chunks c ON c.chunk_id=f.chunk_id "
+        "JOIN source_documents d ON d.id=c.document_id WHERE d.status='available' AND (?='' OR d.scope=?) "
+        "ORDER BY f.rank,d.path,c.start_line LIMIT 500", (expression, scope, scope),
+    )
+    hits = []
+    excerpt_weights = signals(question.text)
+    asks_breakdown = bool(re.search(r"几块|各管|职责", question.text))
+    asks_availability = bool(re.search(r"能不能|能否|支持吗|能.*吗", question.text))
+    asks_count = bool(re.search(r"多少", question.text))
+    for row in candidates:
+        hit = dict(row)
+        if not question.version_matches(hit["title"] + "\n" + hit["path"]):
+            continue
+        lines = sources.snapshot_lines(hit.pop("text"))
+        best = (0, 0, 0)
+        for start, end, heading in _paragraphs(lines):
+            # Adjacent table rows and ordered steps can jointly answer a question.
+            if lines[start].lstrip().startswith("|") and asks_breakdown:
+                end = start + 1
+                while end < min(len(lines), start + 5) and lines[end].lstrip().startswith("|"):
+                    end += 1
+            elif re.match(r"\s*\d+[.)]\s", lines[start]):
+                while end < min(len(lines), start + 5) and re.match(r"\s*\d+[.)]\s", lines[end]):
+                    end += 1
+            passage = "".join(lines[start:end])
+            score = question.score(passage, metadata=heading)
+            if score:
+                score += 2 * sum(bool(question.score(line)) for line in lines[start:end])
+                if re.search(r"不具备|未实现", passage):
+                    score += 24 if asks_availability else 12
+                if re.search(r"默认(?:旧|留|由|接|启|关)", passage):
+                    score += 12
+                if not asks_breakdown and re.match(r"\s*\d+[.)]", passage):
+                    score += 12
+                if asks_breakdown and passage.lstrip().startswith("|"):
+                    score += 8 * sum(bool(question.score(line)) for line in lines[start:end])
+                if asks_count and len(re.findall(r"\d+(?:\.\d+)?%", passage)) >= 2:
+                    score += 10
+                    if re.search(r"[+-]\d+(?:\.\d+)?%|百分点", passage):
+                        score += 8
+                # Reuse the passage preferences already used by source retrieval,
+                # including numbers in quantitative answers and historical commands.
+                preference, _, _, _ = excerpt(passage, question.text, excerpt_weights)
+                score += preference
+                if score > best[0]:
+                    best = (score, start, end)
+        if not best[0]:
+            continue
+        score, start, end = best
+        text = "".join(lines[start:end])
+        hit.update(score=score, start_line=hit["start_line"] + start,
+                   end_line=hit["start_line"] + end - 1, snippet=text,
+                   locator_kind="parsed_snapshot_lines")
+        hits.append(hit)
+    hits.sort(key=lambda hit: (-hit["score"], hit["path"], hit["start_line"], hit["chunk_id"]))
+    counts = Counter(hit["document_id"] for hit in hits)
+    for hit in hits:
+        hit["matched_chunks"] = counts[hit["document_id"]]
+    if group_by_file:
+        best_by_document = {}
+        for hit in hits:
+            best_by_document.setdefault(hit["document_id"], hit)
+        return list(best_by_document.values())
+    return hits
 
 
 def match_weights(query, rows):

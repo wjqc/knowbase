@@ -93,3 +93,27 @@ def test_question_retrieval_returns_specific_evidence(library):
     read = lib.read(hit["document_id"], start_line=hit["start_line"], end_line=hit["end_line"])
     assert "执行回滚并恢复旧包" in read["text"]
     assert lib.search_page("火星水票 H9QQZ", scope="x")["total"] == 0
+
+
+def test_version_question_finds_evidence_beyond_cover_and_abstains_without_evidence(library):
+    lib, root = library
+    before = "# 经营平台部署方案\n\nv4.2 评审稿\n\n" + "环境说明和部署约束。\n\n" * 100
+    answer = (
+        "### 四个后端的责任\n\n"
+        "| 后端 | 职责 |\n|---|---|\n"
+        "| 业务核心 | 管理订单 |\n"
+        "| 调度中心 | 管理作业 |\n"
+        "| 流程控制中心 | 管理审批 |\n"
+        "| 风控中心 | 执行准入 |\n"
+    )
+    (root / "经营平台-v4.2.md").write_text(before + answer, encoding="utf-8")
+    (root / "经营平台-v4.1.md").write_text(answer, encoding="utf-8")
+    lib.sync(root, scope="ops")
+    result = lib.search_page("按 v4.2 方案，后台拆成哪几块，各管什么？", scope="ops")
+    assert result["total"] == 1
+    hit = result["items"][0]
+    assert hit["path"] == "经营平台-v4.2.md"
+    assert all(role in hit["snippet"] for role in ("管理订单", "管理作业", "管理审批", "执行准入"))
+    read = lib.read(hit["document_id"], sha256=hit["sha256"], start_line=hit["start_line"], end_line=hit["end_line"])
+    assert hit["snippet"] == read["text"]
+    assert lib.search_page("经营平台的量子点阵额度在哪儿开通？", scope="ops")["items"] == []

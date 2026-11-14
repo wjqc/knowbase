@@ -549,6 +549,43 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
         evidence = retrieval_policy.explicit_lexical_evidence(conn, lex_all, core_terms, support, expansions)
         lex = {mid: score for mid, score in lex.items() if mid in evidence}
         lex_all = {mid: score for mid, score in lex_all.items() if mid in evidence}
+    question_snippets = {}
+    if explicit and policy["level"] == "L2":
+        from . import question_search
+        # Leave established exact identifier queries and their eligibility guards intact.
+        if question_search.is_question(query):
+            question = question_search.Question(query, aliases)
+            question_ranks = {}
+            exact_groups = [group for group in core_terms if group[0] in question.words
+                            or re.search(r"[0-9_.\-]", group[0])]
+            required_identifiers = [
+                re.compile("|".join(map(retrieval_policy._whole_term, group)), re.I)
+                for group in exact_groups if group[0] != question.version
+            ]
+            for mid, title, tags, body, card_scope in conn.execute(
+                    "SELECT f.id,f.title,f.tags,f.body,m.scope FROM mem_fts f JOIN meta m ON m.id=f.id "
+                    "WHERE (? IS NULL OR m.scope IN (?, 'global'))", (scope, scope)):
+                if mid not in allowed_ids:
+                    continue
+                combined = f"{title}\n{tags}\n{body}"
+                if not question.version_matches(title) or not all(
+                        pattern.search(combined) for pattern in required_identifiers):
+                    continue
+                relevance = question.score(
+                    combined, metadata=f"{title}\n{tags}",
+                    corroborate_fragments=bool(scope and scope != "global" and card_scope == "global"),
+                )
+                if relevance:
+                    best_line = max(body.splitlines(), key=question.score, default="")
+                    line_score = question.score(best_line)
+                    question_ranks[mid] = relevance + line_score / 3
+                    if line_score:
+                        question_snippets[mid] = best_line.lstrip("# ")
+            # Scope labels or product acronyms alone cannot support a business question.
+            lex = question_ranks
+            dense = {mid: score for mid, score in dense.items() if mid in question_ranks}
+            lex_all = {mid: score for mid, score in lex_all.items() if mid in question_ranks}
+            evidence = {mid: (score,) for mid, score in question_ranks.items()}
     fused = _rrf_scores(lex,dense)
     if not fused:
         # 无直接命中时仍可跟随 archived 旧卡的重定向（MERGE 旧卡内容只在 archived 卡里）。
@@ -580,7 +617,7 @@ def search(conn: sqlite3.Connection, query: str, mtype: str | None = None,
         score = fused[m["id"]] * _scope_factor(m, scope) \
             * (1.5 if m["confidence"] == "verified" else 1.0) \
             * _freshness_factor(m) * _feedback_factor(m)
-        snippet = snippets.get(m["id"], "")
+        snippet = question_snippets.get(m["id"], snippets.get(m["id"], ""))
         channels = [name for name, ranking in (("lexical", lex), ("dense", dense)) if m["id"] in ranking]
         results.append({**m, "score": round(score, 6), "snippet": snippet,
                         "channels": channels})

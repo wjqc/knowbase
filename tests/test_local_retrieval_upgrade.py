@@ -157,3 +157,31 @@ def test_memory_search_keeps_exact_error_code(memory_repo):
     forbidden = seed(memory_repo, "HTTP 403 认证错误", body="检查访问权限。", tags=[])
     hits = search_impl("HTTP 401 认证错误", scope="global")
     assert unauthorized in hits and forbidden not in hits
+
+
+def test_question_retrieves_existing_card_without_matching_generic_product_name(memory_repo):
+    from knowbase.server import search_impl
+
+    relevant = seed(memory_repo, "经营指标记录", scope="ops",
+                    body="本月签约转化率 25%，全国均值 30%。", tags=[])
+    unrelated = seed(memory_repo, "平台部署手册", scope="ops",
+                     body="平台支持审批、账号和查询。", tags=[])
+    hits = search_impl("本月签约转化率是多少，跟全国差多少？", scope="ops")
+    assert relevant in hits
+    assert unrelated not in hits
+    assert "未命中" in search_impl("平台的量子点阵额度在哪儿开通？", scope="ops")
+
+
+def test_project_question_rejects_incidental_fragment_in_shared_card(memory_repo):
+    from knowbase.server import search_impl
+
+    checklist = seed(memory_repo, "华东 42 项功能清单", scope="ops",
+                     body="42 项中，标准有 31 项，个性化有 11 项。", tags=[])
+    unrelated = seed(memory_repo, "工具接入规范",
+                     body="标准能力变更需要先提交设计提案。", tags=[])
+    shared = seed(memory_repo, "华东功能清单核对记录",
+                  body="华东功能清单分标准与个性化两类，共 42 项。", tags=[])
+
+    hits = search_impl("华东功能清单一共多少项，标准能力和个性化分别多少？", scope="ops", limit=3)
+    assert checklist in hits and shared in hits
+    assert unrelated not in hits
