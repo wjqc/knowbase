@@ -75,6 +75,9 @@ def test_history_does_not_trust_mutated_manifest(tmp_path):
     pinned = lib.read(doc['id'], sha256=old['sha256'], historical=True)
     assert pinned['text'] == old['text']
     assert {v['sha256'] for v in lib.history(doc['id'])} == {old['sha256'], new['sha256']}
+    assert lib.read(old['source_id'], sha256=old['sha256'], historical=True)['text'] == old['text']
+    with pytest.raises(ValueError, match='unknown document'):
+        lib.read(old['source_id'], sha256=new['sha256'], historical=True)
 
 
 def test_migration_only_pins_existing_current_version(tmp_path):

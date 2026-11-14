@@ -57,18 +57,7 @@ class DocumentLibrary:
         return scope_binding.validate_scope(scope)
 
     def _snapshot(self, sha: str) -> str:
-        # Never trust object paths from synchronized manifests.
-        if not re.fullmatch(r"[0-9a-f]{64}", sha):
-            raise ValueError("invalid source hash")
-        path = self.repo / sources.OBJECTS_DIR / (sha + ".md")
-        if path.is_symlink() or not path.resolve().is_relative_to(self.repo):
-            raise ValueError("source snapshot escapes library")
-        if path.stat().st_size > MAX_TEXT_BYTES:
-            raise ValueError("source snapshot exceeds size limit")
-        raw = path.read_bytes()
-        if _hash(raw) != sha:
-            raise ValueError("source snapshot checksum mismatch")
-        return raw.decode("utf-8")
+        return sources.read_snapshot(self.repo, sha, max_bytes=MAX_TEXT_BYTES)
 
     def _project(self, conn, *, doc_id, root, path, scope, manifest, text,
                  raw_hash="", parser_version="", title=None, fmt=None):
@@ -92,7 +81,7 @@ class DocumentLibrary:
 
     @staticmethod
     def _structured_chunks(text):
-        lines = [m.group() for m in re.finditer(r"[^\n]*\n|[^\n]+$", text)]
+        lines = sources.snapshot_lines(text)
         start = 0
         while start < len(lines):
             end, size = start, 0
@@ -314,6 +303,30 @@ class DocumentLibrary:
             raise ValueError("file exceeds 16 MiB")
         return raw
 
+    def project_import(self, conn, *, root: Path, file: Path, scope: str,
+                       source_id: str, sha256: str, raw_hash: str, text: str, title: str):
+        rel = file.relative_to(root).as_posix()
+        doc_id = self._identity(str(root), rel, scope)
+        current = conn.execute("SELECT source_id,sha256,raw_hash,status FROM source_documents WHERE id=?",
+                               (doc_id,)).fetchone()
+        if current == (source_id, sha256, raw_hash, "available"):
+            return
+        if current is None:
+            previous = conn.execute("SELECT source_hash FROM source_state WHERE source_path=?",
+                                    (str(file),)).fetchone()
+            if previous and previous[0] != sha256:
+                manifest = sources.find_by_sha(self.repo, previous[0], scope=scope)
+                if manifest:
+                    conn.execute("INSERT OR IGNORE INTO source_snapshot_versions VALUES(?,?,?,?,?,?)",
+                                 (doc_id, manifest["id"], manifest["sha256"], scope, manifest["title"], _now()))
+        self._project(conn, doc_id=doc_id, root=str(root), path=rel, scope=scope,
+                      manifest={"id": source_id, "sha256": sha256}, text=text, title=title,
+                      fmt=file.suffix.lstrip("."), raw_hash=raw_hash,
+                      parser_version="cli-import")
+        conn.execute("UPDATE source_documents SET status='deleted',updated_at=? "
+                     "WHERE root='' AND source_id=? AND scope=? AND status!='deleted'",
+                     (_now(), source_id, scope))
+
     def reindex(self) -> dict:
         """Index existing shared/imported source artifacts; no file roots needed."""
         result = {"indexed": 0, "unchanged": 0, "errors": []}
@@ -322,7 +335,9 @@ class DocumentLibrary:
             for row in conn.execute("SELECT source_id,scope,sha256 FROM source_snapshot_versions"):
                 pinned.setdefault(row["source_id"], set()).add((row["scope"], row["sha256"]))
             manifests = {}
-            for manifest in sources.iter_manifests(self.repo):
+            all_manifests = {m["id"]: m for m in sources.iter_manifests(self.repo)
+                             if isinstance(m.get("id"), str)}
+            for manifest in all_manifests.values():
                 sid = manifest["id"]
                 if (not sources.SRC_ID_RE.fullmatch(f"{sid}.yaml") or
                         manifest.get("status", "available") != "available"):
@@ -363,6 +378,23 @@ class DocumentLibrary:
                     self._project(conn, doc_id=doc_id, root="", path=sid, scope=scope,
                                   manifest=manifest, text=body, title=title,
                                   parser_version=PARSER_VERSION)
+                    predecessor = manifest.get("supersedes")
+                    seen = {sid}
+                    successor = sid
+                    while isinstance(predecessor, str) and predecessor not in seen:
+                        old_manifest = all_manifests.get(predecessor)
+                        if (not old_manifest or old_manifest.get("scope") != scope
+                                or old_manifest.get("superseded_by") != successor):
+                            break
+                        old_sha = old_manifest.get("sha256")
+                        if not isinstance(old_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", old_sha):
+                            break
+                        conn.execute("INSERT OR IGNORE INTO source_snapshot_versions VALUES(?,?,?,?,?,?)",
+                                     (doc_id, predecessor, old_sha, scope,
+                                      str(old_manifest.get("title") or predecessor)[:200], _now()))
+                        seen.add(predecessor)
+                        successor = predecessor
+                        predecessor = old_manifest.get("supersedes")
                     result["indexed"] += 1
                 except (OSError, ValueError) as exc:
                     error = credentials.redact_text(str(exc))[:200]
@@ -401,43 +433,45 @@ class DocumentLibrary:
         page = {"items": [], "total": 0, "offset": offset, "limit": limit, "has_more": False}
         if not terms:
             return page
-        # Do not use BM25 in a window expression: SQLite FTS auxiliaries are
-        # context-sensitive. Explicit bounded boosts are portable and auditable.
+        # Title and path hits remain primary so filenames work even when absent from the body.
         score, score_params = [], []
         for term in terms:
             score.append("(CASE WHEN instr(lower(d.title),?)>0 THEN 20 ELSE 0 END + "
                          "CASE WHEN instr(lower(d.path),?)>0 THEN 10 ELSE 0 END + "
                          "CASE WHEN instr(lower(c.text),?)>0 THEN 1 ELSE 0 END)")
             score_params += [term.lower()] * 3
+        long_terms = [term for term in terms if len(term) >= 3]
         base = ("SELECT d.id document_id,d.title,d.path,d.scope,c.chunk_id,c.start_line,c.end_line,"
-                "c.text _text,d.sha256,(" + "+".join(score) + ") score FROM source_documents d "
-                "JOIN source_chunks c ON d.id=c.document_id ")
-        params = list(score_params)
-        long_terms = [t for t in terms if len(t) >= 3]
+                "c.text _text,d.sha256,(" + "+".join(score) + ") score")
+        base += ", f.rank lexical_rank" if long_terms else ", 0 lexical_rank"
+        base += " FROM source_documents d JOIN source_chunks c ON d.id=c.document_id "
         if long_terms:
-            base += "JOIN source_chunks_fts f ON f.chunk_id=c.chunk_id "
+            base += "JOIN source_matches f ON f.chunk_id=c.chunk_id "
         base += "WHERE d.status='available' AND (?='' OR d.scope=?) "
-        params += [scope, scope]
-        if long_terms:
-            base += "AND source_chunks_fts MATCH ? "
-            params.append(" AND ".join('"' + t.replace('"', '""') + '"' for t in long_terms))
+        params = score_params + [scope, scope]
         for term in terms:
             if len(term) < 3:
                 base += "AND (instr(lower(c.text),?)>0 OR instr(lower(d.title),?)>0 OR instr(lower(d.path),?)>0) "
                 params += [term.lower()] * 3
-        cte = "WITH candidates AS (" + base + "), ranked AS (SELECT *, " \
-              "row_number() OVER(PARTITION BY document_id ORDER BY score DESC,start_line,chunk_id) position," \
-              "count(*) OVER(PARTITION BY document_id) matched_chunks FROM candidates) "
+        cte = "WITH "
+        if long_terms:
+            cte += ("source_matches AS MATERIALIZED (SELECT chunk_id, rank FROM source_chunks_fts "
+                    "WHERE source_chunks_fts MATCH ?), ")
+            params.insert(0, " AND ".join(index.fts_term(term) for term in long_terms))
+        cte += ("candidates AS (" + base + "), ranked AS (SELECT *, "
+                "row_number() OVER(PARTITION BY document_id ORDER BY score DESC,lexical_rank,start_line,chunk_id) position,"
+                "count(*) OVER(PARTITION BY document_id) matched_chunks FROM candidates) ")
         where = "WHERE position=1 " if group_by_file else ""
         with self._connect() as conn:
             conn.execute("BEGIN")
             page["total"] = conn.execute(cte + "SELECT count(*) FROM ranked " + where, params).fetchone()[0]
             rows = [dict(r) for r in conn.execute(
-                cte + "SELECT * FROM ranked " + where + "ORDER BY score DESC,document_id,start_line,chunk_id LIMIT ? OFFSET ?",
-                params + [limit, offset])]
+                cte + "SELECT * FROM ranked " + where + "ORDER BY score DESC,lexical_rank,document_id,start_line,chunk_id "
+                "LIMIT ? OFFSET ?", params + [limit, offset])]
         for row in rows:
             text = row.pop("_text")
             row.pop("position")
+            row.pop("lexical_rank")
             offsets = [text.lower().find(t.lower()) for t in terms]
             match_offset = min((p for p in offsets if p >= 0), default=0)
             row["start_line"] += text[:match_offset].count("\n")
@@ -468,7 +502,24 @@ class DocumentLibrary:
              historical=False, scope=None, include_related=True) -> dict:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM source_documents WHERE id=?", (document_id,)).fetchone()
-        if not row or (scope is not None and row["scope"] != scope):
+            if not row and sources.SRC_ID_RE.fullmatch(f"{document_id}.yaml"):
+                pinned = conn.execute(
+                    "SELECT v.document_id FROM source_snapshot_versions v JOIN source_documents d ON d.id=v.document_id "
+                    "WHERE v.source_id=? AND (? IS NULL OR v.scope IN (?, 'global')) AND (? IS NULL OR v.sha256=?) "
+                    "AND v.scope=d.scope ORDER BY (d.sha256=v.sha256) DESC,d.id LIMIT 1",
+                    (document_id, scope, scope, sha256, sha256)).fetchone()
+                if pinned:
+                    row = conn.execute("SELECT * FROM source_documents WHERE id=?", (pinned[0],)).fetchone()
+                elif not conn.execute("SELECT 1 FROM source_snapshot_versions WHERE source_id=? LIMIT 1",
+                                      (document_id,)).fetchone():
+                    manifest = sources.load_manifest(self.repo, document_id)
+                    if manifest and (scope is None or manifest.get("scope") in (scope, "global")):
+                        row = {"id": document_id, "source_id": document_id, "sha256": manifest["sha256"],
+                               "title": manifest.get("title", document_id), "scope": manifest["scope"],
+                               "format": manifest.get("format", "text"), "root": "", "path": document_id,
+                               "status": manifest.get("status", "available")}
+        allowed_scopes = (scope, "global") if sources.SRC_ID_RE.fullmatch(f"{document_id}.yaml") else (scope,)
+        if not row or (scope is not None and row["scope"] not in allowed_scopes):
             raise ValueError("unknown document")
         document = dict(row)
         if not document["sha256"]:
@@ -478,7 +529,7 @@ class DocumentLibrary:
         if old_version:
             if not historical:
                 raise ValueError("snapshot changed; refresh search before locating lines")
-            selected = next((v for v in self.history(document_id) if v["sha256"] == sha256), None)
+            selected = next((v for v in self.history(document["id"]) if v["sha256"] == sha256), None)
             if not selected:
                 raise ValueError("snapshot does not belong to this document")
         text = self._snapshot(selected["sha256"])
@@ -492,7 +543,7 @@ class DocumentLibrary:
                 stale = stale or _hash(self._read_file(path, root)) != document["raw_hash"]
             except (OSError, ValueError):
                 stale = True
-        lines = [m.group() for m in re.finditer(r"[^\n]*\n|[^\n]+$", text)]
+        lines = sources.snapshot_lines(text)
         start = 1 if start_line is None else int(start_line)
         end = min(len(lines), start + 1999) if end_line is None else int(end_line)
         if start < 1 or end < start or end - start >= 2000 or start > len(lines):
@@ -510,6 +561,7 @@ class DocumentLibrary:
                    and ref.get("sha256", selected["sha256"]) == selected["sha256"] for ref in refs):
                 related.append({"id": meta.get("id"), "title": meta.get("title", ""),
                                 "status": meta.get("status", ""), "scope": meta.get("scope")})
+        fragment = "".join(lines[start - 1:end])
         return {"id": document["id"], "title": selected.get("title", document["title"]), "path": document["path"],
                 "scope": document["scope"], "format": document["format"], "status": document["status"],
                 "sha256": selected["sha256"], "source_id": selected["source_id"],
@@ -517,70 +569,60 @@ class DocumentLibrary:
                 "end_line": end, "total_lines": len(lines), "related_cards": related,
                 "citation": sources.format_citation(selected["source_id"], selected["sha256"], start, end),
                 "source_ref": {"source_id": selected["source_id"], "sha256": selected["sha256"],
+                               "text_hash": _hash(fragment.encode("utf-8")),
                                "locator": {"type": "line", "start_line": start, "end_line": end}},
-                "text": "".join(lines[start - 1:end]), "locator_kind": "parsed_snapshot_lines"}
+                "text": fragment, "locator_kind": "parsed_snapshot_lines"}
 
     # ---------- 版本漂移（ADR-0002 P2：版本漂移触发复验）----------
 
     def record_source_drift(self, conn) -> dict:
         """快照 sha256 更替 → 反查引用旧版的 active 卡 → source_drift_events。
 
-        只认显式钉住 sha256 的硬引用；不带 sha 的软引用语义是"读取时取当前
-        版"，不会 rot，不产生漂移。已修复引用或卡片已消失的未决事件在本轮
-        回填 resolved_at。确定性钩子，sync 进程内完成，不依赖 worker 存活。
+        旧卡只记录 SRC ID 时，用该 ID 绑定的快照确定版本。复核状态按当前
+        引用与文档版本计算，已解除的事件保留在账本。
         返回 {"marked": 新登记事件数, "resolved": 本轮解决数}。
         """
-        current = {r["id"]: (r["source_id"], r["sha256"]) for r in conn.execute(
-            "SELECT id,source_id,sha256 FROM source_documents WHERE status='available' AND sha256!=''")}
-        # 每个快照版本有独立 source_id（SRC-xxx），同一 document 的新版本更换 SID；
-        # 因此按 document 分组判断更替，键为卡片实际钉住的 (旧SID, 旧sha)。
-        superseded = {}
-        for r in conn.execute("SELECT document_id,source_id,sha256 FROM source_snapshot_versions"):
-            cur = current.get(r["document_id"])
-            if cur and r["sha256"] != cur[1]:
-                superseded[(r["source_id"], r["sha256"])] = (r["document_id"], cur[0], cur[1])
+        superseded = conn.execute(
+            "SELECT 1 FROM source_snapshot_versions v JOIN source_documents d ON d.id=v.document_id "
+            "WHERE d.status='available' AND v.sha256<>d.sha256 LIMIT 1").fetchone()
         marked = 0
-        for sid in {sid for sid, _ in superseded}:
-            for mid in sources.find_knowledge_cards_referencing(self.repo, sid):
-                meta, _body, path = store.load(self.repo, mid)
-                if not meta or path.parent.name == "staging" or meta.get("status") != "active":
+        if superseded:
+            for meta, _body, _path in store.iter_all(self.repo):
+                if meta.get("status") != "active" or meta.get("type") == "reference":
                     continue
-                for ref in meta.get("source_refs") or []:
-                    if not (isinstance(ref, dict) and ref.get("source_id") == sid and ref.get("sha256")):
-                        continue
-                    key = (sid, ref["sha256"])
-                    if key not in superseded:
-                        continue
-                    doc_id, new_sid, new_sha = superseded[key]
+                mid = meta["id"]
+                for change in sources.card_source_changes(conn, meta, limit=None):
+                    doc_id, old_sha, new_sha = (change["document_id"], change["old_sha256"], change["new_sha256"])
+                    old_sid = change["old_source_id"]
+                    key = _hash(f"{doc_id}|{old_sid}|{old_sha}|{new_sha}|{mid}".encode())[:24]
                     cursor = conn.execute(
-                        "INSERT OR IGNORE INTO source_drift_events VALUES(?,?,?,?,?,?,?,?)",
-                        (_hash(f"{sid}|{ref['sha256']}|{new_sha}|{mid}".encode())[:24],
-                         doc_id, sid, ref["sha256"], new_sha, mid, _now(), ""))
+                        "INSERT INTO source_drift_events VALUES(?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT(drift_id) DO UPDATE SET resolved_at='' WHERE resolved_at!=''",
+                        (key, doc_id, old_sid, old_sha, new_sha, mid, _now(), ""))
                     marked += cursor.rowcount
         return {"marked": marked, "resolved": self._resolve_source_drift(conn)}
 
     def _resolve_source_drift(self, conn) -> int:
         """引用已修复或卡片已消失的未决漂移事件回填 resolved_at。"""
         open_events = conn.execute(
-            "SELECT drift_id,source_id,old_sha256,memory_id FROM source_drift_events "
+            "SELECT drift_id,source_id,old_sha256,memory_id,document_id,new_sha256 FROM source_drift_events "
             "WHERE resolved_at=''").fetchall()
         if not open_events:
             return 0
-        still_cited = set()
-        for sid in {r["source_id"] for r in open_events}:
-            for mid in sources.find_knowledge_cards_referencing(self.repo, sid):
-                meta, _body, path = store.load(self.repo, mid)
-                if not meta or path.parent.name == "staging" or meta.get("status") != "active":
-                    continue
-                for ref in meta.get("source_refs") or []:
-                    if isinstance(ref, dict) and ref.get("source_id") == sid and ref.get("sha256"):
-                        still_cited.add((sid, ref["sha256"], mid))
+        current = set()
+        for mid in {r[3] for r in open_events}:
+            meta, _body, path = store.load(self.repo, mid)
+            if not meta or path.parent.name == "staging" or meta.get("status") != "active":
+                continue
+            for change in sources.card_source_changes(conn, meta, limit=None):
+                current.add((change["document_id"], change["old_source_id"], change["old_sha256"],
+                             change["new_sha256"], mid))
         resolved = 0
-        for r in open_events:
-            if (r["source_id"], r["old_sha256"], r["memory_id"]) not in still_cited:
+        for drift_id, source_id, old_sha, mid, document_id, new_sha in open_events:
+            if (document_id, source_id, old_sha, new_sha, mid) not in current:
                 cursor = conn.execute(
                     "UPDATE source_drift_events SET resolved_at=? WHERE drift_id=? AND resolved_at=''",
-                    (_now(), r["drift_id"]))
+                    (_now(), drift_id))
                 resolved += cursor.rowcount
         return resolved
 

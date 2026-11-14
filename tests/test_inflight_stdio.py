@@ -13,7 +13,16 @@ from mcp.client.stdio import stdio_client
 from knowbase import config, store
 
 
-def test_registered_mcp_pipeline_creates_and_consumes_knowledge(memory_repo):
+def test_registered_mcp_pipeline_creates_and_consumes_knowledge(memory_repo, tmp_path):
+    from knowbase.document_library import DocumentLibrary
+
+    root = tmp_path / "source"
+    root.mkdir()
+    document = root / "orders.txt"
+    document.write_text("订单撤回先执行结算状态检查。\n", encoding="utf-8")
+    library = DocumentLibrary(memory_repo)
+    assert library.sync(root, scope="orders")["indexed"] == 1
+
     async def probe():
         interpreter = os.environ.get("KNOWBASE_STDIO_INTERPRETER", sys.executable)
         server_args = ["-I", "-m", "knowbase", "serve"] if "KNOWBASE_STDIO_INTERPRETER" in os.environ else ["-m", "knowbase", "serve"]
@@ -32,14 +41,21 @@ def test_registered_mcp_pipeline_creates_and_consumes_knowledge(memory_repo):
                     result = await session.call_tool(name, arguments)
                     assert not result.isError, result
                     return result.content[0].text
+                page = json.loads(await call("source_search", {"query": "结算状态检查", "scope": "orders"}))
+                hit = page["items"][0]
+                citation = json.loads(await call("source_read", {"document_id": hit["document_id"],
+                    "scope": "orders", "sha256": hit["sha256"], "start_line": 1, "end_line": 1}))
                 captured = await call("memory_capture", {"session_id": "stdio-s1", "scope": "orders",
                     "messages": [{"role": "user", "text": "受控样本：订单撤回应在服务层检查结算状态。"}]})
                 job = re.search(r"J-[a-f0-9]+", captured).group()
                 claim = json.loads(await call("memory_job_claim", {"job_id": job, "host_session_id": "stdio-s1", "protocol_version": 2}))
                 material = claim["materials"][0]
+                quote = material["text"][3:12]
                 candidate = {"candidate_key": "stdio-order", "type": "pitfall", "title": "服务层订单结算检查的回归经验",
                     "scope": "orders", "action": "create", "segment_ids": [material["segment_id"]],
-                    "evidence_refs": [{"segment_id": material["segment_id"], "text_hash": material["text_hash"]}],
+                    "source_refs": [citation["source_ref"]],
+                    "evidence_refs": [{"segment_id": material["segment_id"], "text_hash": material["text_hash"],
+                                       "start_offset": 3, "end_offset": 12, "quote": quote}],
                     "body": {"scope": "orders", "conclusion": "订单撤回先执行结算状态检查。",
                         "problem": "旧入口绕过前端检查时仍需保证服务层拒绝非法撤回。",
                         "applicable_when": "撤回入口收到已经结算的订单。", "not_applicable_when": "草稿订单有单独逻辑。",
@@ -47,18 +63,35 @@ def test_registered_mcp_pipeline_creates_and_consumes_knowledge(memory_repo):
                         "key_evidence": "受控输入明确说明校验要放在服务层。",
                         "verification": "仅用隔离协议样本验证保存与检索链路，未验证真实订单业务。",
                         "unknown_items": "真实业务的审批和退单约束尚未确认。"}}
-                submitted = json.loads(await call("memory_job_submit", {"job_id": job, "batch_id": claim["batch_id"],
+                submission = {"job_id": job, "batch_id": claim["batch_id"],
                     "lease_token": claim["lease_token"], "fencing_token": claim["fencing_token"],
                     "request_id": "stdio-submit", "protocol_version": 2, "candidates": [candidate],
-                    "segment_results": [{"segment_id": material["segment_id"], "decision": "distilled"}]}))
+                    "segment_results": [{"segment_id": material["segment_id"], "decision": "distilled"}]}
+                evidence = candidate["evidence_refs"][0]
+                for wrong_ref in [{"quote": "篡改后的引文"}, {"end_offset": len(material["text"]) + 1},
+                                  {"segment_id": "seg-foreign"}]:
+                    evidence.update(wrong_ref)
+                    rejected = json.loads(await call("memory_job_submit", submission))
+                    assert rejected["error"] == "VALIDATION_FAILED", rejected
+                    evidence.update(quote=quote, end_offset=12, segment_id=material["segment_id"])
+                submitted = json.loads(await call("memory_job_submit", submission))
+                assert json.loads(await call("memory_job_submit", submission)) == submitted
                 assert submitted["state"] == "succeeded", submitted
                 mid = submitted["results"][0]["memory_id"]
                 context = json.loads(await call("memory_context", {"session_id": "stdio-s1", "event_id": "phase-2",
                     "scope": "orders", "stage": "subtask_start", "current_goal": "订单撤回服务层校验",
                     "topics": [{"topic_id": "stage-two", "queries": ["订单 撤回 结算"], "status": "active"}]}))
                 assert mid in [card["id"] for card in context["candidates"]]
-                assert "结算状态" in await call("memory_read", {"id": mid})
                 card=next(card for card in context["candidates"] if card["id"]==mid)
+                assert citation["citation"] in card["source_refs"]
+                document.write_text("订单撤回改由人工确认。\n", encoding="utf-8")
+                assert library.sync(root, scope="orders")["drift_marked"] == 1
+                current_card = await call("memory_read", {"id": mid})
+                assert "源已更新" in current_card and citation["citation"] in current_card
+                historical = json.loads(await call("source_read", {"document_id": citation["source_id"],
+                    "scope": "orders", "sha256": citation["sha256"], "historical": True}))
+                assert historical["text"] == citation["text"]
+                assert historical["source_ref"] == citation["source_ref"]
                 use=json.loads(await call("memory_use",{"session_id":"stdio-s1","event_id":"adopt-phase-2",
                     "context_event_id":"phase-2","id":mid,"content_revision":card["content_revision"],"state":"adopted"}))
                 assert use["feedback_recorded"] is False

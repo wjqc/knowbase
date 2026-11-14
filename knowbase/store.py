@@ -404,95 +404,26 @@ def card_v2_errors(body: str) -> list[str]:
 # ---------- lint ----------
 
 def source_refs_errors(meta: dict, repo: Path | None = None) -> list[str]:
-    refs = meta.get("source_refs") or []
+    from . import sources
+
+    refs = meta.get("source_refs")
+    if refs is None:
+        return []
     if not isinstance(refs, list):
         return ["source_refs 必须为列表"]
     errors = []
-    for ref in refs:
-        if not isinstance(ref, dict) or not ref.get("source_id"):
-            errors.append("source_refs 每项必须包含 source_id")
-            continue
-        if repo is None:
-            continue
-        from . import sources
-        import hashlib
-        manifest = sources.load_manifest(repo, ref["source_id"])
-        if not manifest or manifest.get("scope") not in (meta.get("scope"), "global"):
-            errors.append("source_refs 来源不存在或项目不匹配")
-            continue
-        root = (Path(repo) / sources.OBJECTS_DIR).resolve()
-        path = (Path(repo) / str(manifest.get("object", ""))).resolve()
-        if root not in path.parents or not path.is_file():
-            errors.append("source_refs 来源对象不存在或路径越界")
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            errors.append("source_refs 来源对象无法读取")
-            continue
-        sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        if manifest.get("sha256") != sha or ref.get("sha256", sha) != sha:
-            errors.append("source_refs 来源对象哈希不匹配")
-            continue
-        fragment = text
-        if ref.get("segment_id"):
-            from .extraction.segmenter import segment_text
-            segments = {s.segment_id: s for s in segment_text(text, source_format=manifest.get("format", "markdown"))}
-            segment = segments.get(ref["segment_id"])
-            if not segment:
-                errors.append("source_refs segment_id 不存在")
-                continue
-            fragment = segment.text
-        expected_hash = ref.get("text_hash")
-        if expected_hash:
-            actual = hashlib.sha256(fragment.encode("utf-8")).hexdigest()
-            if expected_hash not in (actual, actual[:16]):
-                errors.append("source_refs text_hash 不匹配")
+    for position, ref in enumerate(refs, 1):
+        if not isinstance(ref, dict) or not isinstance(ref.get("source_id"), str) or not ref["source_id"]:
+            errors.append(f"source_refs[{position}] 必须包含 source_id")
+        elif repo is not None:
+            try:
+                sources.resolve_reference(repo, ref, meta.get("scope"))
+            except (OSError, ValueError) as exc:
+                errors.append(f"source_refs[{position}] {exc}")
     return errors
 
 
-def source_refs_bounds_errors(meta: dict, repo: Path | None = None) -> list[str]:
-    """发布门专项：locator 行位越界检查。
-
-    刻意不并入写时 lint（source_refs_errors）：存量卡可能带着宽松 locator，
-    越界拒绝只发生在发布门，避免升级即误伤。存在性/哈希问题由
-    source_refs_errors 负责，这里跳过缺失 manifest 的引用。
-    """
-    refs = meta.get("source_refs") or []
-    if not isinstance(refs, list) or repo is None:
-        return []
-    errors = []
-    for ref in refs:
-        if not isinstance(ref, dict) or not ref.get("source_id"):
-            continue
-        locator = ref.get("locator")
-        if not isinstance(locator, dict) or locator.get("start_line") is None:
-            continue
-        from . import sources
-        manifest = sources.load_manifest(repo, ref["source_id"])
-        if not manifest:
-            continue
-        root = (Path(repo) / sources.OBJECTS_DIR).resolve()
-        path = (Path(repo) / str(manifest.get("object", ""))).resolve()
-        if root not in path.parents or not path.is_file():
-            continue
-        try:
-            total = len(path.read_text(encoding="utf-8").splitlines())
-        except (OSError, UnicodeError):
-            continue
-        start, end = locator.get("start_line"), locator.get("end_line")
-        try:
-            start = int(start)
-            end = int(end) if end is not None else start
-        except (TypeError, ValueError):
-            errors.append("source_refs locator 行号非整数")
-            continue
-        if start < 1 or end < start or end > total:
-            errors.append(f"source_refs locator 越界：L{start}-L{end} 超出快照 {total} 行")
-    return errors
-
-
-def lint(meta: dict, body: str, repo: Path | None = None) -> list[str]:
+def lint(meta: dict, body: str, repo: Path | None = None, *, check_source_refs=True) -> list[str]:
     errs = []
     t = meta.get("type")
     if t not in TYPES:
@@ -542,7 +473,8 @@ def lint(meta: dict, body: str, repo: Path | None = None) -> list[str]:
         sample = "、".join(leaks[:2])
         errs.append(f"疑似包含明文密钥(password/token/Authorization 等): {sample}，请脱敏后再存")
     errs.extend(code_refs_errors(meta))
-    errs.extend(source_refs_errors(meta, repo))
+    if check_source_refs:
+        errs.extend(source_refs_errors(meta, repo))
     errs.extend(reference_errors(meta, body, repo))
     return errs
 

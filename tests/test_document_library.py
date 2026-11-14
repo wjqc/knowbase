@@ -328,11 +328,13 @@ def test_parser_version_reindexes(library, monkeypatch):
 
 def test_reindex_superseded_source_hidden(library):
     lib, root = library
-    sources.import_versioned(lib.repo, "oldcontent", title="a", scope="x", fmt="md",
-                             parser_version="v1", imported_by="test", source_path="a.md")
+    old_id, old_sha, _, _ = sources.import_versioned(
+        lib.repo, "oldcontent", title="a", scope="x", fmt="md",
+        parser_version="v1", imported_by="test", source_path="a.md")
     lib.reindex()
     sources.import_versioned(lib.repo, "newcontent", title="a", scope="x", fmt="md",
                              parser_version="v1", imported_by="test", source_path="a.md")
     lib.reindex()
     assert not lib.search("oldcontent")
-    assert lib.search("newcontent")
+    new_document = lib.search("newcontent")[0]["document_id"]
+    assert lib.read(new_document, sha256=old_sha, historical=True)["source_id"] == old_id

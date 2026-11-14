@@ -52,10 +52,48 @@ def describe_source_ref(ref) -> str:
         start = locator.get("start_line")
         if start is not None:
             end = locator.get("end_line")
-            text += f"#L{int(start)}" + (f"-L{int(end)}" if end else "")
+            try:
+                text += f"#L{int(start)}" + (f"-L{int(end)}" if end else "")
+            except (TypeError, ValueError, OverflowError):
+                pass
         elif locator.get("value"):
             text += f"#{locator['value']}"
     return text
+
+
+def card_citations(meta: dict, limit: int) -> list[str]:
+    citations = []
+    for ref in meta.get("source_refs") or []:
+        citation = describe_source_ref(ref)
+        if citation:
+            citations.append(citation)
+            if len(citations) == limit:
+                break
+    return citations
+
+
+def card_source_changes(conn, meta: dict, limit: int | None = 5) -> list[dict]:
+    changes = []
+    for ref in meta.get("source_refs") or []:
+        if not isinstance(ref, dict) or not isinstance(ref.get("source_id"), str):
+            continue
+        sha = ref.get("sha256")
+        if sha is not None and not isinstance(sha, str):
+            continue
+        for document_id, source_id, old_sha, new_sha, scope in conn.execute(
+                "SELECT d.id,d.source_id,v.sha256,d.sha256,d.scope FROM source_snapshot_versions v "
+                "JOIN source_documents d ON d.id=v.document_id "
+                "WHERE v.source_id=? AND (? IS NULL OR v.sha256=?) AND v.scope=d.scope "
+                "AND d.scope IN (?, 'global') AND d.status='available' AND d.sha256<>v.sha256 "
+                "ORDER BY d.id",
+                (ref["source_id"], sha, sha, meta.get("scope"))):
+            change = {"document_id": document_id, "source_id": source_id, "old_source_id": ref["source_id"],
+                      "scope": scope, "old_sha256": old_sha, "new_sha256": new_sha}
+            if change not in changes:
+                changes.append(change)
+                if len(changes) == limit:
+                    return changes
+    return changes
 
 
 def ensure_dirs(repo: Path) -> None:
@@ -177,6 +215,70 @@ def load_manifest(repo: Path, source_id: str) -> dict | None:
         return data if isinstance(data, dict) else None
     except Exception:
         return None
+
+
+def read_snapshot(repo: Path, sha256: str, *, max_bytes: int | None = None) -> str:
+    if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise ValueError("来源对象哈希不匹配 (invalid source hash)")
+    path = repo / object_relpath(sha256)
+    if path.is_symlink() or not path.resolve().is_relative_to(repo.resolve()):
+        raise ValueError("来源对象路径越界 (source snapshot escapes library)")
+    if max_bytes is not None and path.stat().st_size > max_bytes:
+        raise ValueError("source snapshot exceeds size limit")
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != sha256:
+        raise ValueError("来源对象哈希不匹配 (source snapshot checksum mismatch)")
+    return raw.decode("utf-8")
+
+
+def snapshot_lines(text: str) -> list[str]:
+    return re.findall(r"[^\n]*\n|[^\n]+$", text)
+
+
+def resolve_reference(repo: Path, ref: dict, scope: str) -> str:
+    """Resolve a card reference against the immutable text it actually cites."""
+    manifest = load_manifest(repo, ref["source_id"])
+    if not manifest or manifest.get("scope") not in (scope, "global"):
+        raise ValueError("来源不存在或项目不匹配")
+    sha = manifest.get("sha256")
+    if ref.get("sha256", sha) != sha:
+        raise ValueError("来源对象哈希不匹配")
+    try:
+        text = read_snapshot(Path(repo), sha)
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("来源对象无法读取") from exc
+    locator = ref.get("locator")
+    if locator is not None and not isinstance(locator, dict):
+        raise ValueError("locator 必须为对象")
+    locator = locator or {}
+    start, end = locator.get("start_line"), locator.get("end_line")
+    fragment = text
+    if locator.get("type") == "line" or start is not None or end is not None:
+        end = start if end is None else end
+        if type(start) is not int or type(end) is not int:
+            raise ValueError("locator 行号必须为整数")
+        lines = snapshot_lines(text)
+        if not 1 <= start <= end <= len(lines):
+            raise ValueError(f"locator 越界：L{start}-L{end} 超出快照 {len(lines)} 行")
+        fragment = "".join(lines[start - 1:end])
+    if segment_id := ref.get("segment_id"):
+        from .extraction.segmenter import segment_text
+        segment = next((item for item in segment_text(text, source_format=manifest.get("format", "markdown"))
+                        if item.segment_id == segment_id), None)
+        if segment is None:
+            raise ValueError("segment_id 不存在")
+        if start is not None:
+            if not segment.locator.start_line <= start <= end <= segment.locator.end_line:
+                raise ValueError("locator 与 segment_id 指向不同片段")
+        if locator.get("type") != "line" or start is None:
+            fragment = segment.text
+    if "text_hash" in ref:
+        digest = hashlib.sha256(fragment.encode("utf-8")).hexdigest()
+        if ref["text_hash"] not in (digest, digest[:16]):
+            raise ValueError("text_hash 不匹配")
+    if "quote" in ref and (not fragment.strip() or ref["quote"] != fragment):
+        raise ValueError("quote 与所引用原文不匹配")
+    return fragment
 
 
 def find_by_path(repo: Path, source_path: str, scope: str = "") -> dict | None:

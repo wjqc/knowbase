@@ -449,7 +449,12 @@ def render(result):
     if result.get("candidates"):
         lines.append("[knowbase 执行中候选] 先核对适用条件，再按需 memory_read；命中不代表已经验证：")
         for c in result["candidates"]:
-            lines.append(f"- [{c['id']}] {c['summary']}；适用：{c['applicable_when']}；{c['confidence']}")
+            line = f"- [{c['id']}] {c['summary']}；适用：{c['applicable_when']}；{c['confidence']}"
+            if c.get("source_revalidation"):
+                line += "；源已更新，采信前复核"
+            if c.get("source_refs"):
+                line += "；出处 " + c["source_refs"][0]
+            lines.append(line)
     return "\n".join(lines)
 
 

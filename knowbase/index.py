@@ -285,7 +285,7 @@ def _scope_factor(m: dict, scope: str | None) -> float:
     return 1.2 if m["scope"] == "global" else 1.0
 
 
-def _fts_sanitize(term: str) -> str:
+def fts_term(term: str) -> str:
     """转义 FTS5 双引号内的特殊字符，返回安全的双引号包围短语。"""
     safe = term.replace('"', '""')
     return f'"{safe}"'
@@ -303,7 +303,7 @@ def _match_ids(conn: sqlite3.Connection, terms: list[str]) -> dict[str, float] |
     big = [t.replace('"', "") for t in terms if len(t) >= 3]
     if not big:
         return None
-    or_parts = " OR ".join(_fts_sanitize(t) for t in big)
+    or_parts = " OR ".join(fts_term(t) for t in big)
     try:
         rows = conn.execute(
             "SELECT id, rank FROM mem_fts WHERE mem_fts MATCH ? ORDER BY rank",
@@ -324,7 +324,7 @@ def _match_ids(conn: sqlite3.Connection, terms: list[str]) -> dict[str, float] |
             try:
                 sub_rows = conn.execute(
                     "SELECT id FROM mem_fts WHERE mem_fts MATCH ?",
-                    (_fts_sanitize(t),),
+                    (fts_term(t),),
                 ).fetchall()
                 for r in sub_rows:
                     hit_count[r[0]] = hit_count.get(r[0], 0) + 1

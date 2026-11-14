@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import config, index, store
+from . import config, index, sources, store
 
 MIN_PROMPT_LEN = 2
 MAX_HITS = 2
@@ -147,6 +147,8 @@ def user_prompt(prompt: str, project_dir=None, delivery_info=None, host_data=Non
             meta,body,_=store.load(rp,hit["id"])
             if meta and (not meta.get("verified_content_revision") or
                          meta.get("verified_content_revision")==_compute_revision(meta,body)):
+                hit["citations"] = sources.card_citations(meta, 1)
+                hit["source_changed"] = bool(sources.card_source_changes(conn, meta, 1))
                 version_safe.append(hit)
         kept, dropped_once = _tier_hits(conn, version_safe, min_conf)
         header = "[knowbase 自动检索] 本地候选；先核对项目、版本与证据，再按需 memory_read："
@@ -161,6 +163,10 @@ def user_prompt(prompt: str, project_dir=None, delivery_info=None, host_data=Non
             if sid and hit.get("content_revision"):
                 token = delivery.delivery_id_for(search_id, hit["id"], hit["content_revision"])
                 line += f' · memory_read(id="{hit["id"]}", delivery_id="{token}")'
+            if hit["source_changed"]:
+                line += " · 源已更新，采信前复核"
+            if hit["citations"]:
+                line += " · 出处 " + hit["citations"][0]
             if len("\n".join(lines + [line])) > budget:
                 continue
             lines.append(line)

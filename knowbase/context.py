@@ -53,8 +53,9 @@ def _candidate(repo, mid, scope, automatic, timeout):
                 "title":meta.get("title", ""),"summary":_summary(body),
                 "applicable_when":_section(body,"适用条件")[:300],
                 "confidence":meta.get("confidence", "once"),"status":meta["status"],
-                "source_refs": [t for t in (sources.describe_source_ref(ref)
-                                            for ref in meta.get("source_refs") or []) if t][:8]}
+                "source_refs": sources.card_citations(meta, 8),
+                "_source_refs": meta.get("source_refs") or []}
+
 
 
 def execute(repo, *, session_id: str, event_id: str, scope: str = "",
@@ -135,10 +136,13 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
             previous_coverage = json.loads(prior[3]) if prior else {}
             coverage = (previous_coverage if prior and prior[1] == task_revision else
                         {k: v for k, v in previous_coverage.items() if k.startswith("_hook_")})
-            knowledge_version = materials.digest(list(conn.execute(
+            source_version = conn.execute(
+                "SELECT max(updated_at) FROM source_documents WHERE scope IN (?, 'global')",
+                (scope,)).fetchone()[0]
+            knowledge_version = materials.digest([source_version, list(conn.execute(
                 "SELECT e.memory_id,e.content_hash,m.confidence,m.status,m.staging,h.content_revision FROM embedding_index e "
                 "JOIN meta m ON m.id=e.memory_id LEFT JOIN entity_heads h ON h.entity_id=m.id "
-                "WHERE m.scope IN (?, 'global') ORDER BY e.memory_id", (scope,))))
+                "WHERE m.scope IN (?, 'global') ORDER BY e.memory_id", (scope,)))])
             from .retrieval_policy import local_policy
             retrieval_policy, _ = local_policy()
             result["retrieval"] = dict(retrieval_policy)
@@ -211,7 +215,7 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                         try:
                             if remaining_time <= 0:
                                 raise LockTimeout("读取预算耗尽")
-                            candidate = _candidate(repo,hit["id"],scope,automatic,min(0.02,remaining_time))
+                            candidate = _candidate(repo, hit["id"], scope, automatic, min(0.02, remaining_time))
                         except LockTimeout:
                             completed.discard(query)
                             deferred_sync = True
@@ -220,6 +224,12 @@ def execute(repo, *, session_id: str, event_id: str, scope: str = "",
                             continue
                         if hit.get("content_revision") and candidate["content_revision"]!=hit["content_revision"]:
                             continue
+                        source_refs = candidate.pop("_source_refs")
+                        if source_refs:
+                            changes = sources.card_source_changes(conn, {"scope": candidate["scope"], "source_refs": source_refs})
+                            if changes:
+                                candidate["source_revalidation"] = changes
+                                candidate["mode"] = "validate_only"
                         candidate["topic_ids"] = [tid]
                         seen.add(hit["id"])
                         size = len(json.dumps(candidate, ensure_ascii=False))

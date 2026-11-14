@@ -158,7 +158,7 @@ def _validate_source_refs(source_refs: list, result: CandidateErrors,
 
         # source_id 必填
         source_id = ref.get("source_id")
-        if not source_id:
+        if not isinstance(source_id, str) or not source_id:
             result.errors.append(f"source_refs[{i}].source_id 必填")
             continue
 
@@ -175,12 +175,12 @@ def _validate_source_refs(source_refs: list, result: CandidateErrors,
 
         # segment_id 格式校验（如果提供）
         segment_id = ref.get("segment_id")
-        if segment_id and not re.match(r"^seg-\d{4}(-\d{2})?$", segment_id):
+        if segment_id and (not isinstance(segment_id, str) or not re.fullmatch(r"seg-\d{4}(-\d{2})?", segment_id)):
             result.warnings.append(f"source_refs[{i}].segment_id 格式异常: {segment_id}")
 
         # text_hash 格式校验（如果提供）
         text_hash = ref.get("text_hash")
-        if text_hash and not re.match(r"^[0-9a-f]{16}$", text_hash):
+        if text_hash and (not isinstance(text_hash, str) or not re.fullmatch(r"[0-9a-f]{16}(?:[0-9a-f]{48})?", text_hash)):
             result.warnings.append(f"source_refs[{i}].text_hash 格式异常: {text_hash}")
 
         # locator 格式校验（如果提供）

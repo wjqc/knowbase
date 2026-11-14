@@ -44,9 +44,10 @@ def _gate_check(result: dict) -> dict | None:
 def test_clean_reference_passes_recompute(memory_repo):
     repo = memory_repo
     sid, sha = _import_source(repo, "proj")
-    good_hash = hashlib.sha256(TEXT.encode()).hexdigest()
+    quoted = "".join(TEXT.splitlines(keepends=True)[:2])
+    good_hash = hashlib.sha256(quoted.encode()).hexdigest()
     rev = _write_card(repo, "P-2026-5001", "proj", [
-        {"source_id": sid, "sha256": sha, "text_hash": good_hash,
+        {"source_id": sid, "sha256": sha, "text_hash": good_hash, "quote": quoted,
          "locator": {"type": "line", "start_line": 1, "end_line": 2}}])
     conn = index.connect(repo)
     result = evaluate_admission(conn, repo, "P-2026-5001", rev)
@@ -58,7 +59,7 @@ def test_clean_reference_passes_recompute(memory_repo):
 def test_tampered_text_hash_rejected(memory_repo):
     repo = memory_repo
     sid, sha = _import_source(repo, "proj")
-    forged = hashlib.sha256("被篡改的引文".encode()).hexdigest()
+    forged = hashlib.sha256(TEXT.encode()).hexdigest()
     rev = _write_card(repo, "P-2026-5002", "proj", [
         {"source_id": sid, "sha256": sha, "text_hash": forged,
          "locator": {"type": "line", "start_line": 1, "end_line": 2}}])

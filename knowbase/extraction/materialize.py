@@ -72,9 +72,19 @@ def _candidate_errors(repo, candidate, scope, owned, delivered, manifest):
         errors.append("evidence_refs 必须为列表")
     else:
         for ref in refs:
-            if (not isinstance(ref, dict) or ref.get("segment_id") not in ids
-                    or ref.get("text_hash") != manifest.get(ref.get("segment_id"), {}).get("text_hash")):
+            if not isinstance(ref, dict) or ref.get("segment_id") not in ids:
                 errors.append("EVIDENCE_MISMATCH")
+                continue
+            segment = manifest.get(ref["segment_id"])
+            if not segment or ref.get("text_hash") != segment["text_hash"]:
+                errors.append("EVIDENCE_MISMATCH")
+                continue
+            if {"quote", "start_offset", "end_offset"} & ref.keys():
+                start, end, quote = ref.get("start_offset"), ref.get("end_offset"), ref.get("quote")
+                text = segment["text"]
+                if (type(start) is not int or type(end) is not int or not 0 <= start < end <= len(text)
+                        or not isinstance(quote, str) or not quote.strip() or text[start:end] != quote):
+                    errors.append("EVIDENCE_QUOTE_MISMATCH")
     if candidate.get("type") == "bizrule" and not isinstance(candidate.get("rule_context"), dict):
         errors.append("bizrule.rule_context 必填")
     if action in {"update", "link_existing"}:
@@ -121,15 +131,21 @@ def submit(repo, conn, job_id, batch_id, lease_token, request_id, candidates,
             conn.rollback()
             return batch
         scope = conn.execute("SELECT scope FROM jobs WHERE job_id=?", (job_id,)).fetchone()[0]
-        snapshot_row = conn.execute("SELECT similar_json FROM job_batches WHERE batch_id=?", (batch_id,)).fetchone()
-        baseline = json.loads(snapshot_row[0]) if snapshot_row else {}
+        frozen = conn.execute("SELECT similar_json,input_version,manifest_hash FROM job_batches WHERE batch_id=?",
+                              (batch_id,)).fetchone()
+        material = materials.payload_for_job(conn, job_id)
+        segments = material.get("segments", [])
+        if (material.get("input_version") != frozen[1] or materials.digest(segments) != frozen[2]):
+            conn.rollback()
+            return {"error": "MATERIAL_VERSION_CHANGED"}
+        baseline = json.loads(frozen[0])
         # 现算快照是刻意的在途新鲜度门（新增相似卡须重评估），勿改用建批存储值：
         # 2026-11-04 曾改存储值对比，被 test_related_new_card_requires_explicit_reassessment
         # 否决——去重安全优先于提交一致性。
         similar = materials.similar_snapshot(conn, baseline.get("query", ""), scope)
         snapshot_hash = materials.digest(similar)
         owned, delivered = set(batch["segment_ids"]), set(batch["delivered"])
-        manifest = {s["segment_id"]: s for s in materials.manifest_for_job(conn, job_id)}
+        manifest = {s["segment_id"]: s for s in segments}
         if not isinstance(candidates, list) or not isinstance(segment_results, list):
             conn.rollback()
             return {"error": "INVALID_SUBMISSION"}

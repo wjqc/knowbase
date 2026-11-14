@@ -439,6 +439,7 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
     """
     import hashlib
 
+    from . import credentials
     from .extraction.parsers import importable_extensions
 
     src_dir = Path(directory).expanduser()
@@ -502,12 +503,18 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
         if not body:
             skipped += 1
             continue
-        if store.SECRET_RE.search(body):
+        body = body.replace("\r\n", "\n").replace("\r", "\n")
+        if credentials.contains_credentials(body) or credentials.contains_credentials(f.name):
             skipped += 1
             print(f"  跳过（疑似明文凭据）：{f.name}")
             continue
         m = _re.search(r"^#\s+(.+)$", body, _re.M)
         title = (m.group(1).strip() if m else parsed_title or f.stem)[:80]
+
+        if credentials.contains_credentials(title):
+            skipped += 1
+            print(f"  跳过（标题疑似明文凭据）：{f.name}")
+            continue
 
         parsed_items.append({
             "file": f,
@@ -523,6 +530,8 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
         return 0
 
     # === 阶段 2：锁内复核 hash + 落库 ===
+    from .document_library import DocumentLibrary, MAX_TEXT_BYTES
+    library = DocumentLibrary(rp)
     imported = 0
     written_paths: list[Path] = []
     with RepoLock(rp, cfg.get("lock_timeout", 10.0)):
@@ -532,7 +541,8 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
             # 锁内复核：文件是否在解析期间被修改
             try:
                 current_mtime = f.stat().st_mtime
-                if current_mtime != item["raw_mtime"]:
+                if (current_mtime != item["raw_mtime"] or
+                        hashlib.sha256(f.read_bytes()).hexdigest() != item["raw_hash"]):
                     skipped += 1
                     print(f"  跳过（解析期间文件已变化）：{f.name}")
                     continue
@@ -547,18 +557,24 @@ def cmd_import(directory: str, dtype: str, scope: str, staging: bool, source: st
                 imported_by=source, kind=sources.kind_for(f.suffix),
                 source_modified_at=datetime.fromtimestamp(item["raw_mtime"]).isoformat(timespec="seconds"),
             )
-            if not created:
-                skipped += 1
-                print(f"  跳过（内容重复，已有 {sid}）：{f.name}")
-                continue
+            if len(item["body"].encode("utf-8")) <= MAX_TEXT_BYTES:
+                library.project_import(conn, root=src_dir, file=f, scope=scope, source_id=sid,
+                                       sha256=digest, raw_hash=item["raw_hash"],
+                                       text=item["body"], title=item["title"])
             index.record_source_state(
                 conn, str(f.resolve()), digest,
                 datetime.fromtimestamp(item["raw_mtime"]).isoformat(timespec="seconds"),
             )
+            if not created:
+                skipped += 1
+                print(f"  跳过（内容重复，已有 {sid}）：{f.name}")
+                continue
             written_paths.append(rp / sources.OBJECTS_DIR / f"{digest}.md")
             written_paths.append(rp / sources.MANIFESTS_DIR / f"{sid}.yaml")
             imported += 1
             print(f"  {sid}  {item['title'][:44]}")
+        library.record_source_drift(conn)
+        conn.commit()
         if imported:
             index.record_usage(conn, "import", detail=f"{imported} source artifacts from {src_dir.name}")
         conn.close()
